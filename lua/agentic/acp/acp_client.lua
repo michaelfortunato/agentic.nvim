@@ -803,7 +803,7 @@ return ACPClient
 --- @class agentic.acp.AgentMode
 --- @field id string
 --- @field name string
---- @field description string
+--- @field description? string
 
 --- @class agentic.acp.Model
 --- @field modelId string
