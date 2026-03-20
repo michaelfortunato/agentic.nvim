@@ -35,7 +35,6 @@ describe("object utils", function()
     it(
         "merges config with default config with keymaps overrides instead of merge",
         function()
-            --- @type agentic.UserConfig
             local default_config = {
                 option1 = true,
                 option2 = {
@@ -119,6 +118,7 @@ describe("object utils", function()
             }
 
             local merged_config =
+                ---@diagnostic disable-next-line: param-type-mismatch
                 Object.merge_config(default_config, user_config)
 
             assert.same(expected_merged_config, merged_config)
@@ -153,6 +153,7 @@ describe("object utils", function()
             }
 
             local merged_config =
+                ---@diagnostic disable-next-line: param-type-mismatch
                 Object.merge_config(default_config, user_config)
             assert.same(expected_merged_config, merged_config)
         end)
