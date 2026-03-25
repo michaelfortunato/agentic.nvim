@@ -34,9 +34,8 @@ local WindowDecoration = {}
 local WINDOW_HEADERS = {
     chat = {
         title = "󰻞 Agentic Chat",
-        suffix = "<S-Tab>: change mode",
     },
-    input = { title = "󰦨 Prompt", suffix = "<C-s>: submit" },
+    input = { title = "󰦨 Prompt", suffix = "<S-Tab>: config · <C-s>: submit" },
     code = {
         title = "󰪸 Selected Code Snippets",
         suffix = "d: remove block",
@@ -59,9 +58,9 @@ local WINDOW_HEADERS = {
 --- @field hl? string Highlight group for the header text
 --- @field reverse_hl? string Highlight group for the separator
 local default_config = {
-    align = "center",
+    align = "left",
     hl = Theme.HL_GROUPS.WIN_BAR_TITLE,
-    reverse_hl = "NormalFloat",
+    reverse_hl = Theme.HL_GROUPS.WIN_BAR_HINT,
 }
 
 --- Concatenates header parts (title, context, suffix) into a single string
@@ -69,13 +68,87 @@ local default_config = {
 --- @return string header_text
 local function concat_header_parts(parts)
     local pieces = { parts.title }
-    if parts.context ~= nil then
+    if parts.context ~= nil and parts.context ~= "" then
         table.insert(pieces, parts.context)
     end
-    if parts.suffix ~= nil then
+    if parts.suffix ~= nil and parts.suffix ~= "" then
         table.insert(pieces, parts.suffix)
     end
     return table.concat(pieces, " | ")
+end
+
+--- @param text string
+--- @return string
+local function escape_status_text(text)
+    return tostring(text):gsub("%%", "%%%%")
+end
+
+--- @param option string
+--- @return table<string, string>
+local function parse_option_map(option)
+    local items = {}
+    for entry in vim.gsplit(option or "", ",", { plain = true }) do
+        if entry ~= "" then
+            local key, value = entry:match("^([^:]+):(.*)$")
+            if key and value then
+                items[key] = value
+            end
+        end
+    end
+    return items
+end
+
+--- @param items table<string, string>
+--- @return string
+local function serialize_option_map(items)
+    local parts = {}
+    for key, value in pairs(items) do
+        parts[#parts + 1] = key .. ":" .. value
+    end
+    table.sort(parts)
+    return table.concat(parts, ",")
+end
+
+--- @param parts agentic.ui.ChatWidget.HeaderParts
+--- @param base_hl string
+--- @return string
+local function build_structured_status_text(parts, base_hl)
+    local segments = {
+        string.format(
+            "%%#%s# %s ",
+            Theme.HL_GROUPS.WIN_BAR_TITLE,
+            escape_status_text(parts.title)
+        ),
+    }
+
+    if parts.context and parts.context ~= "" then
+        segments[#segments + 1] = string.format(
+            "%%#%s# %s ",
+            Theme.HL_GROUPS.WIN_BAR_CONTEXT,
+            escape_status_text(parts.context)
+        )
+    end
+
+    local text = string.format("%%#%s#", base_hl) .. table.concat(segments)
+
+    if parts.suffix and parts.suffix ~= "" then
+        text = text
+            .. "%="
+            .. string.format(
+                "%%#%s# %s ",
+                Theme.HL_GROUPS.WIN_BAR_HINT,
+                escape_status_text(parts.suffix)
+            )
+    end
+
+    return text
+end
+
+--- @param text string
+--- @param base_hl string
+--- @return string
+local function build_fallback_status_text(text, base_hl)
+    return string.format("%%#%s# %s ", base_hl, escape_status_text(text))
 end
 
 --- Gets or initializes headers for a tabpage
@@ -83,7 +156,7 @@ end
 --- @return agentic.ui.ChatWidget.Headers
 function WindowDecoration.get_headers_state(tab_page_id)
     if vim.t[tab_page_id].agentic_headers == nil then
-        vim.t[tab_page_id].agentic_headers = WINDOW_HEADERS
+        vim.t[tab_page_id].agentic_headers = vim.deepcopy(WINDOW_HEADERS)
     end
     return vim.t[tab_page_id].agentic_headers
 end
@@ -97,24 +170,27 @@ function WindowDecoration.set_headers_state(tab_page_id, headers)
     end
 end
 
---- Resolves the final header text applying user customization
---- Returns the header text and an error message if user function failed
+--- Resolves the final header state applying user customization
 --- @param dynamic_header agentic.ui.ChatWidget.HeaderParts Runtime header parts
 --- @param window_name string Window name for Config.headers lookup and error messages
+--- @return agentic.ui.ChatWidget.HeaderParts|nil header_parts Structured header data when available
 --- @return string|nil header_text The resolved header text or nil for empty
 --- @return string|nil error_message Error message if user function failed
-local function resolve_header_text(dynamic_header, window_name)
+local function resolve_header(dynamic_header, window_name)
     local user_header = Config.headers and Config.headers[window_name]
     -- No user customization: use default parts
     if user_header == nil then
-        return concat_header_parts(dynamic_header), nil
+        return vim.deepcopy(dynamic_header),
+            concat_header_parts(dynamic_header),
+            nil
     end
 
     -- User function: call it and validate return
     if type(user_header) == "function" then
         local ok, result = pcall(user_header, dynamic_header)
         if not ok then
-            return concat_header_parts(dynamic_header),
+            return vim.deepcopy(dynamic_header),
+                concat_header_parts(dynamic_header),
                 string.format(
                     "Error in custom header function for '%s': %s",
                     window_name,
@@ -122,27 +198,29 @@ local function resolve_header_text(dynamic_header, window_name)
                 )
         end
         if result == nil or result == "" then
-            return nil, nil -- User explicitly wants no header
+            return nil, nil, nil -- User explicitly wants no header
         end
         if type(result) ~= "string" then
-            return concat_header_parts(dynamic_header),
+            return vim.deepcopy(dynamic_header),
+                concat_header_parts(dynamic_header),
                 string.format(
                     "Custom header function for '%s' must return string|nil, got %s",
                     window_name,
                     type(result)
                 )
         end
-        return result, nil
+        return nil, result, nil
     end
 
     -- User table: merge with dynamic header
     if type(user_header) == "table" then
         local merged = vim.tbl_extend("force", dynamic_header, user_header) --[[@as agentic.ui.ChatWidget.HeaderParts]]
-        return concat_header_parts(merged), nil
+        return merged, concat_header_parts(merged), nil
     end
 
     -- Invalid type: warn and use default
-    return concat_header_parts(dynamic_header),
+    return vim.deepcopy(dynamic_header),
+        concat_header_parts(dynamic_header),
         string.format(
             "Header for '%s' must be function|table|nil, got %s",
             window_name,
@@ -150,49 +228,59 @@ local function resolve_header_text(dynamic_header, window_name)
         )
 end
 
---- Cache if there's a lualine like plugin managing the winbar
---- @type boolean|nil
-local has_line_plugin = nil
-
 --- @param winid integer
---- @param text string
-local function set_winbar(winid, text)
+--- @param header_parts agentic.ui.ChatWidget.HeaderParts|nil
+--- @param header_text string
+local function set_winbar(winid, header_parts, header_text)
     if not winid or not vim.api.nvim_win_is_valid(winid) then
         return
     end
 
-    -- If winbar is already set (not empty), a plugin like lualine is managing it
-    -- Skip setting ours to prevent flickering
-    if has_line_plugin == nil then
-        local current_winbar = vim.wo[winid].winbar
-        has_line_plugin = current_winbar ~= ""
-    end
-
-    if has_line_plugin then
-        return
-    end
-
-    -- Handle empty string case - disable winbar completely
-    if text == "" then
-        vim.api.nvim_set_option_value("winbar", nil, { win = winid })
+    if header_text == "" then
+        vim.api.nvim_set_option_value("winbar", " ", { win = winid })
         return
     end
 
     local opts = default_config
-
-    local winbar_text = string.format("%%#%s# %s %%#Normal#", opts.hl, text)
-
-    if opts.align == "left" then
-        winbar_text = winbar_text .. "%="
-    elseif opts.align == "center" then
-        winbar_text = "%=" .. winbar_text .. "%="
-    elseif opts.align == "right" then
-        winbar_text = "%=" .. winbar_text
+    local winbar_text
+    if header_parts then
+        winbar_text = build_structured_status_text(header_parts, opts.hl)
+    else
+        winbar_text = build_fallback_status_text(header_text, opts.hl)
     end
 
-    winbar_text = "%#Normal#" .. winbar_text
-
     vim.api.nvim_set_option_value("winbar", winbar_text, { win = winid })
+end
+
+--- @param winid integer
+--- @param header_parts agentic.ui.ChatWidget.HeaderParts|nil
+--- @param header_text string
+local function set_statusline(winid, header_parts, header_text)
+    if not winid or not vim.api.nvim_win_is_valid(winid) then
+        return
+    end
+
+    if header_text == "" then
+        vim.api.nvim_set_option_value("statusline", " ", { win = winid })
+        return
+    end
+
+    local statusline_text
+    if header_parts then
+        statusline_text = build_structured_status_text(
+            header_parts,
+            Theme.HL_GROUPS.STATUS_LINE
+        )
+    else
+        statusline_text =
+            build_fallback_status_text(header_text, Theme.HL_GROUPS.STATUS_LINE)
+    end
+
+    vim.api.nvim_set_option_value(
+        "statusline",
+        statusline_text,
+        { win = winid }
+    )
 end
 
 --- Sets the buffer name based on header text and tab count
@@ -216,6 +304,24 @@ local function set_buffer_name(bufnr, header_text, tab_page_id)
     end
 
     vim.api.nvim_buf_set_name(bufnr, buf_name)
+end
+
+--- @param winid integer
+function WindowDecoration.apply_window_style(winid)
+    if not winid or not vim.api.nvim_win_is_valid(winid) then
+        return
+    end
+
+    local winhl = parse_option_map(vim.wo[winid].winhighlight)
+    winhl.WinSeparator = Theme.HL_GROUPS.WIN_SEPARATOR
+    winhl.StatusLine = Theme.HL_GROUPS.STATUS_LINE
+    winhl.StatusLineNC = Theme.HL_GROUPS.STATUS_LINE
+
+    vim.api.nvim_set_option_value(
+        "winhighlight",
+        serialize_option_map(winhl),
+        { win = winid }
+    )
 end
 
 --- Renders a header for a window, handling user customization, winbar, and buffer naming
@@ -253,8 +359,8 @@ function WindowDecoration.render_header(bufnr, window_name, context)
             WindowDecoration.set_headers_state(tab_page_id, headers)
         end
 
-        local header_text, err =
-            resolve_header_text(dynamic_header, window_name)
+        local header_parts, header_text, err =
+            resolve_header(dynamic_header, window_name)
 
         if err then
             Logger.notify(err)
@@ -262,7 +368,9 @@ function WindowDecoration.render_header(bufnr, window_name, context)
 
         local text = (header_text and header_text ~= "") and header_text or ""
 
-        set_winbar(winid, text)
+        WindowDecoration.apply_window_style(winid)
+        set_winbar(winid, header_parts, text)
+        set_statusline(winid, header_parts, text)
         set_buffer_name(bufnr, header_text, tab_page_id)
     end)
 end

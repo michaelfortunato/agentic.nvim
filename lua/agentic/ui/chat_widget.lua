@@ -1,6 +1,7 @@
 local Config = require("agentic.config")
 local BufHelpers = require("agentic.utils.buf_helpers")
 local DiffPreview = require("agentic.ui.diff_preview")
+local ChatViewport = require("agentic.ui.chat_viewport")
 local Logger = require("agentic.utils.logger")
 local WindowDecoration = require("agentic.ui.window_decoration")
 local WidgetLayout = require("agentic.ui.widget_layout")
@@ -37,6 +38,7 @@ local WidgetLayout = require("agentic.ui.widget_layout")
 --- @field buf_nrs agentic.ui.ChatWidget.BufNrs
 --- @field win_nrs agentic.ui.ChatWidget.WinNrs
 --- @field on_submit_input fun(prompt: string) external callback to be called when user submits the input
+--- @field _chat_viewport agentic.ui.ChatViewport
 local ChatWidget = {}
 ChatWidget.__index = ChatWidget
 
@@ -46,11 +48,21 @@ function ChatWidget:new(tab_page_id, on_submit_input)
     self = setmetatable({}, self)
 
     self.win_nrs = {}
-
+    self._header_contexts = {}
+    self._header_overlays = {}
     self.on_submit_input = on_submit_input
     self.tab_page_id = tab_page_id
 
     self:_initialize()
+    self._chat_viewport = ChatViewport:new({
+        tab_page_id = tab_page_id,
+        get_chat_winid = function()
+            return self.win_nrs.chat
+        end,
+        set_unread_context = function(context)
+            self:_set_header_overlay("chat", context)
+        end,
+    })
     self:_bind_events_to_change_headers()
 
     return self
@@ -81,6 +93,8 @@ function ChatWidget:show(opts)
         win_nrs = self.win_nrs,
         focus_prompt = opts.focus_prompt,
     })
+
+    self:_restore_chat_window_view()
 end
 
 --- @param layouts agentic.UserConfig.Windows.Position[]|nil
@@ -156,6 +170,7 @@ function ChatWidget:hide()
         end
     end
 
+    self:_store_chat_view()
     WidgetLayout.close(self.win_nrs)
 end
 
@@ -182,6 +197,9 @@ end
 --- This instance is no longer usable after calling this method
 function ChatWidget:destroy()
     self:hide()
+    self._chat_viewport:destroy()
+    self._header_contexts = {}
+    self._header_overlays = {}
 
     for name, bufnr in pairs(self.buf_nrs) do
         self.buf_nrs[name] = nil
@@ -198,6 +216,39 @@ function ChatWidget:destroy()
     end
 end
 
+--- @param window_name agentic.ui.ChatWidget.PanelNames
+--- @return string|nil
+function ChatWidget:_get_effective_header_context(window_name)
+    local overlay = self._header_overlays[window_name]
+    local base = self._header_contexts[window_name]
+
+    if overlay and overlay ~= "" then
+        if base and base ~= "" then
+            return string.format("%s · %s", overlay, base)
+        end
+
+        return overlay
+    end
+
+    return base
+end
+
+--- @param window_name agentic.ui.ChatWidget.PanelNames
+--- @param context string|nil
+function ChatWidget:_set_header_overlay(window_name, context)
+    self._header_overlays[window_name] = context
+    self:render_header(window_name)
+end
+
+--- @param message_writer agentic.ui.MessageWriter
+function ChatWidget:bind_message_writer(message_writer)
+    self._chat_viewport:bind_message_writer(message_writer)
+end
+
+function ChatWidget:_unbind_message_writer()
+    self._chat_viewport:unbind_message_writer()
+end
+
 function ChatWidget:_submit_input()
     vim.cmd("stopinsert")
 
@@ -212,25 +263,32 @@ function ChatWidget:_submit_input()
 
     vim.api.nvim_buf_set_lines(self.buf_nrs.input, 0, -1, false, {})
 
-    BufHelpers.with_modifiable(self.buf_nrs.code, function(bufnr)
-        vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, {})
-    end)
-
-    BufHelpers.with_modifiable(self.buf_nrs.files, function(bufnr)
-        vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, {})
-    end)
-
-    BufHelpers.with_modifiable(self.buf_nrs.diagnostics, function(bufnr)
-        vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, {})
-    end)
+    for _, panel_name in ipairs({ "code", "files", "diagnostics" }) do
+        BufHelpers.with_modifiable(self.buf_nrs[panel_name], function(bufnr)
+            vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, {})
+        end)
+    end
 
     self.on_submit_input(prompt)
 
-    self:close_optional_window("code")
-    self:close_optional_window("files")
-    self:close_optional_window("diagnostics")
-    -- Move cursor to chat buffer after submit for easy access to permission requests
-    self:move_cursor_to(self.win_nrs.chat)
+    for _, panel_name in ipairs({ "code", "files", "diagnostics" }) do
+        self:close_optional_window(panel_name)
+    end
+
+    if Config.settings.move_cursor_to_chat_on_submit then
+        self:move_cursor_to(self.win_nrs.chat)
+    end
+end
+
+--- @param winid integer|nil
+local function scroll_window_to_bottom(winid)
+    if not winid or not vim.api.nvim_win_is_valid(winid) then
+        return
+    end
+
+    local bufnr = vim.api.nvim_win_get_buf(winid)
+    local last_line = math.max(1, vim.api.nvim_buf_line_count(bufnr))
+    vim.api.nvim_win_set_cursor(winid, { last_line, 0 })
 end
 
 --- @param winid integer|nil
@@ -238,16 +296,16 @@ end
 function ChatWidget:move_cursor_to(winid, callback)
     vim.schedule(function()
         if winid and vim.api.nvim_win_is_valid(winid) then
-            if Config.settings.move_cursor_to_chat_on_submit then
-                vim.api.nvim_set_current_win(winid)
-            end
+            vim.api.nvim_set_current_win(winid)
 
             -- make sure to scroll to the bottom
             -- 1. user can see the new message
             -- 2. auto-scroll will start again
-            vim.api.nvim_win_call(winid, function()
-                vim.cmd("normal! G0zb")
-            end)
+            if winid == self.win_nrs.chat then
+                self:scroll_chat_to_bottom()
+            else
+                scroll_window_to_bottom(winid)
+            end
 
             if callback then
                 callback()
@@ -256,9 +314,22 @@ function ChatWidget:move_cursor_to(winid, callback)
     end)
 end
 
+function ChatWidget:focus_input()
+    vim.schedule(function()
+        self:scroll_chat_to_bottom()
+
+        local winid = self.win_nrs.input
+        if not winid or not vim.api.nvim_win_is_valid(winid) then
+            return
+        end
+
+        vim.api.nvim_set_current_win(winid)
+        BufHelpers.start_insert_on_last_char()
+    end)
+end
+
 function ChatWidget:_initialize()
     self.buf_nrs = self:_create_buf_nrs()
-
     self:_bind_keymaps()
 
     -- I only want to trigger a full close of the chat widget when closing the chat or the input buffers, the others are auxiliary
@@ -273,6 +344,28 @@ function ChatWidget:_initialize()
             end,
         })
     end
+end
+
+--- @return boolean
+function ChatWidget:_update_chat_follow_output()
+    return self._chat_viewport:update_follow_output()
+end
+
+function ChatWidget:_store_chat_view()
+    self._chat_viewport:store_view()
+end
+
+function ChatWidget:_restore_chat_window_view()
+    self._chat_viewport:restore_view()
+end
+
+--- @return boolean
+function ChatWidget:should_follow_chat_output()
+    return self._chat_viewport:should_follow_output()
+end
+
+function ChatWidget:scroll_chat_to_bottom()
+    self._chat_viewport:scroll_to_bottom()
 end
 
 function ChatWidget:_bind_keymaps()
@@ -338,10 +431,7 @@ function ChatWidget:_bind_keymaps()
                 "X",
             }) do
                 BufHelpers.keymap_set(bufnr, "n", key, function()
-                    self:move_cursor_to(
-                        self.win_nrs.input,
-                        BufHelpers.start_insert_on_last_char
-                    )
+                    self:focus_input()
                 end)
             end
         end
@@ -377,12 +467,9 @@ function ChatWidget:_create_buf_nrs()
         modifiable = true,
     })
 
-    -- Don't call it for the chat buffer as its managed somewhere else
-    pcall(vim.treesitter.start, todos, "markdown")
-    pcall(vim.treesitter.start, code, "markdown")
-    pcall(vim.treesitter.start, files, "markdown")
-    pcall(vim.treesitter.start, diagnostics, "markdown")
-    pcall(vim.treesitter.start, input, "markdown")
+    -- Keep Treesitter/highlighting scoped to AgenticChat. These side buffers are
+    -- rewritten frequently and can contain partial markdown/code fences, which
+    -- is enough to trigger markdown injection/conceal bugs on recent Neovim.
 
     --- @type agentic.ui.ChatWidget.BufNrs
     local buf_nrs = {
@@ -449,6 +536,26 @@ end
 function ChatWidget:_bind_events_to_change_headers()
     local tab_page_id = self.tab_page_id
 
+    local function build_input_suffix(mode)
+        local parts = {}
+        local steer_key = find_keymap(Config.keymaps.widget.change_mode, mode)
+        local submit_key = find_keymap(Config.keymaps.prompt.submit, mode)
+
+        if steer_key ~= nil then
+            parts[#parts + 1] = string.format("%s: config", steer_key)
+        end
+
+        if submit_key ~= nil then
+            parts[#parts + 1] = string.format("%s: submit", submit_key)
+        end
+
+        if #parts == 0 then
+            return nil
+        end
+
+        return table.concat(parts, " · ")
+    end
+
     for _, bufnr in ipairs({ self.buf_nrs.chat, self.buf_nrs.input }) do
         vim.api.nvim_create_autocmd("ModeChanged", {
             buffer = bufnr,
@@ -465,25 +572,8 @@ function ChatWidget:_bind_events_to_change_headers()
                         WindowDecoration.get_headers_state(tab_page_id)
 
                     local mode = vim.fn.mode()
-                    local change_mode_key =
-                        find_keymap(Config.keymaps.widget.change_mode, mode)
-
-                    if change_mode_key ~= nil then
-                        headers.chat.suffix =
-                            string.format("%s: change mode", change_mode_key)
-                    else
-                        headers.chat.suffix = nil
-                    end
-
-                    local submit_key =
-                        find_keymap(Config.keymaps.prompt.submit, mode)
-
-                    if submit_key ~= nil then
-                        headers.input.suffix =
-                            string.format("%s: submit", submit_key)
-                    else
-                        headers.input.suffix = nil
-                    end
+                    headers.chat.suffix = nil
+                    headers.input.suffix = build_input_suffix(mode)
 
                     -- Reassign to persist changes
                     WindowDecoration.set_headers_state(tab_page_id, headers)
@@ -504,7 +594,15 @@ function ChatWidget:render_header(window_name, context)
         return
     end
 
-    WindowDecoration.render_header(bufnr, window_name, context)
+    if context ~= nil then
+        self._header_contexts[window_name] = context
+    end
+
+    WindowDecoration.render_header(
+        bufnr,
+        window_name,
+        self:_get_effective_header_context(window_name)
+    )
 end
 
 --- @param panel_name agentic.ui.ChatWidget.PanelNames
@@ -582,8 +680,13 @@ end
 
 --- Opens a new window on the left side with full height
 --- @param bufnr number|nil The buffer to display in the new window
+--- @param enter boolean|nil Whether the new window should take focus
 --- @return number|nil winid The newly created window ID or nil on failure
-function ChatWidget:open_left_window(bufnr)
+function ChatWidget:open_left_window(bufnr, enter)
+    if enter == nil then
+        enter = true
+    end
+
     if bufnr == nil then
         -- Try alternate buffer first, but skip if it's a widget buffer or excluded filetype
         local alt_bufnr = vim.fn.bufnr("#")
@@ -626,7 +729,7 @@ function ChatWidget:open_left_window(bufnr)
         bufnr = vim.api.nvim_create_buf(false, true)
     end
 
-    local ok, winid = pcall(vim.api.nvim_open_win, bufnr, true, {
+    local ok, winid = pcall(vim.api.nvim_open_win, bufnr, enter, {
         split = "left",
         win = -1,
     })

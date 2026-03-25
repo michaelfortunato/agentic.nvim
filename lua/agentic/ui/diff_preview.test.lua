@@ -3,6 +3,7 @@ local spy_module = require("tests.helpers.spy")
 local DiffPreview = require("agentic.ui.diff_preview")
 local Config = require("agentic.config")
 local FileSystem = require("agentic.utils.file_system")
+local HunkNavigation = require("agentic.ui.hunk_navigation")
 local Logger = require("agentic.utils.logger")
 
 describe("diff_preview", function()
@@ -66,6 +67,105 @@ describe("diff_preview", function()
                 assert.spy(get_winid_spy).was.called(0)
                 -- Should not show a warning notification
                 assert.spy(notify_spy).was.called(0)
+            end
+        )
+
+        it(
+            "renders inline review in a visible non-current window while typing elsewhere",
+            function()
+                local file_path = "/tmp/test_diff_preview_visible.lua"
+                local file_bufnr = vim.api.nvim_get_current_buf()
+                vim.api.nvim_buf_set_name(file_bufnr, file_path)
+                vim.api.nvim_buf_set_lines(file_bufnr, 0, -1, false, {
+                    "local x = 1",
+                    "print(x)",
+                    "",
+                })
+
+                vim.cmd("vsplit")
+                local prompt_bufnr = vim.api.nvim_create_buf(false, true)
+                vim.api.nvim_win_set_buf(
+                    vim.api.nvim_get_current_win(),
+                    prompt_bufnr
+                )
+
+                DiffPreview.show_diff({
+                    file_path = file_path,
+                    diff = {
+                        old = { "local x = 1", "print(x)", "" },
+                        new = { "local x = 2", "print(x)", "" },
+                    },
+                    get_winid = get_winid_spy --[[@as function]],
+                })
+
+                local diff_extmarks = vim.api.nvim_buf_get_extmarks(
+                    file_bufnr,
+                    HunkNavigation.NS_DIFF,
+                    0,
+                    -1,
+                    { details = true }
+                )
+                local review_extmarks = vim.api.nvim_buf_get_extmarks(
+                    file_bufnr,
+                    DiffPreview.NS_REVIEW,
+                    0,
+                    -1,
+                    { details = true }
+                )
+
+                assert.truthy(#diff_extmarks > 0)
+                assert.truthy(#review_extmarks > 0)
+                assert.spy(get_winid_spy).was.called(0)
+
+                vim.cmd("only")
+                vim.api.nvim_buf_delete(prompt_bufnr, { force = true })
+            end
+        )
+
+        it(
+            "opens a hidden review target without stealing prompt focus",
+            function()
+                local file_path = "/tmp/test_diff_preview_hidden.lua"
+                local prompt_winid = vim.api.nvim_get_current_win()
+
+                vim.cmd("vsplit")
+                local review_winid = vim.api.nvim_get_current_win()
+                vim.api.nvim_set_current_win(prompt_winid)
+
+                local open_target_spy = spy_module.new(function(bufnr)
+                    vim.api.nvim_win_set_buf(review_winid, bufnr)
+                    return review_winid
+                end)
+
+                DiffPreview.show_diff({
+                    file_path = file_path,
+                    diff = {
+                        old = { "local x = 1", "print(x)", "" },
+                        new = { "local x = 2", "print(x)", "" },
+                    },
+                    get_winid = open_target_spy --[[@as function]],
+                })
+
+                assert.spy(open_target_spy).was.called(1)
+                assert.equal(prompt_winid, vim.api.nvim_get_current_win())
+
+                local hidden_bufnr = vim.fn.bufnr(file_path)
+                if
+                    hidden_bufnr ~= -1
+                    and vim.api.nvim_buf_is_valid(hidden_bufnr)
+                then
+                    local review_extmarks = vim.api.nvim_buf_get_extmarks(
+                        hidden_bufnr,
+                        DiffPreview.NS_REVIEW,
+                        0,
+                        -1,
+                        { details = true }
+                    )
+                    assert.truthy(#review_extmarks > 0)
+                    vim.api.nvim_buf_delete(hidden_bufnr, { force = true })
+                end
+
+                vim.cmd("only")
             end
         )
     end)

@@ -1,5 +1,9 @@
-local BufHelpers = require("agentic.utils.buf_helpers")
+local Chooser = require("agentic.ui.chooser")
+local Config = require("agentic.config")
 local Logger = require("agentic.utils.logger")
+local SessionEvents = require("agentic.session.session_events")
+local SessionSelectors = require("agentic.session.session_selectors")
+local SessionState = require("agentic.session.session_state")
 
 -- Priority order for permission option kinds based on ACP tool-calls documentation
 -- Lower number = higher priority (appears first)
@@ -16,26 +20,39 @@ local PERMISSION_KIND_PRIORITY = {
 }
 
 --- @class agentic.ui.PermissionManager
---- @field message_writer agentic.ui.MessageWriter Reference to MessageWriter instance
+--- @field session_state agentic.session.SessionState
 --- @field queue table[] Queue of pending requests {toolCallId, request, callback}
---- @field current_request? agentic.ui.PermissionManager.PermissionRequest Currently displayed request with button positions
---- @field keymap_info table[] Keymap info for cleanup {mode, lhs}
---- @field _reanchoring boolean Guard flag to prevent recursive on_content_changed during reanchor
+--- @field current_request? agentic.ui.PermissionManager.PermissionRequest Currently displayed request
+--- @field _chooser_tabpage? integer
+--- @field _state_listener_id? integer
 local PermissionManager = {}
 PermissionManager.__index = PermissionManager
 
---- @param message_writer agentic.ui.MessageWriter
+--- @param session_state agentic.session.SessionState|nil
 --- @return agentic.ui.PermissionManager
-function PermissionManager:new(message_writer)
+function PermissionManager:new(session_state)
     local instance = setmetatable({
-        message_writer = message_writer,
+        session_state = session_state or SessionState:new(),
         queue = {},
         current_request = nil,
-        keymap_info = {},
-        _reanchoring = false,
+        _chooser_tabpage = nil,
+        _state_listener_id = nil,
     }, self)
 
+    instance:_sync_state()
+    instance._state_listener_id =
+        instance.session_state:subscribe(function(state)
+            instance:_sync_state(state)
+        end)
+
     return instance
+end
+
+--- @param state agentic.session.State|nil
+function PermissionManager:_sync_state(state)
+    state = state or self.session_state:get_state()
+    self.queue = SessionSelectors.get_permission_queue(state)
+    self.current_request = SessionSelectors.get_current_permission(state)
 end
 
 --- Add a new permission request to the queue to be processed sequentially
@@ -49,8 +66,28 @@ function PermissionManager:add_request(request, callback)
         return
     end
 
-    local toolCallId = request.toolCall.toolCallId
-    table.insert(self.queue, { toolCallId, request, callback })
+    local tool_call_id = request.toolCall.toolCallId
+    if self.current_request and self.current_request.toolCallId == tool_call_id then
+        Logger.debug(
+            "PermissionManager: ignoring duplicate permission request",
+            tool_call_id
+        )
+        return
+    end
+
+    for _, item in ipairs(self.queue) do
+        if item.toolCallId == tool_call_id then
+            Logger.debug(
+                "PermissionManager: ignoring duplicate permission request",
+                tool_call_id
+            )
+            return
+        end
+    end
+
+    self.session_state:dispatch(
+        SessionEvents.enqueue_permission(request, callback)
+    )
 
     if not self.current_request then
         self:_process_next()
@@ -58,80 +95,85 @@ function PermissionManager:add_request(request, callback)
 end
 
 function PermissionManager:_process_next()
-    if #self.queue == 0 then
+    if self.current_request or #self.queue == 0 then
         return
     end
 
-    local item = table.remove(self.queue, 1)
-    local toolCallId = item[1]
-    local request = item[2]
-    local callback = item[3]
+    self.session_state:dispatch(SessionEvents.show_next_permission())
+
+    local current = self.current_request
+    if not current then
+        return
+    end
+
+    local request = current.request
     local sorted_options = self._sort_permission_options(request.options)
+    self:_show_chooser(current.toolCallId, sorted_options)
+end
 
-    local button_start_row, button_end_row, option_mapping =
-        self.message_writer:display_permission_buttons(
-            request.toolCall.toolCallId,
-            sorted_options
-        )
+--- @param tool_call_id string
+--- @return string
+function PermissionManager:_build_prompt(tool_call_id)
+    local tool_call = SessionSelectors.get_tool_call(
+        self.session_state:get_state(),
+        tool_call_id
+    )
 
-    ---@class agentic.ui.PermissionManager.PermissionRequest
-    self.current_request = {
-        toolCallId = toolCallId,
-        request = request,
-        callback = callback,
-        button_start_row = button_start_row,
-        button_end_row = button_end_row,
-        option_mapping = option_mapping,
-    }
+    if tool_call and tool_call.kind then
+        return string.format("Approve %s?", tool_call.kind)
+    end
 
-    self:_setup_keymaps(option_mapping)
+    return "Approval required"
+end
 
-    self.message_writer:set_on_content_changed(function()
-        self:_reanchor_permission_prompt()
+--- @param option agentic.acp.PermissionOption
+--- @return string
+function PermissionManager:_format_option(option)
+    local icon = Config.permission_icons[option.kind]
+    if icon and icon ~= "" then
+        return string.format("%s %s", icon, option.name)
+    end
+
+    return option.name
+end
+
+--- @param options agentic.acp.PermissionOption[]
+--- @return agentic.acp.PermissionOption|nil
+function PermissionManager:_find_default_reject_option(options)
+    for _, option in ipairs(options) do
+        if option.kind == "reject_once" or option.kind == "reject_always" then
+            return option
+        end
+    end
+
+    return nil
+end
+
+--- @param tool_call_id string
+--- @param options agentic.acp.PermissionOption[]
+function PermissionManager:_show_chooser(tool_call_id, options)
+    self:_close_chooser()
+
+    self._chooser_tabpage = vim.api.nvim_get_current_tabpage()
+    Chooser.show(options, {
+        prompt = self:_build_prompt(tool_call_id),
+        format_item = function(option)
+            return self:_format_option(option)
+        end,
+        max_height = math.min(#options, 6),
+        escape_choice = self:_find_default_reject_option(options),
+    }, function(choice)
+        self:_complete_request(choice and choice.optionId or nil)
     end)
 end
 
-function PermissionManager:_reanchor_permission_prompt()
-    if self._reanchoring or not self.current_request then
+function PermissionManager:_close_chooser()
+    if self._chooser_tabpage == nil then
         return
     end
 
-    self._reanchoring = true
-
-    --- @type agentic.ui.PermissionManager.PermissionRequest
-    local current = self.current_request
-
-    local ok, err = pcall(function()
-        self.message_writer:remove_permission_buttons(
-            current.button_start_row,
-            current.button_end_row
-        )
-        self:_remove_keymaps()
-
-        local sorted_options =
-            self._sort_permission_options(current.request.options)
-
-        local button_start_row, button_end_row, option_mapping =
-            self.message_writer:display_permission_buttons(
-                current.request.toolCall.toolCallId,
-                sorted_options
-            )
-
-        current.button_start_row = button_start_row
-        current.button_end_row = button_end_row
-        current.option_mapping = option_mapping
-
-        self:_setup_keymaps(option_mapping)
-    end)
-
-    self._reanchoring = false
-
-    if not ok then
-        Logger.notify(
-            "Error during permission prompt reanchor: " .. vim.inspect(err),
-            vim.log.levels.ERROR
-        )
-    end
+    Chooser.close(self._chooser_tabpage)
+    self._chooser_tabpage = nil
 end
 
 --- @param options agentic.acp.PermissionOption[]
@@ -159,89 +201,51 @@ function PermissionManager:_complete_request(option_id)
         return
     end
 
-    self.message_writer:remove_permission_buttons(
-        current.button_start_row,
-        current.button_end_row
-    )
-
-    self:_remove_keymaps()
-    self.message_writer:set_on_content_changed(nil)
+    self:_close_chooser()
     current.callback(option_id)
 
-    self.current_request = nil
+    self.session_state:dispatch(SessionEvents.complete_current_permission())
     self:_process_next()
 end
 
 --- Clear all displayed buttons and keymaps, cancel all pending requests
 function PermissionManager:clear()
-    if self.current_request then
-        self.message_writer:remove_permission_buttons(
-            self.current_request.button_start_row,
-            self.current_request.button_end_row
-        )
-        self:_remove_keymaps()
-        self.message_writer:set_on_content_changed(nil)
+    local current = self.current_request
+    local queue = self.queue
 
-        pcall(self.current_request.callback, nil)
-        self.current_request = nil
+    self:_close_chooser()
+
+    if current then
+        pcall(current.callback, nil)
     end
 
-    for _, item in ipairs(self.queue) do
-        local callback = item[3]
-        pcall(callback, nil)
+    for _, item in ipairs(queue) do
+        pcall(item.callback, nil)
     end
 
-    self.queue = {}
+    self.session_state:dispatch(SessionEvents.clear_permissions())
 end
 
 --- Remove permission request for a specific tool call ID (e.g., when tool call fails)
 --- @param toolCallId string
 function PermissionManager:remove_request_by_tool_call_id(toolCallId)
-    self.queue = vim.tbl_filter(function(item)
-        return item[1] ~= toolCallId
-    end, self.queue)
-
     if
         self.current_request
         and self.current_request.toolCallId == toolCallId
     then
         self:_complete_request(nil)
-    end
-end
-
---- @param option_mapping table<integer, string> Mapping from number (1-N) to option_id
-function PermissionManager:_setup_keymaps(option_mapping)
-    self:_remove_keymaps()
-
-    -- Add buffer-local key mappings for each option
-    for number, option_id in pairs(option_mapping) do
-        local lhs = tostring(number)
-        local callback = function()
-            self:_complete_request(option_id)
-        end
-
-        BufHelpers.keymap_set(self.message_writer.bufnr, "n", lhs, callback, {
-            desc = "Select permission option " .. tostring(number),
-        })
-
-        table.insert(self.keymap_info, { mode = "n", lhs = lhs })
-    end
-end
-
-function PermissionManager:_remove_keymaps()
-    if not vim.api.nvim_buf_is_valid(self.message_writer.bufnr) then
         return
     end
 
-    for _, info in ipairs(self.keymap_info) do
-        pcall(
-            vim.keymap.del,
-            info.mode,
-            info.lhs,
-            { buffer = self.message_writer.bufnr }
-        )
-    end
-    self.keymap_info = {}
+    self.session_state:dispatch(
+        SessionEvents.remove_permission_by_tool_call_id(toolCallId)
+    )
+end
+
+function PermissionManager:destroy()
+    self:_close_chooser()
+    self.session_state:unsubscribe(self._state_listener_id)
+    self._state_listener_id = nil
 end
 
 return PermissionManager

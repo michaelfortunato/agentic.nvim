@@ -233,6 +233,12 @@
 --- @field sessionUpdate "config_option_update"
 --- @field configOptions agentic.acp.ConfigOption[]
 
+--- @class agentic.acp.SessionInfoUpdate
+--- @field sessionUpdate "session_info_update"
+--- @field title? string|nil
+--- @field updatedAt? string|nil
+--- @field _meta? table<string, any>|nil
+
 --- @alias agentic.acp.SessionUpdateMessage
 --- | agentic.acp.UserMessageChunk
 --- | agentic.acp.AgentMessageChunk
@@ -244,6 +250,7 @@
 --- | agentic.acp.CurrentModeUpdate
 --- | agentic.acp.UsageUpdate
 --- | agentic.acp.ConfigOptionsUpdate
+--- | agentic.acp.SessionInfoUpdate
 
 --- @class agentic.acp.PermissionOption
 --- @field optionId string

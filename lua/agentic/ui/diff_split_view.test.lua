@@ -3,11 +3,15 @@ local spy_module = require("tests.helpers.spy")
 
 describe("DiffSplitView", function()
     local DiffSplitView = require("agentic.ui.diff_split_view")
+    local Config = require("agentic.config")
     local FileSystem = require("agentic.utils.file_system")
 
     local test_file_path = "/tmp/test_diff_split_view_fake.lua"
     local test_tabpage
     local read_stub
+    local original_split_width_ratio
+    local original_split_min_width
+    local original_split_max_width
 
     --- @param lines string[]|nil
     local function stub_file_content(lines)
@@ -17,12 +21,18 @@ describe("DiffSplitView", function()
     before_each(function()
         read_stub = spy_module.stub(FileSystem, "read_from_buffer_or_disk")
         stub_file_content({ "local x = 1", "print(x)", "" })
+        original_split_width_ratio = Config.diff_preview.split_width_ratio
+        original_split_min_width = Config.diff_preview.split_min_width
+        original_split_max_width = Config.diff_preview.split_max_width
         vim.cmd("tabnew")
         test_tabpage = vim.api.nvim_get_current_tabpage()
     end)
 
     after_each(function()
         read_stub:revert()
+        Config.diff_preview.split_width_ratio = original_split_width_ratio
+        Config.diff_preview.split_min_width = original_split_min_width
+        Config.diff_preview.split_max_width = original_split_max_width
         if test_tabpage and vim.api.nvim_tabpage_is_valid(test_tabpage) then
             pcall(DiffSplitView.clear_split_diff, test_tabpage)
             pcall(vim.api.nvim_tabpage_del, test_tabpage)
@@ -132,6 +142,40 @@ describe("DiffSplitView", function()
                 end
             end
         )
+
+        it("respects configured split width constraints", function()
+            Config.diff_preview.split_width_ratio = 0.8
+            Config.diff_preview.split_min_width = 10
+            Config.diff_preview.split_max_width = 30
+
+            local target_winid = vim.api.nvim_get_current_win()
+            local target_width = vim.api.nvim_win_get_width(target_winid)
+
+            local success = DiffSplitView.show_split_diff({
+                file_path = test_file_path,
+                diff = { old = { "local x = 1" }, new = { "local x = 2" } },
+                get_winid = function()
+                    return target_winid
+                end,
+            })
+
+            assert.is_true(success)
+
+            local state = DiffSplitView.get_split_state(test_tabpage)
+            assert.is_not_nil(state)
+
+            if state then
+                local expected = math.max(
+                    1,
+                    math.min(30, math.max(10, math.floor(target_width * 0.8)))
+                )
+                expected = math.min(expected, math.max(1, target_width - 24))
+                assert.equal(
+                    expected,
+                    vim.api.nvim_win_get_width(state.new_winid)
+                )
+            end
+        end)
 
         it("should reconstruct full file from partial diff", function()
             stub_file_content({ "local x = 1", "local y = 2", "print(x)", "" })

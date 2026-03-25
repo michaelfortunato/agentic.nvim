@@ -119,16 +119,10 @@ function StatusAnimation:_render_frame()
 
     local delay = TIMING[self._state] or TIMING.generating
 
-    local virt_lines = {
-        { { "" } }, -- Empty line above
-        virt_text, -- Animation in middle
-        { { "" } }, -- Empty line below
-    }
-
     self._extmark_id =
         vim.api.nvim_buf_set_extmark(self._bufnr, NS_ANIMATION, line_num, 0, {
             id = self._extmark_id, -- Reuse existing extmark ID to update in-place
-            virt_lines = virt_lines,
+            virt_lines = { virt_text },
             virt_lines_above = false,
         })
 

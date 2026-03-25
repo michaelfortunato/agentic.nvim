@@ -120,13 +120,21 @@ end
 --- @param ns_id integer
 --- @param line_number integer
 --- @param line_content string
-local function apply_add_line_highlight(bufnr, ns_id, line_number, line_content)
+--- @param col_offset? integer
+local function apply_add_line_highlight(
+    bufnr,
+    ns_id,
+    line_number,
+    line_content,
+    col_offset
+)
+    col_offset = col_offset or 0
     vim.highlight.range(
         bufnr,
         ns_id,
         Theme.HL_GROUPS.DIFF_ADD,
-        { line_number, 0 },
-        { line_number, #line_content }
+        { line_number, col_offset },
+        { line_number, col_offset + #line_content }
     )
 end
 
@@ -136,10 +144,20 @@ end
 --- @param line_number integer 0-indexed line number
 --- @param old_line string|nil Old line content (for deleted lines)
 --- @param new_line string|nil New line content (for added lines)
-function M.apply_diff_highlights(bufnr, ns_id, line_number, old_line, new_line)
+--- @param col_offset? integer Byte offset to apply before the diff content
+function M.apply_diff_highlights(
+    bufnr,
+    ns_id,
+    line_number,
+    old_line,
+    new_line,
+    col_offset
+)
     if not validate_buffer_line(bufnr, line_number) then
         return
     end
+
+    col_offset = col_offset or 0
 
     -- Apply line-level highlight for deleted lines
     if old_line and not new_line then
@@ -148,12 +166,18 @@ function M.apply_diff_highlights(bufnr, ns_id, line_number, old_line, new_line)
             bufnr,
             ns_id,
             Theme.HL_GROUPS.DIFF_DELETE,
-            { line_number, 0 },
-            { line_number, #old_line }
+            { line_number, col_offset },
+            { line_number, col_offset + #old_line }
         )
     elseif new_line and not old_line then
         -- Pure addition - full line highlight
-        apply_add_line_highlight(bufnr, ns_id, line_number, new_line)
+        apply_add_line_highlight(
+            bufnr,
+            ns_id,
+            line_number,
+            new_line,
+            col_offset
+        )
     elseif old_line and new_line then
         -- Skip highlighting if lines are identical
         if old_line == new_line then
@@ -165,8 +189,8 @@ function M.apply_diff_highlights(bufnr, ns_id, line_number, old_line, new_line)
             bufnr,
             ns_id,
             Theme.HL_GROUPS.DIFF_DELETE,
-            { line_number, 0 },
-            { line_number, #old_line }
+            { line_number, col_offset },
+            { line_number, col_offset + #old_line }
         )
 
         -- Then apply word-level highlight on top for changed portion
@@ -176,8 +200,8 @@ function M.apply_diff_highlights(bufnr, ns_id, line_number, old_line, new_line)
                 bufnr,
                 ns_id,
                 Theme.HL_GROUPS.DIFF_DELETE_WORD,
-                { line_number, change.old_start },
-                { line_number, change.old_end }
+                { line_number, col_offset + change.old_start },
+                { line_number, col_offset + change.old_end }
             )
         end
     end
@@ -189,16 +213,20 @@ end
 --- @param line_number integer 0-indexed line number
 --- @param old_line string Old line content
 --- @param new_line string New line content
+--- @param col_offset? integer Byte offset to apply before the diff content
 function M.apply_new_line_word_highlights(
     bufnr,
     ns_id,
     line_number,
     old_line,
-    new_line
+    new_line,
+    col_offset
 )
     if not validate_buffer_line(bufnr, line_number) then
         return
     end
+
+    col_offset = col_offset or 0
 
     -- Skip highlighting if lines are identical
     if old_line == new_line then
@@ -213,12 +241,18 @@ function M.apply_new_line_word_highlights(
             bufnr,
             ns_id,
             Theme.HL_GROUPS.DIFF_ADD_WORD,
-            { line_number, change.new_start },
-            { line_number, change.new_end }
+            { line_number, col_offset + change.new_start },
+            { line_number, col_offset + change.new_end }
         )
     else
         -- Entire line changed, apply line-level highlight
-        apply_add_line_highlight(bufnr, ns_id, line_number, new_line)
+        apply_add_line_highlight(
+            bufnr,
+            ns_id,
+            line_number,
+            new_line,
+            col_offset
+        )
     end
 end
 

@@ -2,34 +2,41 @@
 local assert = require("tests.helpers.assert")
 local spy = require("tests.helpers.spy")
 
+local SessionEvents = require("agentic.session.session_events")
+local SessionState = require("agentic.session.session_state")
+
 describe("agentic.ui.PermissionManager", function()
-    --- @type agentic.ui.MessageWriter
-    local MessageWriter
     --- @type agentic.ui.PermissionManager
     local PermissionManager
+    --- @type agentic.ui.Chooser
+    local Chooser
     --- @type integer
     local bufnr
-    --- @type integer
-    local winid
-    --- @type agentic.ui.MessageWriter
-    local writer
+    --- @type agentic.session.SessionState
+    local session_state
     --- @type agentic.ui.PermissionManager
     local pm
     --- @type TestStub
-    local schedule_stub
+    local chooser_show_stub
     --- @type TestStub
-    local hint_stub
-    --- @type TestStub
-    local hint_style_stub
+    local chooser_close_stub
+    --- @type agentic.acp.PermissionOption[]|nil
+    local shown_items
+    --- @type agentic.ui.Chooser.Opts|nil
+    local shown_opts
+    --- @type fun(choice: any|nil)|nil
+    local shown_callback
 
+    --- @param tool_call_id string
+    --- @param options agentic.acp.PermissionOption[]|nil
     --- @return agentic.acp.RequestPermission
-    local function make_request(tool_call_id)
+    local function make_request(tool_call_id, options)
         return {
             sessionId = "test-session",
             toolCall = {
                 toolCallId = tool_call_id,
             },
-            options = {
+            options = options or {
                 {
                     optionId = "allow-once",
                     name = "Allow once",
@@ -44,267 +51,185 @@ describe("agentic.ui.PermissionManager", function()
         }
     end
 
-    local function inject_content_and_reanchor()
-        vim.bo[bufnr].modifiable = true
-        vim.api.nvim_buf_set_lines(
-            bufnr,
-            -1,
-            -1,
-            false,
-            { "new tool call output line 1", "new tool call output line 2" }
-        )
-        vim.bo[bufnr].modifiable = false
-        writer:_notify_content_changed()
-    end
-
-    --- @param mode string
-    --- @param lhs string
-    --- @return boolean
-    local function has_buf_keymap(mode, lhs)
-        for _, km in ipairs(vim.api.nvim_buf_get_keymap(bufnr, mode)) do
-            if km.lhs == lhs then
-                return true
-            end
-        end
-        return false
+    --- @param tool_call_id string
+    --- @param kind agentic.acp.ToolKind|nil
+    local function add_tool_call(tool_call_id, kind)
+        session_state:dispatch(SessionEvents.upsert_tool_call({
+            tool_call_id = tool_call_id,
+            kind = kind or "edit",
+            status = "pending",
+            file_path = "/tmp/demo.lua",
+            diff = { old = { "a" }, new = { "b" } },
+        }))
     end
 
     before_each(function()
-        schedule_stub = spy.stub(vim, "schedule")
-
-        local DiffPreview = require("agentic.ui.diff_preview")
-        hint_stub = spy.stub(DiffPreview, "add_navigation_hint")
-        hint_stub:returns(nil)
-        hint_style_stub = spy.stub(DiffPreview, "apply_hint_styling")
-
-        MessageWriter = require("agentic.ui.message_writer")
         PermissionManager = require("agentic.ui.permission_manager")
+        Chooser = require("agentic.ui.chooser")
+
+        chooser_show_stub = spy.stub(Chooser, "show")
+        chooser_show_stub:invokes(function(items, opts, on_choice)
+            shown_items = items
+            shown_opts = opts
+            shown_callback = on_choice
+            return true
+        end)
+
+        chooser_close_stub = spy.stub(Chooser, "close")
 
         bufnr = vim.api.nvim_create_buf(false, true)
-        vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, {})
-
-        winid = vim.api.nvim_open_win(bufnr, true, {
-            relative = "editor",
-            width = 80,
-            height = 40,
-            row = 0,
-            col = 0,
-        })
-
-        writer = MessageWriter:new(bufnr)
-        pm = PermissionManager:new(writer)
+        session_state = SessionState:new()
+        pm = PermissionManager:new(session_state)
     end)
 
     after_each(function()
-        schedule_stub:revert()
-        hint_stub:revert()
-        hint_style_stub:revert()
+        chooser_show_stub:revert()
+        chooser_close_stub:revert()
 
-        if winid and vim.api.nvim_win_is_valid(winid) then
-            vim.api.nvim_win_close(winid, true)
-        end
         if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
             vim.api.nvim_buf_delete(bufnr, { force = true })
         end
     end)
 
-    describe("reanchor permission prompt", function()
-        it("moves buttons to buffer bottom and preserves keymaps", function()
-            pm:add_request(
-                make_request("tc-1"),
-                spy.new(function() end) --[[@as function]]
-            )
+    it("shows sorted approval options in the chooser", function()
+        add_tool_call("tc-1", "edit")
 
-            local line_count_before = vim.api.nvim_buf_line_count(bufnr)
-            inject_content_and_reanchor()
-            local line_count_after = vim.api.nvim_buf_line_count(bufnr)
+        pm:add_request(make_request("tc-1", {
+            {
+                optionId = "reject-once",
+                name = "Reject once",
+                kind = "reject_once",
+            },
+            {
+                optionId = "allow-once",
+                name = "Allow once",
+                kind = "allow_once",
+            },
+        }), spy.new(function() end) --[[@as function]])
 
-            assert.is_true(line_count_after > line_count_before)
-
-            local last_lines = vim.api.nvim_buf_get_lines(bufnr, -3, -1, false)
-            local found_permission = false
-            for _, line in ipairs(last_lines) do
-                if line:find("Allow once") or line:find("--- ---") then
-                    found_permission = true
-                    break
-                end
-            end
-            assert.is_true(found_permission)
-
-            assert.is_true(has_buf_keymap("n", "1"))
-            assert.is_true(has_buf_keymap("n", "2"))
-        end)
-
-        it("does not trigger recursive on_content_changed", function()
-            local notify_spy = spy.on(writer, "_notify_content_changed")
-
-            pm:add_request(
-                make_request("tc-2"),
-                spy.new(function() end) --[[@as function]]
-            )
-
-            notify_spy:reset()
-            writer:_notify_content_changed()
-
-            assert.equal(1, notify_spy.call_count)
-
-            notify_spy:revert()
-        end)
+        assert.spy(chooser_show_stub).was.called(1)
+        assert.equal("tc-1", pm.current_request.toolCallId)
+        assert.equal(0, #pm.queue)
+        assert.equal("Approve edit?", shown_opts.prompt)
+        assert.equal("allow-once", shown_items[1].optionId)
+        assert.equal("reject-once", shown_items[2].optionId)
+        assert.truthy(shown_opts.format_item(shown_items[1]):find("Allow once", 1, true))
     end)
 
-    describe("callback lifecycle", function()
-        it("_complete_request clears the content changed callback", function()
-            pm:add_request(
-                make_request("tc-3"),
-                spy.new(function() end) --[[@as function]]
-            )
+    it("completes the request when a choice is selected", function()
+        local callback = spy.new(function() end) --[[@as function]]
 
-            pm:_complete_request("allow-once")
+        add_tool_call("tc-2", "edit")
+        pm:add_request(make_request("tc-2"), callback)
 
-            assert.is_nil(writer._on_content_changed)
-        end)
+        shown_callback(shown_items[1])
 
-        it("clear() clears the content changed callback", function()
-            pm:add_request(
-                make_request("tc-4"),
-                spy.new(function() end) --[[@as function]]
-            )
-
-            pm:clear()
-
-            assert.is_nil(writer._on_content_changed)
-        end)
+        assert.spy(callback).was.called(1)
+        assert.equal("allow-once", callback.calls[1][1])
+        assert.is_nil(pm.current_request)
+        assert.equal(0, #pm.queue)
+        assert.spy(chooser_close_stub).was.called(1)
     end)
 
-    describe("empty line accumulation during reanchor", function()
-        --- @return string[]
-        local function get_lines()
-            return vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-        end
+    it("dismisses the request when the chooser is cancelled", function()
+        local callback = spy.new(function() end) --[[@as function]]
 
-        --- @return integer
-        local function count_trailing_empty_lines()
-            local lines = get_lines()
-            local count = 0
-            for i = #lines, 1, -1 do
-                if lines[i] == "" then
-                    count = count + 1
-                else
-                    break
-                end
-            end
-            return count
-        end
+        add_tool_call("tc-3", "edit")
+        pm:add_request(make_request("tc-3"), callback)
 
-        it(
-            "single display+remove leaves exactly one trailing separator",
-            function()
-                vim.bo[bufnr].modifiable = true
-                vim.api.nvim_buf_set_lines(
-                    bufnr,
-                    0,
-                    -1,
-                    false,
-                    { "line 1", "line 2", "line 3" }
-                )
-                vim.bo[bufnr].modifiable = false
+        shown_callback(nil)
 
-                local lines_before = vim.api.nvim_buf_line_count(bufnr)
+        assert.spy(callback).was.called(1)
+        assert.is_nil(callback.calls[1][1])
+        assert.is_nil(pm.current_request)
+        assert.equal(0, #pm.queue)
+        assert.spy(chooser_close_stub).was.called(1)
+    end)
 
-                pm:add_request(
-                    make_request("tc-sep-1"),
-                    spy.new(function() end) --[[@as function]]
-                )
+    it("maps escape to the default reject option", function()
+        local callback = spy.new(function() end) --[[@as function]]
 
-                assert.is_true(
-                    vim.api.nvim_buf_line_count(bufnr) > lines_before
-                )
+        add_tool_call("tc-escape-1", "edit")
+        pm:add_request(make_request("tc-escape-1", {
+            {
+                optionId = "allow-once",
+                name = "Allow once",
+                kind = "allow_once",
+            },
+            {
+                optionId = "reject-once",
+                name = "Reject once",
+                kind = "reject_once",
+            },
+        }), callback)
 
-                pm:_complete_request("allow-once")
+        shown_callback(shown_opts.escape_choice)
 
-                -- remove_permission_buttons replaces the block with {""},
-                -- so buffer should be original lines + 1 separator
-                assert.equal(
-                    lines_before + 1,
-                    vim.api.nvim_buf_line_count(bufnr)
-                )
-                assert.equal(1, count_trailing_empty_lines())
-            end
+        assert.spy(callback).was.called(1)
+        assert.equal("reject-once", callback.calls[1][1])
+        assert.is_nil(pm.current_request)
+        assert.equal(0, #pm.queue)
+    end)
+
+    it("ignores duplicate permission requests for the same tool call", function()
+        local callback = spy.new(function() end) --[[@as function]]
+        local request = make_request("tc-dup-1")
+
+        add_tool_call("tc-dup-1", "edit")
+        pm:add_request(request, callback)
+        pm:add_request(request, callback)
+
+        assert.is_not_nil(pm.current_request)
+        assert.equal("tc-dup-1", pm.current_request.toolCallId)
+        assert.equal(0, #pm.queue)
+        assert.spy(chooser_show_stub).was.called(1)
+    end)
+
+    it("clear() cancels current and queued requests", function()
+        local callback_1 = spy.new(function() end) --[[@as function]]
+        local callback_2 = spy.new(function() end) --[[@as function]]
+
+        add_tool_call("tc-clear-1", "edit")
+        add_tool_call("tc-clear-2", "write")
+
+        pm:add_request(make_request("tc-clear-1"), callback_1)
+        pm:add_request(make_request("tc-clear-2"), callback_2)
+
+        assert.equal("tc-clear-1", pm.current_request.toolCallId)
+        assert.equal(1, #pm.queue)
+
+        pm:clear()
+
+        assert.spy(callback_1).was.called(1)
+        assert.is_nil(callback_1.calls[1][1])
+        assert.spy(callback_2).was.called(1)
+        assert.is_nil(callback_2.calls[1][1])
+        assert.is_nil(pm.current_request)
+        assert.equal(0, #pm.queue)
+        assert.spy(chooser_close_stub).was.called(1)
+    end)
+
+    it("does not mutate transcript lines when shown or cleared", function()
+        vim.api.nvim_buf_set_lines(
+            bufnr,
+            0,
+            -1,
+            false,
+            { "line 1", "line 2", "line 3" }
         )
 
-        it(
-            "does not accumulate empty lines across multiple reanchors",
-            function()
-                vim.bo[bufnr].modifiable = true
-                vim.api.nvim_buf_set_lines(
-                    bufnr,
-                    0,
-                    -1,
-                    false,
-                    { "line 1", "line 2", "line 3" }
-                )
-                vim.bo[bufnr].modifiable = false
+        local lines_before = vim.api.nvim_buf_line_count(bufnr)
 
-                pm:add_request(
-                    make_request("tc-accum-1"),
-                    spy.new(function() end) --[[@as function]]
-                )
-
-                -- Simulate 5 reanchor cycles (new content triggers reanchor)
-                for _ = 1, 5 do
-                    inject_content_and_reanchor()
-                end
-
-                pm:_complete_request("allow-once")
-
-                -- Should have exactly 1 trailing empty line, not 1 per cycle
-                assert.equal(1, count_trailing_empty_lines())
-            end
+        add_tool_call("tc-lines-1", "edit")
+        pm:add_request(
+            make_request("tc-lines-1"),
+            spy.new(function() end) --[[@as function]]
         )
 
-        it(
-            "reanchor preserves single separator between content and buttons",
-            function()
-                vim.bo[bufnr].modifiable = true
-                vim.api.nvim_buf_set_lines(
-                    bufnr,
-                    0,
-                    -1,
-                    false,
-                    { "line 1", "line 2", "line 3" }
-                )
-                vim.bo[bufnr].modifiable = false
+        assert.equal(lines_before, vim.api.nvim_buf_line_count(bufnr))
 
-                pm:add_request(
-                    make_request("tc-sep-2"),
-                    spy.new(function() end) --[[@as function]]
-                )
+        pm:clear()
 
-                -- Reanchor once
-                inject_content_and_reanchor()
-
-                -- Find last injected content line, then count empty lines after it
-                local lines = get_lines()
-                local last_content_idx = 0
-                for i = 1, #lines do
-                    if lines[i]:find("new tool call output") then
-                        last_content_idx = i
-                    end
-                end
-                assert.is_true(last_content_idx > 0)
-
-                local empty_count = 0
-                for i = last_content_idx + 1, #lines do
-                    if lines[i] == "" then
-                        empty_count = empty_count + 1
-                    else
-                        break
-                    end
-                end
-                assert.equal(1, empty_count)
-
-                pm:_complete_request("allow-once")
-            end
-        )
+        assert.equal(lines_before, vim.api.nvim_buf_line_count(bufnr))
     end)
 end)

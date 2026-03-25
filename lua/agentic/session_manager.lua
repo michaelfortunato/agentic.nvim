@@ -1,20 +1,14 @@
--- The session manager class glues together the Chat widget, the agent instance, and the message writer.
--- It is responsible for managing the session state, routing messages between components, and handling user interactions.
--- When the user creates a new session, the SessionManager should be responsible for cleaning the existing session (if any) and initializing a new one.
--- When the user switches the provider, the SessionManager should handle the transition smoothly,
--- ensuring that the new session is properly set up and all the previous messages are sent to the new agent provider without duplicating them in the chat widget
-
 local ACPPayloads = require("agentic.acp.acp_payloads")
 local ChatHistory = require("agentic.ui.chat_history")
 local Config = require("agentic.config")
-local DiffPreview = require("agentic.ui.diff_preview")
 local DiagnosticsList = require("agentic.ui.diagnostics_list")
 local FileSystem = require("agentic.utils.file_system")
 local Logger = require("agentic.utils.logger")
+local SessionEvents = require("agentic.session.session_events")
+local SessionRestore = require("agentic.session_restore")
+local SessionSelectors = require("agentic.session.session_selectors")
+local SessionState = require("agentic.session.session_state")
 local SlashCommands = require("agentic.acp.slash_commands")
-
---- @class agentic._SessionManagerPrivate
-local P = {}
 
 --- Tool call kinds that mutate files on disk.
 --- When these complete, buffers must be reloaded via checktime.
@@ -26,10 +20,9 @@ local FILE_MUTATING_KINDS = {
     move = true,
 }
 
---- Safely invoke a user-configured hook
 --- @param hook_name "on_prompt_submit" | "on_response_complete" | "on_session_update"
 --- @param data table
-function P.invoke_hook(hook_name, data)
+local function invoke_hook(hook_name, data)
     local hook = Config.hooks and Config.hooks[hook_name]
 
     if hook and type(hook) == "function" then
@@ -44,6 +37,89 @@ function P.invoke_hook(hook_name, data)
     end
 end
 
+--- @param session agentic.SessionManager
+--- @param events table[]
+local function dispatch_state_events(session, events)
+    for _, event in ipairs(events) do
+        session.session_state:dispatch(event)
+    end
+end
+
+--- @param tool_call agentic.ui.MessageWriter.ToolCallBlock
+--- @return agentic.ui.ChatHistory.ToolCall
+local function as_transcript_tool_call(tool_call)
+    return vim.tbl_deep_extend("force", {
+        type = "tool_call",
+    }, tool_call)
+end
+
+--- @param session agentic.SessionManager
+--- @param tool_call agentic.ui.MessageWriter.ToolCallBlock
+local function upsert_tool_call_block(session, tool_call)
+    if session.message_writer.tool_call_blocks[tool_call.tool_call_id] then
+        session.message_writer:update_tool_call_block(tool_call)
+        return
+    end
+
+    session.message_writer:write_tool_call_block(tool_call)
+end
+
+--- @param session agentic.SessionManager
+--- @param response agentic.acp.PromptResponse|nil
+--- @param err table|nil
+local function write_turn_complete(session, response, err)
+    local finish_message = string.format(
+        "\n### 🏁 %s\n-----",
+        os.date("%Y-%m-%d %H:%M:%S")
+    )
+
+    if err then
+        finish_message = string.format(
+            "\n### ❌ Agent finished with error: %s\n%s",
+            vim.inspect(err),
+            finish_message
+        )
+    elseif response and response.stopReason == "cancelled" then
+        finish_message = string.format(
+            "\n### 🛑 Generation stopped by the user request\n%s",
+            finish_message
+        )
+    end
+
+    session.message_writer:write_message(
+        ACPPayloads.generate_agent_message(finish_message)
+    )
+end
+
+--- @param message string
+--- @param is_generating boolean
+--- @return string
+local function with_live_config_note(message, is_generating)
+    if not is_generating then
+        return message
+    end
+
+    return message .. ". Applies without interrupting the current response."
+end
+
+--- @param text string
+--- @return string
+local function compact_queue_preview(text)
+    local single_line = (text or ""):gsub("%s+", " "):gsub("^%s+", "")
+    if #single_line <= 72 then
+        return single_line
+    end
+
+    return single_line:sub(1, 69) .. "..."
+end
+
+--- @class agentic.SessionManager.QueuedSubmission
+--- @field id integer
+--- @field input_text string
+--- @field prompt agentic.acp.Content[]
+--- @field message_lines string[]
+--- @field user_msg agentic.ui.ChatHistory.UserMessage
+
 --- @class agentic.SessionManager
 --- @field session_id? string
 --- @field tab_page_id integer
@@ -53,6 +129,7 @@ end
 --- @field agent agentic.acp.ACPClient
 --- @field message_writer agentic.ui.MessageWriter
 --- @field permission_manager agentic.ui.PermissionManager
+--- @field review_controller agentic.ui.ReviewController
 --- @field status_animation agentic.ui.StatusAnimation
 --- @field file_list agentic.ui.FileList
 --- @field code_selection agentic.ui.CodeSelection
@@ -60,6 +137,10 @@ end
 --- @field config_options agentic.acp.AgentConfigOptions
 --- @field todo_list agentic.ui.TodoList
 --- @field chat_history agentic.ui.ChatHistory
+--- @field session_state agentic.session.SessionState
+--- @field _queued_submissions agentic.SessionManager.QueuedSubmission[]
+--- @field _next_queue_id integer
+--- @field _interrupt_submission? agentic.SessionManager.QueuedSubmission
 --- @field _history_to_send? agentic.ui.ChatHistory.Message[] Messages to prepend on next prompt submit
 --- @field _restoring boolean Flag to prevent auto-new_session during restore
 local SessionManager = {}
@@ -90,12 +171,14 @@ end
 --- @param tab_page_id integer
 function SessionManager:new(tab_page_id)
     local AgentInstance = require("agentic.acp.agent_instance")
+    local BufHelpers = require("agentic.utils.buf_helpers")
     local ChatWidget = require("agentic.ui.chat_widget")
     local CodeSelection = require("agentic.ui.code_selection")
     local FileList = require("agentic.ui.file_list")
     local FilePicker = require("agentic.ui.file_picker")
     local MessageWriter = require("agentic.ui.message_writer")
     local PermissionManager = require("agentic.ui.permission_manager")
+    local ReviewController = require("agentic.ui.review_controller")
     local StatusAnimation = require("agentic.ui.status_animation")
     local TodoList = require("agentic.ui.todo_list")
     local AgentConfigOptions = require("agentic.acp.agent_config_options")
@@ -106,6 +189,9 @@ function SessionManager:new(tab_page_id)
         _is_first_message = true,
         is_generating = false,
         _restoring = false,
+        _queued_submissions = {},
+        _next_queue_id = 0,
+        _interrupt_submission = nil,
     }, self)
 
     local agent = AgentInstance.get_instance(Config.provider, function(_client)
@@ -124,17 +210,32 @@ function SessionManager:new(tab_page_id)
 
     self.agent = agent
 
-    self.chat_history = ChatHistory:new()
+    self.session_state = SessionState:new()
+    self.chat_history = self.session_state:get_history()
 
     self.widget = ChatWidget:new(tab_page_id, function(input_text)
         self:_handle_input_submit(input_text)
     end)
 
-    self.message_writer = MessageWriter:new(self.widget.buf_nrs.chat)
+    self.message_writer = MessageWriter:new(self.widget.buf_nrs.chat, {
+        should_auto_scroll = function()
+            return self.widget:should_follow_chat_output()
+        end,
+        scroll_to_bottom = function()
+            self.widget:scroll_chat_to_bottom()
+        end,
+    })
+    self.widget:bind_message_writer(self.message_writer)
     self.status_animation = StatusAnimation:new(self.widget.buf_nrs.chat)
-    self.permission_manager = PermissionManager:new(self.message_writer)
+    self.permission_manager = PermissionManager:new(self.session_state)
+    self.review_controller =
+        ReviewController:new(self.session_state, self.widget)
 
-    FilePicker:new(self.widget.buf_nrs.input)
+    FilePicker:new(self.widget.buf_nrs.input, {
+        resolve_root = function()
+            return self:_get_workspace_root()
+        end,
+    })
     SlashCommands.setup_completion(self.widget.buf_nrs.input)
 
     self.config_options = AgentConfigOptions:new(
@@ -144,6 +245,9 @@ function SessionManager:new(tab_page_id)
         end,
         function(model_id, is_legacy)
             self:_handle_model_change(model_id, is_legacy)
+        end,
+        function(config_id, value)
+            self:_handle_config_option_change(config_id, value)
         end
     )
 
@@ -198,38 +302,54 @@ function SessionManager:new(tab_page_id)
         self.widget:close_optional_window("todos")
     end)
 
+    for _, bufnr in pairs(self.widget.buf_nrs) do
+        BufHelpers.multi_keymap_set(
+            Config.keymaps.widget.manage_queue,
+            bufnr,
+            function()
+                self:_show_queue_selector()
+            end,
+            { desc = "Agentic: Manage queued messages" }
+        )
+    end
+
     return self
 end
 
 --- @param update agentic.acp.SessionUpdateMessage
 function SessionManager:_on_session_update(update)
-    -- order the IF blocks in order of likeliness to be called for performance
-
-    if update.sessionUpdate == "plan" then
-        if Config.windows.todos.display then
-            self.todo_list:render(update.entries)
-        end
-    elseif update.sessionUpdate == "agent_message_chunk" then
-        self.status_animation:start("generating")
+    if update.sessionUpdate == "agent_message_chunk" then
         self.message_writer:write_message_chunk(update)
+        self.status_animation:start("generating")
 
         if update.content and update.content.text then
-            self.chat_history:append_agent_text({
+            self.session_state:dispatch(SessionEvents.append_agent_text({
                 type = "agent",
                 text = update.content.text,
                 provider_name = self.agent.provider_config.name,
-            })
+            }))
         end
     elseif update.sessionUpdate == "agent_thought_chunk" then
-        self.status_animation:start("thinking")
         self.message_writer:write_message_chunk(update)
+        self.status_animation:start("thinking")
 
         if update.content and update.content.text then
-            self.chat_history:append_agent_text({
+            self.session_state:dispatch(SessionEvents.append_agent_text({
                 type = "thought",
                 text = update.content.text,
                 provider_name = self.agent.provider_config.name,
-            })
+            }))
+        end
+    elseif update.sessionUpdate == "session_info_update" then
+        if update.title ~= nil then
+            self.session_state:dispatch(
+                SessionEvents.set_session_title(update.title or "")
+            )
+            self:_render_window_headers()
+        end
+    elseif update.sessionUpdate == "plan" then
+        if Config.windows.todos.display then
+            self.todo_list:render(update.entries)
         end
     elseif update.sessionUpdate == "available_commands_update" then
         SlashCommands.setCommands(
@@ -243,7 +363,7 @@ function SessionManager:_on_session_update(update)
                 update.currentModeId
             )
         then
-            self:_set_mode_to_chat_header(update.currentModeId)
+            self:_render_window_headers()
         end
     elseif update.sessionUpdate == "config_option_update" then
         self:_handle_new_config_options(update.configOptions)
@@ -264,9 +384,7 @@ function SessionManager:_on_session_update(update)
         )
     end
 
-    -- This is being done after handling specific updates but one could argue
-    -- there should be pre/post hooks for everything.
-    P.invoke_hook("on_session_update", {
+    invoke_hook("on_session_update", {
         session_id = self.session_id,
         tab_page_id = self.tab_page_id,
         update = update,
@@ -275,57 +393,42 @@ end
 
 --- @param tool_call agentic.ui.MessageWriter.ToolCallBlock
 function SessionManager:_on_tool_call(tool_call)
-    if self.message_writer.tool_call_blocks[tool_call.tool_call_id] then
-        -- fallback for bad ACP implementations which sends multiple `tool_call` with different data (initially added for Mistral)
-        self:_on_tool_call_update(tool_call)
-        return
-    end
-
-    self.message_writer:write_tool_call_block(tool_call)
-
-    -- Store merged block from MessageWriter (has normalized/accumulated fields)
-    local merged = self.message_writer.tool_call_blocks[tool_call.tool_call_id]
-    --- @type agentic.ui.ChatHistory.ToolCall
-    local tool_msg = vim.tbl_deep_extend("force", {
-        type = "tool_call",
-    }, merged)
-
-    self.chat_history:add_message(tool_msg)
+    dispatch_state_events(self, {
+        SessionEvents.upsert_tool_call(tool_call),
+        SessionEvents.upsert_transcript_tool_call(
+            as_transcript_tool_call(tool_call)
+        ),
+    })
+    upsert_tool_call_block(self, tool_call)
 end
 
 --- Handle tool call update: update UI, history, diff preview, permissions, and reload buffers
 --- @param tool_call_update agentic.ui.MessageWriter.ToolCallBlock
 function SessionManager:_on_tool_call_update(tool_call_update)
-    if
-        not self.message_writer.tool_call_blocks[tool_call_update.tool_call_id]
-    then
-        self:_on_tool_call(tool_call_update)
-    else
-        self.message_writer:update_tool_call_block(tool_call_update)
-
-        -- Store merged block from MessageWriter (has accumulated body and normalized fields)
-        local merged =
-            self.message_writer.tool_call_blocks[tool_call_update.tool_call_id]
-        --- @type agentic.ui.ChatHistory.ToolCall
-        local tool_msg = vim.tbl_deep_extend("force", {
-            type = "tool_call",
-        }, merged)
-
-        self.chat_history:update_tool_call(
+    dispatch_state_events(self, {
+        SessionEvents.upsert_tool_call(tool_call_update),
+        SessionEvents.upsert_transcript_tool_call(
+            as_transcript_tool_call(tool_call_update)
+        ),
+        SessionEvents.clear_review_target(
             tool_call_update.tool_call_id,
-            tool_msg
-        )
-    end
+            tool_call_update.status == "failed"
+        ),
+    })
+    upsert_tool_call_block(self, tool_call_update)
 
-    -- pre-emptively clear diff preview when tool call update is received, as it's either done or failed
-    local is_rejection = tool_call_update.status == "failed"
-    self:_clear_diff_in_buffer(tool_call_update.tool_call_id, is_rejection)
-
-    -- Remove the permission request if the tool call failed before user granted it
     if tool_call_update.status == "failed" then
         self.permission_manager:remove_request_by_tool_call_id(
             tool_call_update.tool_call_id
         )
+    end
+
+    if
+        not SessionSelectors.has_pending_permissions(
+            self.session_state:get_state()
+        )
+    then
+        self.status_animation:start("generating")
     end
 
     -- Reload buffers when file-mutating tool calls complete
@@ -337,13 +440,41 @@ function SessionManager:_on_tool_call_update(tool_call_update)
             vim.cmd.checktime()
         end
     end
+end
 
-    if
-        not self.permission_manager.current_request
-        and #self.permission_manager.queue == 0
-    then
-        self.status_animation:start("generating")
+--- @param request agentic.acp.RequestPermission
+--- @param callback fun(option_id: string|nil)
+function SessionManager:_handle_permission_request(request, callback)
+    local tool_call_id = request.toolCall.toolCallId
+
+    local wrapped_callback = function(option_id)
+        local permission_state = "dismissed"
+
+        if option_id == "allow_once" or option_id == "allow_always" then
+            permission_state = "approved"
+        elseif option_id == "reject_once" or option_id == "reject_always" then
+            permission_state = "rejected"
+        end
+
+        dispatch_state_events(self, {
+            SessionEvents.set_tool_permission_state(
+                tool_call_id,
+                permission_state
+            ),
+            SessionEvents.clear_review_target(
+                tool_call_id,
+                permission_state == "rejected" or permission_state == "dismissed"
+            ),
+        })
+        callback(option_id)
     end
+
+    dispatch_state_events(self, {
+        SessionEvents.set_tool_permission_state(tool_call_id, "requested"),
+        SessionEvents.set_review_target(tool_call_id),
+    })
+    self.status_animation:stop()
+    self.permission_manager:add_request(request, wrapped_callback)
 end
 
 --- Send the newly selected mode to the agent and handle the response
@@ -371,13 +502,16 @@ function SessionManager:_handle_mode_change(mode_id, is_legacy)
             if result and result.configOptions then
                 Logger.debug("received result after setting mode")
                 self:_handle_new_config_options(result.configOptions)
+            else
+                self:_render_window_headers()
             end
-
-            self:_set_mode_to_chat_header(mode_id)
 
             local mode_name = self.config_options:get_mode_name(mode_id)
             Logger.notify(
-                "Mode changed to: " .. mode_name,
+                with_live_config_note(
+                    "Mode changed to: " .. mode_name,
+                    self.is_generating
+                ),
                 vim.log.levels.INFO,
                 {
                     title = "Agentic Mode changed",
@@ -389,7 +523,14 @@ function SessionManager:_handle_mode_change(mode_id, is_legacy)
     if is_legacy then
         self.agent:set_mode(self.session_id, mode_id, callback)
     else
-        self.agent:set_config_option(self.session_id, "mode", mode_id, callback)
+        local config_id = self.config_options.mode and self.config_options.mode.id
+            or "mode"
+        self.agent:set_config_option(
+            self.session_id,
+            config_id,
+            mode_id,
+            callback
+        )
     end
 end
 
@@ -418,10 +559,15 @@ function SessionManager:_handle_model_change(model_id, is_legacy)
             if result and result.configOptions then
                 Logger.debug("received result after setting model")
                 self:_handle_new_config_options(result.configOptions)
+            else
+                self:_render_window_headers()
             end
 
             Logger.notify(
-                "Model changed to: " .. model_id,
+                with_live_config_note(
+                    "Model changed to: " .. model_id,
+                    self.is_generating
+                ),
                 vim.log.levels.INFO,
                 { title = "Agentic Model changed" }
             )
@@ -431,22 +577,225 @@ function SessionManager:_handle_model_change(model_id, is_legacy)
     if is_legacy then
         self.agent:set_model(self.session_id, model_id, callback)
     else
+        local config_id = self.config_options.model
+                and self.config_options.model.id
+            or "model"
         self.agent:set_config_option(
             self.session_id,
-            "model",
+            config_id,
             model_id,
             callback
         )
     end
 end
 
---- @param mode_id string
-function SessionManager:_set_mode_to_chat_header(mode_id)
-    local mode_name = self.config_options:get_mode_name(mode_id)
-    self.widget:render_header(
-        "chat",
-        string.format("Mode: %s", mode_name or mode_id)
+--- Send a generic config option update to the agent
+--- @param config_id string
+--- @param value string
+function SessionManager:_handle_config_option_change(config_id, value)
+    if not self.session_id then
+        return
+    end
+
+    self.agent:set_config_option(self.session_id, config_id, value, function(
+        result,
+        err
     )
+        if err then
+            Logger.notify(
+                string.format(
+                    "Failed to change config option '%s': %s",
+                    config_id,
+                    err.message
+                ),
+                vim.log.levels.ERROR
+            )
+            return
+        end
+
+        if result and result.configOptions then
+            Logger.debug("received result after setting config option")
+            self:_handle_new_config_options(result.configOptions)
+        else
+            local option = self.config_options:get_config_option(config_id)
+            if option then
+                option.currentValue = value
+            end
+            self:_render_window_headers()
+        end
+
+        local option = self.config_options:get_config_option(config_id)
+        local option_name = option and option.name or config_id
+        local value_name =
+            self.config_options:get_config_value_name(config_id, value) or value
+
+        Logger.notify(
+            with_live_config_note(
+                string.format("%s changed to: %s", option_name, value_name),
+                self.is_generating
+            ),
+            vim.log.levels.INFO,
+            { title = "Agentic Config changed" }
+        )
+    end)
+end
+
+function SessionManager:_render_window_headers()
+    local parts = {}
+    local config_context = self.config_options:get_header_context()
+    local queue_count = self._queued_submissions and #self._queued_submissions or 0
+    if config_context and config_context ~= "" then
+        parts[#parts + 1] = config_context
+    end
+
+    if queue_count > 0 then
+        parts[#parts + 1] = string.format("Queue: %d", queue_count)
+    end
+
+    self.widget:render_header("chat", table.concat(parts, " | "))
+    self.widget:render_header("input", "")
+end
+
+--- @param submission agentic.SessionManager.QueuedSubmission
+function SessionManager:_enqueue_submission(submission)
+    self._next_queue_id = self._next_queue_id + 1
+    submission.id = self._next_queue_id
+    self._queued_submissions[#self._queued_submissions + 1] = submission
+    self:_render_window_headers()
+
+    Logger.notify(
+        "Queued follow-up. It will be sent when the agent is ready.",
+        vim.log.levels.INFO,
+        { title = "Agentic Queue" }
+    )
+end
+
+--- @return agentic.SessionManager.QueuedSubmission|nil
+function SessionManager:_pop_next_queued_submission()
+    if #self._queued_submissions == 0 then
+        return nil
+    end
+
+    return table.remove(self._queued_submissions, 1)
+end
+
+--- @param submission_id integer
+--- @return integer|nil
+function SessionManager:_find_queued_submission_index(submission_id)
+    for index, submission in ipairs(self._queued_submissions) do
+        if submission.id == submission_id then
+            return index
+        end
+    end
+
+    return nil
+end
+
+function SessionManager:_drain_queued_submissions()
+    if self.is_generating then
+        return
+    end
+
+    local next_submission = self._interrupt_submission
+    self._interrupt_submission = nil
+
+    if not next_submission then
+        next_submission = self:_pop_next_queued_submission()
+    end
+
+    self:_render_window_headers()
+
+    if next_submission then
+        self:_dispatch_submission(next_submission)
+    end
+end
+
+function SessionManager:_show_queue_selector()
+    local Chooser = require("agentic.ui.chooser")
+
+    if #self._queued_submissions == 0 then
+        Logger.notify("Queue is empty", vim.log.levels.INFO, {
+            title = "Agentic Queue",
+        })
+        return
+    end
+
+    Chooser.show(self._queued_submissions, {
+        prompt = "Queued messages:",
+        filetype = "AgenticQueue",
+        format_item = function(item)
+            --- @cast item agentic.SessionManager.QueuedSubmission
+            return string.format(
+                "%d. %s",
+                item.id,
+                compact_queue_preview(item.input_text)
+            )
+        end,
+        max_height = math.min(#self._queued_submissions, 8),
+    }, function(selected_submission)
+        if not selected_submission then
+            return
+        end
+
+        self:_show_queue_action_selector(selected_submission.id)
+    end)
+end
+
+--- @param submission_id integer
+function SessionManager:_show_queue_action_selector(submission_id)
+    local Chooser = require("agentic.ui.chooser")
+    local submission_index = self:_find_queued_submission_index(submission_id)
+    if not submission_index then
+        return
+    end
+
+    local actions = {
+        { id = "steer", name = "Steer", description = "Send next without interrupting" },
+        { id = "send_now", name = "Send now", description = "Interrupt current response" },
+        { id = "remove", name = "Remove", description = "Delete from queue" },
+    }
+
+    Chooser.show(actions, {
+        prompt = "Queue action:",
+        filetype = "AgenticQueue",
+        format_item = function(item)
+            return Chooser.format_named_item(item.name, item.description, false)
+        end,
+        max_height = #actions,
+    }, function(choice)
+        if not choice then
+            return
+        end
+
+        if choice.id == "remove" then
+            table.remove(self._queued_submissions, submission_index)
+            self:_render_window_headers()
+            return
+        end
+
+        local submission = table.remove(self._queued_submissions, submission_index)
+        self:_render_window_headers()
+        if not submission then
+            return
+        end
+
+        if choice.id == "send_now" and self.is_generating then
+            self._interrupt_submission = submission
+            self.agent:stop_generation(self.session_id)
+            return
+        end
+
+        if choice.id == "steer" then
+            table.insert(self._queued_submissions, 1, submission)
+            self:_render_window_headers()
+            if not self.is_generating then
+                self:_drain_queued_submissions()
+            end
+            return
+        end
+
+        self:_dispatch_submission(submission)
+    end)
 end
 
 --- @param input_text string
@@ -466,11 +815,13 @@ function SessionManager:_handle_input_submit(input_text)
 
     -- If restored/switched session, prepend history on first submit
     if self._history_to_send then
-        self.chat_history.title = input_text -- Update title for restored session
+        self.session_state:dispatch(SessionEvents.set_session_title(input_text))
+        self:_render_window_headers()
         ChatHistory.prepend_restored_messages(self._history_to_send, prompt)
         self._history_to_send = nil
     elseif self.chat_history.title == "" then
-        self.chat_history.title = input_text -- Set title for new session
+        self.session_state:dispatch(SessionEvents.set_session_title(input_text))
+        self:_render_window_headers()
     end
 
     table.insert(prompt, {
@@ -610,9 +961,6 @@ function SessionManager:_handle_input_submit(input_text)
         "\n\n### 󱚠 Agent - " .. self.agent.provider_config.name
     )
 
-    local user_message = ACPPayloads.generate_user_message(message_lines)
-    self.message_writer:write_message(user_message)
-
     --- @type agentic.ui.ChatHistory.UserMessage
     local user_msg = {
         type = "user",
@@ -620,69 +968,76 @@ function SessionManager:_handle_input_submit(input_text)
         timestamp = os.time(),
         provider_name = self.agent.provider_config.name,
     }
-    self.chat_history:add_message(user_msg)
+    local submission = {
+        id = 0,
+        input_text = input_text,
+        prompt = prompt,
+        message_lines = message_lines,
+        user_msg = user_msg,
+    }
+
+    if self.is_generating then
+        self:_enqueue_submission(submission)
+        return
+    end
+
+    self:_dispatch_submission(submission)
+end
+
+--- @param submission agentic.SessionManager.QueuedSubmission
+function SessionManager:_dispatch_submission(submission)
+    self.message_writer:write_message(
+        ACPPayloads.generate_user_message(submission.message_lines)
+    )
+    self.session_state:dispatch(
+        SessionEvents.add_transcript_message(submission.user_msg)
+    )
 
     self.status_animation:start("thinking")
 
-    P.invoke_hook("on_prompt_submit", {
-        prompt = input_text,
+    invoke_hook("on_prompt_submit", {
+        prompt = submission.input_text,
         session_id = self.session_id,
         tab_page_id = self.tab_page_id,
     })
 
     local session_id = self.session_id
     local tab_page_id = self.tab_page_id
-    -- Capture chat_history before send to avoid race with _cancel_session
-    -- replacing self.chat_history while the callback is pending
     local chat_history = self.chat_history
 
     self.is_generating = true
+    self:_render_window_headers()
 
-    self.agent:send_prompt(self.session_id, prompt, function(response, err)
-        vim.schedule(function()
-            self.is_generating = false
+    self.agent:send_prompt(
+        self.session_id,
+        submission.prompt,
+        function(response, err)
+            vim.schedule(function()
+                self.is_generating = false
 
-            local finish_message = string.format(
-                "\n### 🏁 %s\n-----",
-                os.date("%Y-%m-%d %H:%M:%S")
-            )
+                write_turn_complete(self, response, err)
 
-            if err then
-                finish_message = string.format(
-                    "\n### ❌ Agent finished with error: %s\n%s",
-                    vim.inspect(err),
-                    finish_message
-                )
-            elseif response and response.stopReason == "cancelled" then
-                finish_message = string.format(
-                    "\n### 🛑 Generation stopped by the user request\n%s",
-                    finish_message
-                )
-            end
+                self.status_animation:stop()
 
-            self.message_writer:write_message(
-                ACPPayloads.generate_agent_message(finish_message)
-            )
+                invoke_hook("on_response_complete", {
+                    session_id = session_id,
+                    tab_page_id = tab_page_id,
+                    success = err == nil,
+                    error = err,
+                })
 
-            self.status_animation:stop()
+                if not err then
+                    chat_history:save(function(save_err)
+                        if save_err then
+                            Logger.debug("Chat history save error:", save_err)
+                        end
+                    end)
+                end
 
-            P.invoke_hook("on_response_complete", {
-                session_id = session_id,
-                tab_page_id = tab_page_id,
-                success = err == nil,
-                error = err,
-            })
-
-            -- Save chat history after successful turn completion
-            if not err then
-                chat_history:save(function(save_err)
-                    if save_err then
-                        Logger.debug("Chat history save error:", save_err)
-                    end
-                end)
-            end
-        end)
-    end)
+                self:_drain_queued_submissions()
+            end)
+        end
+    )
 end
 
 --- Create a new session, optionally cancelling any existing one
@@ -724,28 +1079,7 @@ function SessionManager:new_session(opts)
         end,
 
         on_request_permission = function(request, callback)
-            self.status_animation:stop()
-
-            local function wrapped_callback(option_id)
-                callback(option_id)
-
-                local is_rejection = option_id == "reject_once"
-                    or option_id == "reject_always"
-                self:_clear_diff_in_buffer(
-                    request.toolCall.toolCallId,
-                    is_rejection
-                )
-
-                if
-                    not self.permission_manager.current_request
-                    and #self.permission_manager.queue == 0
-                then
-                    self.status_animation:start("generating")
-                end
-            end
-
-            self:_show_diff_in_buffer(request.toolCall.toolCallId)
-            self.permission_manager:add_request(request, wrapped_callback)
+            self:_handle_permission_request(request, callback)
         end,
     }
 
@@ -759,8 +1093,10 @@ function SessionManager:new_session(opts)
         end
 
         self.session_id = response.sessionId
-        self.chat_history.session_id = response.sessionId
-        self.chat_history.timestamp = os.time()
+        self.session_state:dispatch(SessionEvents.set_session_meta({
+            session_id = response.sessionId,
+            timestamp = os.time(),
+        }))
 
         if response.configOptions then
             Logger.debug("Provider announce configOptions")
@@ -769,13 +1105,14 @@ function SessionManager:new_session(opts)
             if response.modes then
                 Logger.debug("Provider announce legacy mode")
                 self.config_options:set_legacy_modes(response.modes)
-                self:_set_mode_to_chat_header(response.modes.currentModeId)
             end
 
             if response.models then
                 Logger.debug("Provider announce legacy models")
                 self.config_options:set_legacy_models(response.models)
             end
+
+            self:_render_window_headers()
         end
 
         self.config_options:set_initial_mode(
@@ -827,11 +1164,16 @@ function SessionManager:_cancel_session()
     end
 
     self.session_id = nil
+    self.status_animation:stop()
     self.permission_manager:clear()
     SlashCommands.setCommands(self.widget.buf_nrs.input, {})
 
-    self.chat_history = ChatHistory:new()
+    self.session_state:replace_history(ChatHistory:new())
+    self.chat_history = self.session_state:get_history()
     self._history_to_send = nil
+    self._queued_submissions = {}
+    self._interrupt_submission = nil
+    self:_render_window_headers()
 end
 
 --- Switch to a different ACP provider while preserving chat UI and history.
@@ -867,7 +1209,8 @@ function SessionManager:switch_provider()
                         local new_timestamp = self.chat_history.timestamp
 
                         -- Restore saved messages (new_session created a fresh one)
-                        self.chat_history = saved_history
+                        self.session_state:replace_history(saved_history)
+                        self.chat_history = self.session_state:get_history()
                         self.chat_history.session_id = new_session_id
                         self.chat_history.timestamp = new_timestamp
                         self._history_to_send = saved_history.messages
@@ -887,6 +1230,7 @@ function SessionManager:switch_provider()
         old_agent:cancel_session(old_session_id)
     end
     self.session_id = nil
+    self.status_animation:stop()
     self.permission_manager:clear()
     self.todo_list:clear()
 
@@ -940,76 +1284,44 @@ function SessionManager:add_buffer_diagnostics_to_context(bufnr)
     return self.diagnostics_list:add_many(diagnostics)
 end
 
---- @param tool_call_id string
-function SessionManager:_show_diff_in_buffer(tool_call_id)
-    -- Only show diff if enabled by user config,
-    -- and cursor is in the same tabpage as this session to avoid disruption
-    if
-        not Config.diff_preview.enabled
-        or vim.api.nvim_get_current_tabpage() ~= self.tab_page_id
-    then
-        return
+--- @return string
+function SessionManager:_get_workspace_root()
+    local file_path
+    local target_winid = self.widget:find_first_non_widget_window()
+
+    if target_winid and vim.api.nvim_win_is_valid(target_winid) then
+        local target_bufnr = vim.api.nvim_win_get_buf(target_winid)
+        local target_path = vim.api.nvim_buf_get_name(target_bufnr)
+        if target_path ~= "" then
+            file_path = target_path
+        end
     end
 
-    local tracker = tool_call_id
-        and self.message_writer.tool_call_blocks[tool_call_id]
-
-    if
-        not tracker
-        or tracker.kind ~= "edit"
-        or tracker.diff == nil
-        or not tracker.file_path
-    then
-        return
+    local tabnr = vim.api.nvim_tabpage_get_number(self.tab_page_id)
+    local cwd = vim.fn.getcwd(-1, tabnr)
+    if cwd == nil or cwd == "" then
+        cwd = vim.fn.getcwd()
     end
 
-    DiffPreview.show_diff({
-        file_path = tracker.file_path,
-        diff = tracker.diff,
-        get_winid = function(bufnr)
-            local winid = self.widget:find_first_non_widget_window()
-            if not winid then
-                return self.widget:open_left_window(bufnr)
-            end
-            local ok, err = pcall(vim.api.nvim_win_set_buf, winid, bufnr)
+    local start_dir = file_path
+            and vim.fs.dirname(FileSystem.to_absolute_path(file_path))
+        or FileSystem.to_absolute_path(cwd)
+    local git_marker = vim.fs.find({ ".git" }, {
+        upward = true,
+        path = start_dir,
+    })[1]
 
-            if not ok then
-                Logger.notify(
-                    "Failed to set buffer in window: " .. tostring(err),
-                    vim.log.levels.WARN
-                )
-                return nil
-            end
-            return winid
-        end,
-    })
-end
-
---- @param tool_call_id string
---- @param is_rejection boolean|nil
-function SessionManager:_clear_diff_in_buffer(tool_call_id, is_rejection)
-    local tracker = tool_call_id
-        and self.message_writer.tool_call_blocks[tool_call_id]
-
-    if
-        not tracker
-        or tracker.kind ~= "edit"
-        or tracker.diff == nil
-        or not tracker.file_path
-    then
-        return
+    if git_marker then
+        return FileSystem.to_absolute_path(vim.fs.dirname(git_marker))
     end
 
-    DiffPreview.clear_diff(tracker.file_path, is_rejection)
+    return FileSystem.to_absolute_path(cwd)
 end
 
 --- @param new_config_options agentic.acp.ConfigOption[]
 function SessionManager:_handle_new_config_options(new_config_options)
     self.config_options:set_options(new_config_options)
-
-    if self.config_options.mode and self.config_options.mode.currentValue then
-        self:_set_mode_to_chat_header(self.config_options.mode.currentValue)
-    end
+    self:_render_window_headers()
 end
 
 function SessionManager:_get_system_info()
@@ -1078,6 +1390,10 @@ end
 
 function SessionManager:destroy()
     self:_cancel_session()
+    self.review_controller:destroy()
+    self.permission_manager:destroy()
+    self.status_animation:stop()
+    self.message_writer:destroy()
     self.widget:destroy()
 end
 
@@ -1096,21 +1412,19 @@ function SessionManager:restore_from_history(history, opts)
 
     -- Update existing chat_history with loaded data, keeping current session_id
     if opts.reuse_session then
-        self.chat_history.messages = vim.deepcopy(history.messages)
-        self.chat_history.title = history.title or ""
+        self.session_state:dispatch(SessionEvents.restore_history(history, {
+            preserve_session_id = true,
+            preserve_timestamp = true,
+        }))
     else
-        self.chat_history = history
+        self.session_state:replace_history(history)
+        self.chat_history = self.session_state:get_history()
     end
-
-    local SessionRestore = require("agentic.session_restore")
 
     if opts.reuse_session and self.session_id then
         -- Reuse existing ACP session, just replay messages
         self._restoring = false
-        SessionRestore.replay_messages(
-            self.message_writer,
-            self._history_to_send
-        )
+        SessionRestore.replay_messages(self.message_writer, self._history_to_send)
         -- ACP session already knows these messages; clear to prevent duplicate prepend
         self._history_to_send = nil
     else

@@ -1,5 +1,6 @@
 local ACPPayloads = require("agentic.acp.acp_payloads")
 local ChatHistory = require("agentic.ui.chat_history")
+local Chooser = require("agentic.ui.chooser")
 local Logger = require("agentic.utils.logger")
 local SessionRegistry = require("agentic.session_registry")
 
@@ -56,7 +57,7 @@ local function restore_with_conflict_check(
     has_conflict
 )
     if has_conflict then
-        vim.ui.select({
+        Chooser.show({
             "Cancel",
             "Clear current session and restore",
         }, {
@@ -92,7 +93,7 @@ function SessionRestore.show_picker(tab_page_id, current_session)
             })
         end
 
-        vim.ui.select(items, {
+        Chooser.show(items, {
             prompt = "Select session to restore:",
             format_item = function(item)
                 return item.display

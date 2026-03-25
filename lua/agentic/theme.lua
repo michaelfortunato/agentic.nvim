@@ -15,6 +15,12 @@ Theme.HL_GROUPS = {
     STATUS_FAILED = "AgenticStatusFailed",
     CODE_BLOCK_FENCE = "AgenticCodeBlockFence",
     WIN_BAR_TITLE = "AgenticTitle",
+    WIN_BAR_CONTEXT = "AgenticTitleContext",
+    WIN_BAR_HINT = "AgenticTitleHint",
+    WIN_SEPARATOR = "AgenticWinSeparator",
+    STATUS_LINE = "AgenticStatusLine",
+    REVIEW_BANNER = "AgenticReviewBanner",
+    REVIEW_BANNER_ACCENT = "AgenticReviewBannerAccent",
 
     SPINNER_GENERATING = "AgenticSpinnerGenerating",
     SPINNER_THINKING = "AgenticSpinnerThinking",
@@ -83,6 +89,12 @@ function Theme.setup()
 
         -- Title highlight
         { Theme.HL_GROUPS.WIN_BAR_TITLE, { bg = COLORS.title_bg, fg = COLORS.title_fg, bold = true } },
+        { Theme.HL_GROUPS.WIN_BAR_CONTEXT, { link = "Comment" } },
+        { Theme.HL_GROUPS.WIN_BAR_HINT, { link = "Comment" } },
+        { Theme.HL_GROUPS.WIN_SEPARATOR, { link = "WinSeparator" } },
+        { Theme.HL_GROUPS.STATUS_LINE, { link = "StatusLine" } },
+        { Theme.HL_GROUPS.REVIEW_BANNER, { link = "Comment" } },
+        { Theme.HL_GROUPS.REVIEW_BANNER_ACCENT, { link = "Directory" } },
 
         -- Spinner highlights
         { Theme.HL_GROUPS.SPINNER_GENERATING, { fg = COLORS.spinner_generating_fg, bold = true } },

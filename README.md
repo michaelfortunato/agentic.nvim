@@ -388,7 +388,7 @@ Configure the widget layout position and sizing:
   opts = {
     windows = {
       position = "right",  -- "right", "left", or "bottom"
-      width = "40%",       -- Sidebar width (position = "right" or "left")
+      width = "32%",       -- Sidebar width (position = "right" or "left")
       height = "30%",      -- Panel height (position = "bottom")
     },
   },
@@ -635,7 +635,7 @@ before you accept or reject them. You can configure the diff preview layout:
   opts = {
     diff_preview = {
       enabled = true,
-      layout = "split",  -- "split" or "inline"
+      layout = "interwoven",  -- "interwoven", "inline", or "split"
       center_on_navigate_hunks = true,
     },
   },
@@ -644,8 +644,9 @@ before you accept or reject them. You can configure the diff preview layout:
 
 **Layout Options:**
 
-- `"split"` (default) - Side-by-side diff view
-- `"inline"` - Unified diff view in a single buffer
+- `"interwoven"` (default) - Unified review view in the edited buffer with inserted changes shown inline
+- `"inline"` - Alias for the same unified interwoven review mode
+- `"split"` - Side-by-side diff view
 
 **Navigation:**
 

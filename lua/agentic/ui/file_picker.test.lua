@@ -1,6 +1,7 @@
 local assert = require("tests.helpers.assert")
 local spy = require("tests.helpers.spy")
 
+local Config = require("agentic.config")
 local FilePicker = require("agentic.ui.file_picker")
 
 --- Computes the differences between two tables
@@ -42,6 +43,7 @@ describe("FilePicker:scan_files", function()
     local original_cmd_rg
     local original_cmd_fd
     local original_cmd_git
+    local original_hidden
 
     --- @type agentic.ui.FilePicker
     local picker
@@ -50,6 +52,8 @@ describe("FilePicker:scan_files", function()
         original_cmd_rg = FilePicker.CMD_RG[1]
         original_cmd_fd = FilePicker.CMD_FD[1]
         original_cmd_git = FilePicker.CMD_GIT[1]
+        original_hidden = Config.file_picker.hidden
+        Config.file_picker.hidden = false
         picker = FilePicker:new(vim.api.nvim_create_buf(false, true)) --[[@as agentic.ui.FilePicker]]
     end)
 
@@ -61,6 +65,7 @@ describe("FilePicker:scan_files", function()
         FilePicker.CMD_RG[1] = original_cmd_rg
         FilePicker.CMD_FD[1] = original_cmd_fd
         FilePicker.CMD_GIT[1] = original_cmd_git
+        Config.file_picker.hidden = original_hidden
     end)
 
     describe("mocked commands", function()
@@ -86,6 +91,35 @@ describe("FilePicker:scan_files", function()
             -- Should have called system exactly 2 times (first fails, second succeeds)
             assert.equal(2, system_stub.call_count)
             assert.equal(3, #files)
+        end)
+
+        it("filters hidden files when hidden results are disabled", function()
+            FilePicker.CMD_RG[1] = "echo"
+            FilePicker.CMD_FD[1] = "echo"
+            FilePicker.CMD_GIT[1] = "echo"
+
+            system_stub = spy.stub(vim.fn, "system")
+            system_stub:returns("file1.lua\n.env\nfoo/.secret\n")
+
+            local files = picker:scan_files("/tmp/agentic-file-picker")
+            local words = vim.tbl_map(function(file)
+                return file.word
+            end, files)
+
+            assert.same({ "@file1.lua" }, words)
+        end)
+
+        it("renders paths relative to the resolved root", function()
+            FilePicker.CMD_RG[1] = "echo"
+            FilePicker.CMD_FD[1] = "echo"
+            FilePicker.CMD_GIT[1] = "echo"
+
+            system_stub = spy.stub(vim.fn, "system")
+            system_stub:returns("/tmp/agentic-file-picker/src/main.lua\n")
+
+            local files = picker:scan_files("/tmp/agentic-file-picker")
+
+            assert.equal("@src/main.lua", files[1].word)
         end)
     end)
 
@@ -195,6 +229,78 @@ describe("FilePicker:scan_files", function()
 
             assert.are.equal(#words_rg, #words_glob)
         end)
+    end)
+end)
+
+describe("FilePicker.complete_func", function()
+    --- @type agentic.ui.FilePicker
+    local picker
+    --- @type integer
+    local bufnr
+    --- @type integer
+    local original_bufnr
+
+    before_each(function()
+        original_bufnr = vim.api.nvim_get_current_buf()
+        bufnr = vim.api.nvim_create_buf(false, true)
+        picker = FilePicker:new(bufnr) --[[@as agentic.ui.FilePicker]]
+        vim.api.nvim_set_current_buf(bufnr)
+    end)
+
+    after_each(function()
+        if original_bufnr and vim.api.nvim_buf_is_valid(original_bufnr) then
+            vim.api.nvim_set_current_buf(original_bufnr)
+        end
+
+        if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+            vim.api.nvim_buf_delete(bufnr, { force = true })
+        end
+    end)
+
+    it("returns only matching completion items", function()
+        picker._files = {
+            {
+                word = "@src/main.lua",
+                _path_lc = "src/main.lua",
+                _basename_lc = "main.lua",
+            },
+            {
+                word = "@src/other.lua",
+                _path_lc = "src/other.lua",
+                _basename_lc = "other.lua",
+            },
+            {
+                word = "@tests/main_spec.lua",
+                _path_lc = "tests/main_spec.lua",
+                _basename_lc = "main_spec.lua",
+            },
+        }
+
+        local matches = FilePicker.complete_func(0, "@main")
+        local words = vim.tbl_map(function(item)
+            return item.word
+        end, matches)
+
+        assert.same({ "@src/main.lua", "@tests/main_spec.lua" }, words)
+    end)
+
+    it("caps completion results to a bounded set", function()
+        picker._files = {}
+
+        for i = 1, 260 do
+            local path = string.format("src/file-%03d.lua", i)
+            picker._files[i] = {
+                word = "@" .. path,
+                _path_lc = path,
+                _basename_lc = path:match("([^/]+)$"),
+            }
+        end
+
+        local matches = FilePicker.complete_func(0, "@file")
+
+        assert.equal(200, #matches)
+        assert.equal("@src/file-001.lua", matches[1].word)
+        assert.equal("@src/file-200.lua", matches[#matches].word)
     end)
 end)
 

@@ -2,6 +2,7 @@ local Logger = require("agentic.utils.logger")
 local Config = require("agentic.config")
 local DefaultConfig = require("agentic.config_default")
 local ACPHealth = require("agentic.acp.acp_health")
+local Chooser = require("agentic.ui.chooser")
 
 --- @class agentic.SessionRegistry
 --- @field sessions table<integer, agentic.SessionManager|nil> Weak map: tab_page_id -> SessionManager instance
@@ -108,7 +109,7 @@ function SessionRegistry.select_provider(on_selected)
 
     vim.list_extend(sorted_providers, not_installed)
 
-    vim.ui.select(sorted_providers, {
+    Chooser.show(sorted_providers, {
         prompt = "Select an ACP provider for the new session:",
         --- @param item _ProviderStatus
         format_item = function(item)
@@ -120,10 +121,8 @@ function SessionRegistry.select_provider(on_selected)
                 label = label .. " (default)"
             end
 
-            label = label
-                .. (item.installed and " ✓ available" or " ✗ not installed")
-
             return label
+                .. (item.installed and " ✓ available" or " ✗ not installed")
         end,
     }, function(selected_provider)
         on_selected(selected_provider and selected_provider.name)

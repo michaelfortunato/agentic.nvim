@@ -39,11 +39,11 @@ describe("Open and Close Chat Widget", function()
         assert.same({ "", "AgenticChat", "AgenticInput" }, filetypes)
 
         -- 80 - default neovim headless width
-        -- 40% of 80 = 32 (chat window)
+        -- 32% of 80 = 25 (chat window)
         -- 1 separator
-        -- Check that original window width is reduced (80 - 32 - 1 separator = 47)
+        -- Check that original window width is reduced (80 - 25 - 1 separator = 54)
         local original_width = child.api.nvim_win_get_width(initial_winid)
-        assert.equal(47, original_width)
+        assert.equal(54, original_width)
     end)
 
     it("toggles the widget to show and hide it", function()

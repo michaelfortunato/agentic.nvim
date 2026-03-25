@@ -9,8 +9,6 @@ local Theme = require("agentic.theme")
 
 local NS_TOOL_BLOCKS = vim.api.nvim_create_namespace("agentic_tool_blocks")
 local NS_DECORATIONS = vim.api.nvim_create_namespace("agentic_tool_decorations")
-local NS_PERMISSION_BUTTONS =
-    vim.api.nvim_create_namespace("agentic_permission_buttons")
 local NS_DIFF_HIGHLIGHTS =
     vim.api.nvim_create_namespace("agentic_diff_highlights")
 local NS_STATUS = vim.api.nvim_create_namespace("agentic_status_footer")
@@ -20,6 +18,7 @@ local NS_STATUS = vim.api.nvim_create_namespace("agentic_status_footer")
 --- @field line_index integer Line index relative to returned lines (0-based)
 --- @field old_line? string Original line content (for diff types)
 --- @field new_line? string Modified line content (for diff types)
+--- @field display_prefix_len? integer Byte length of any diff marker prefix rendered before the content
 
 --- @class agentic.ui.MessageWriter.ToolCallDiff
 --- @field new string[]
@@ -41,38 +40,74 @@ local NS_STATUS = vim.api.nvim_create_namespace("agentic_status_footer")
 --- @field bufnr integer
 --- @field tool_call_blocks table<string, agentic.ui.MessageWriter.ToolCallBlock>
 --- @field _last_message_type? string
---- @field _should_auto_scroll? boolean
+--- @field _should_auto_scroll_fn? fun(): boolean
+--- @field _scroll_to_bottom_fn? fun()
+--- @field _scroll_timer? uv.uv_timer_t
 --- @field _scroll_scheduled? boolean
---- @field _on_content_changed? fun()
+--- @field _content_changed_listeners table<integer, fun()>
+--- @field _next_content_listener_id integer
 local MessageWriter = {}
 MessageWriter.__index = MessageWriter
 
+local DEFAULT_SCROLL_DEBOUNCE_MS = 150
+local MAX_DIFF_CARD_HUNKS = 2
+local MAX_DIFF_CARD_CHANGES = 4
+
+local DIFF_TOOL_KINDS = {
+    edit = true,
+    create = true,
+    write = true,
+}
+
+--- @class agentic.ui.MessageWriter.Opts
+--- @field should_auto_scroll? fun(): boolean
+--- @field scroll_to_bottom? fun()
+
 --- @param bufnr integer
+--- @param opts agentic.ui.MessageWriter.Opts|nil
 --- @return agentic.ui.MessageWriter
-function MessageWriter:new(bufnr)
+function MessageWriter:new(bufnr, opts)
     if not vim.api.nvim_buf_is_valid(bufnr) then
         error("Invalid buffer number: " .. tostring(bufnr))
     end
+
+    opts = opts or {}
 
     local instance = setmetatable({
         bufnr = bufnr,
         tool_call_blocks = {},
         _last_message_type = nil,
-        _should_auto_scroll = nil,
+        _should_auto_scroll_fn = opts.should_auto_scroll,
+        _scroll_to_bottom_fn = opts.scroll_to_bottom,
+        _scroll_timer = nil,
         _scroll_scheduled = false,
+        _content_changed_listeners = {},
+        _next_content_listener_id = 0,
     }, self)
 
     return instance
 end
 
---- @param callback fun()|nil
-function MessageWriter:set_on_content_changed(callback)
-    self._on_content_changed = callback
+--- @param callback fun()
+--- @return integer
+function MessageWriter:add_content_changed_listener(callback)
+    self._next_content_listener_id = self._next_content_listener_id + 1
+    self._content_changed_listeners[self._next_content_listener_id] = callback
+    return self._next_content_listener_id
+end
+
+--- @param listener_id integer|nil
+function MessageWriter:remove_content_changed_listener(listener_id)
+    if listener_id == nil then
+        return
+    end
+
+    self._content_changed_listeners[listener_id] = nil
 end
 
 function MessageWriter:_notify_content_changed()
-    if self._on_content_changed then
-        self._on_content_changed()
+    for _, callback in pairs(self._content_changed_listeners) do
+        callback()
     end
 end
 
@@ -195,39 +230,132 @@ function MessageWriter:_check_auto_scroll(bufnr)
         return false
     end
 
-    local cursor_line = vim.api.nvim_win_get_cursor(winid)[1]
+    local last_visible_line = vim.api.nvim_win_call(winid, function()
+        return vim.fn.line("w$")
+    end)
     local total_lines = vim.api.nvim_buf_line_count(bufnr)
-    local distance_from_bottom = total_lines - cursor_line
+    local distance_from_bottom = total_lines - last_visible_line
 
     return distance_from_bottom <= threshold
 end
 
---- @param bufnr integer Buffer number to scroll
-function MessageWriter:_auto_scroll(bufnr)
-    if self._should_auto_scroll ~= true then
-        self._should_auto_scroll = self:_check_auto_scroll(bufnr)
+--- @param bufnr integer
+--- @return boolean
+function MessageWriter:_should_auto_scroll_now(bufnr)
+    if self._should_auto_scroll_fn then
+        return self._should_auto_scroll_fn()
     end
 
-    if self._scroll_scheduled then
+    return self:_check_auto_scroll(bufnr)
+end
+
+--- @return integer
+function MessageWriter:_get_scroll_debounce_ms()
+    local debounce_ms = Config.auto_scroll and Config.auto_scroll.debounce_ms
+
+    if debounce_ms == nil then
+        return DEFAULT_SCROLL_DEBOUNCE_MS
+    end
+
+    return math.max(0, math.floor(debounce_ms))
+end
+
+--- @return uv.uv_timer_t
+function MessageWriter:_ensure_scroll_timer()
+    local timer = self._scroll_timer
+
+    if timer then
+        local ok, is_closing = pcall(function()
+            return timer:is_closing()
+        end)
+
+        if ok and not is_closing then
+            return timer
+        end
+    end
+
+    timer = vim.uv.new_timer()
+    self._scroll_timer = timer
+
+    return timer
+end
+
+--- @param bufnr integer Buffer number to scroll
+function MessageWriter:_flush_auto_scroll(bufnr)
+    self._scroll_scheduled = false
+
+    if not vim.api.nvim_buf_is_valid(bufnr) then
         return
     end
-    self._scroll_scheduled = true
 
-    vim.schedule(function()
+    if not self:_should_auto_scroll_now(bufnr) then
+        return
+    end
+
+    if self._scroll_to_bottom_fn then
+        self._scroll_to_bottom_fn()
+        return
+    end
+
+    local wins = vim.fn.win_findbuf(bufnr)
+    if #wins > 0 then
+        local last_line = math.max(1, vim.api.nvim_buf_line_count(bufnr))
+        local success, err =
+            pcall(vim.api.nvim_win_set_cursor, wins[1], { last_line, 0 })
+        if not success then
+            Logger.debug("Failed to move cursor to buffer end", err)
+        end
+    end
+end
+
+--- @param bufnr integer Buffer number to scroll
+function MessageWriter:_auto_scroll(bufnr)
+    if not self:_should_auto_scroll_now(bufnr) then
         self._scroll_scheduled = false
 
-        if vim.api.nvim_buf_is_valid(bufnr) then
-            if self._should_auto_scroll then
-                local wins = vim.fn.win_findbuf(bufnr)
-                if #wins > 0 then
-                    vim.api.nvim_win_call(wins[1], function()
-                        vim.cmd("normal! G0zb")
-                    end)
-                end
-            end
+        local existing_timer = self._scroll_timer
+        if existing_timer then
+            pcall(function()
+                existing_timer:stop()
+            end)
         end
 
-        self._should_auto_scroll = nil
+        return
+    end
+
+    local timer = self:_ensure_scroll_timer()
+    local delay = self:_get_scroll_debounce_ms()
+
+    self._scroll_scheduled = true
+
+    timer:stop()
+    timer:start(
+        delay,
+        0,
+        vim.schedule_wrap(function()
+            self:_flush_auto_scroll(bufnr)
+        end)
+    )
+end
+
+function MessageWriter:destroy()
+    self._scroll_scheduled = false
+
+    local timer = self._scroll_timer
+    if not timer then
+        return
+    end
+
+    self._scroll_timer = nil
+
+    pcall(function()
+        timer:stop()
+    end)
+
+    pcall(function()
+        if not timer:is_closing() then
+            timer:close()
+        end
     end)
 end
 
@@ -436,11 +564,288 @@ function MessageWriter:_build_header_line(tool_call_block)
     local kind = tool_call_block.kind or "other"
     local argument = tool_call_block.argument or ""
 
+    if DIFF_TOOL_KINDS[kind] and tool_call_block.file_path then
+        local basename = vim.fs.basename(tool_call_block.file_path)
+        if basename and basename ~= "" then
+            argument = basename
+        end
+    end
+
     -- Sanitize argument to prevent newlines in the header line
     -- nvim_buf_set_lines doesn't accept array items with embedded newlines
     argument = argument:gsub("\n", "\\n")
 
     return string.format(" %s(%s) ", kind, argument)
+end
+
+--- @param count integer
+--- @param singular string
+--- @param plural? string
+--- @return string
+local function pluralize(count, singular, plural)
+    return string.format(
+        "%d %s",
+        count,
+        count == 1 and singular or (plural or (singular .. "s"))
+    )
+end
+
+--- @param path string
+--- @return string
+local function format_compact_path(path)
+    local compact = vim.fn.fnamemodify(path, ":~:.")
+    return compact ~= "" and compact or path
+end
+
+--- @param diff_block agentic.ui.ToolCallDiff.DiffBlock
+--- @return string
+local function build_diff_block_label(diff_block)
+    if #diff_block.old_lines == 0 then
+        return string.format("@@ insert near line %d @@", diff_block.start_line)
+    end
+
+    if diff_block.start_line == diff_block.end_line then
+        return string.format("@@ line %d @@", diff_block.start_line)
+    end
+
+    return string.format(
+        "@@ lines %d-%d @@",
+        diff_block.start_line,
+        diff_block.end_line
+    )
+end
+
+--- @param lines string[]
+--- @param highlight_ranges agentic.ui.MessageWriter.HighlightRange[]
+--- @param line_type agentic.ui.MessageWriter.HighlightRange.type
+--- @param line_text string
+--- @param old_line? string
+--- @param new_line? string
+--- @param prefix string
+local function append_diff_line(
+    lines,
+    highlight_ranges,
+    line_type,
+    line_text,
+    old_line,
+    new_line,
+    prefix
+)
+    local display_line = prefix .. line_text
+    table.insert(lines, display_line)
+
+    highlight_ranges[#highlight_ranges + 1] = {
+        line_index = #lines - 1,
+        type = line_type,
+        old_line = old_line,
+        new_line = new_line,
+        display_prefix_len = #prefix,
+    }
+end
+
+--- @param lines string[]
+--- @param highlight_ranges agentic.ui.MessageWriter.HighlightRange[]
+--- @param text string
+local function append_comment_line(lines, highlight_ranges, text)
+    table.insert(lines, text)
+    highlight_ranges[#highlight_ranges + 1] = {
+        type = "comment",
+        line_index = #lines - 1,
+    }
+end
+
+--- @class agentic.ui.MessageWriter.DiffCardStats
+--- @field hunk_count integer
+--- @field modifications integer
+--- @field additions integer
+--- @field deletions integer
+
+--- @class agentic.ui.MessageWriter.DiffCardSample
+--- @field label string
+--- @field pairs agentic.ui.ToolCallDiff.ChangedPair[]
+
+--- @param stats agentic.ui.MessageWriter.DiffCardStats
+--- @return string
+local function build_diff_summary_line(stats)
+    local parts = { pluralize(stats.hunk_count, "hunk") }
+
+    if stats.modifications > 0 then
+        parts[#parts + 1] = pluralize(stats.modifications, "modified line")
+    end
+    if stats.additions > 0 then
+        parts[#parts + 1] = pluralize(stats.additions, "added line")
+    end
+    if stats.deletions > 0 then
+        parts[#parts + 1] = pluralize(stats.deletions, "deleted line")
+    end
+
+    return table.concat(parts, " · ")
+end
+
+--- @param diff_blocks agentic.ui.ToolCallDiff.DiffBlock[]
+--- @return agentic.ui.MessageWriter.DiffCardStats
+--- @return agentic.ui.MessageWriter.DiffCardSample[]
+--- @return integer sampled_changes
+local function summarize_diff_blocks(diff_blocks)
+    --- @type agentic.ui.MessageWriter.DiffCardStats
+    local stats = {
+        hunk_count = #diff_blocks,
+        modifications = 0,
+        additions = 0,
+        deletions = 0,
+    }
+
+    --- @type agentic.ui.MessageWriter.DiffCardSample[]
+    local samples = {}
+    local sampled_changes = 0
+
+    for _, block in ipairs(diff_blocks) do
+        local filtered = ToolCallDiff.filter_unchanged_lines(
+            block.old_lines,
+            block.new_lines
+        )
+
+        for _, pair in ipairs(filtered.pairs) do
+            if pair.old_line and pair.new_line then
+                stats.modifications = stats.modifications + 1
+            elseif pair.old_line then
+                stats.deletions = stats.deletions + 1
+            elseif pair.new_line then
+                stats.additions = stats.additions + 1
+            end
+        end
+
+        if
+            #filtered.pairs > 0
+            and #samples < MAX_DIFF_CARD_HUNKS
+            and sampled_changes < MAX_DIFF_CARD_CHANGES
+        then
+            --- @type agentic.ui.ToolCallDiff.ChangedPair[]
+            local sample_pairs = {}
+
+            for _, pair in ipairs(filtered.pairs) do
+                if sampled_changes >= MAX_DIFF_CARD_CHANGES then
+                    break
+                end
+
+                sample_pairs[#sample_pairs + 1] = pair
+                sampled_changes = sampled_changes + 1
+            end
+
+            if #sample_pairs > 0 then
+                samples[#samples + 1] = {
+                    label = build_diff_block_label(block),
+                    pairs = sample_pairs,
+                }
+            end
+        end
+    end
+
+    return stats, samples, sampled_changes
+end
+
+--- @param lines string[]
+--- @param highlight_ranges agentic.ui.MessageWriter.HighlightRange[]
+--- @param sample agentic.ui.MessageWriter.DiffCardSample
+local function append_diff_card_sample(lines, highlight_ranges, sample)
+    append_comment_line(lines, highlight_ranges, sample.label)
+
+    for _, pair in ipairs(sample.pairs) do
+        if pair.old_line and pair.new_line then
+            append_diff_line(
+                lines,
+                highlight_ranges,
+                "old",
+                pair.old_line,
+                pair.old_line,
+                pair.new_line,
+                "- "
+            )
+            append_diff_line(
+                lines,
+                highlight_ranges,
+                "new_modification",
+                pair.new_line,
+                pair.old_line,
+                pair.new_line,
+                "+ "
+            )
+        elseif pair.old_line then
+            append_diff_line(
+                lines,
+                highlight_ranges,
+                "old",
+                pair.old_line,
+                pair.old_line,
+                nil,
+                "- "
+            )
+        elseif pair.new_line then
+            append_diff_line(
+                lines,
+                highlight_ranges,
+                "new",
+                pair.new_line,
+                nil,
+                pair.new_line,
+                "+ "
+            )
+        end
+    end
+end
+
+--- @param tool_call_block agentic.ui.MessageWriter.ToolCallBlock
+--- @param lines string[]
+--- @param highlight_ranges agentic.ui.MessageWriter.HighlightRange[]
+local function append_diff_card(lines, highlight_ranges, tool_call_block)
+    local diff_path = tool_call_block.file_path or ""
+    local diff_blocks = ToolCallDiff.extract_diff_blocks({
+        path = diff_path,
+        old_text = tool_call_block.diff.old,
+        new_text = tool_call_block.diff.new,
+        replace_all = tool_call_block.diff.all,
+    })
+
+    if diff_path ~= "" then
+        append_comment_line(
+            lines,
+            highlight_ranges,
+            format_compact_path(diff_path)
+        )
+    end
+
+    local stats, samples, sampled_changes = summarize_diff_blocks(diff_blocks)
+    append_comment_line(lines, highlight_ranges, build_diff_summary_line(stats))
+
+    local hint_lines = {}
+    local hint_line_index =
+        DiffPreview.add_navigation_hint(tool_call_block, hint_lines)
+    if hint_line_index ~= nil then
+        append_comment_line(
+            lines,
+            highlight_ranges,
+            hint_lines[hint_line_index + 1]
+        )
+        return
+    end
+
+    for _, sample in ipairs(samples) do
+        append_diff_card_sample(lines, highlight_ranges, sample)
+    end
+
+    local total_changes = stats.modifications
+        + stats.additions
+        + stats.deletions
+    if total_changes > sampled_changes then
+        append_comment_line(
+            lines,
+            highlight_ranges,
+            string.format(
+                "... %s in buffer review",
+                pluralize(total_changes - sampled_changes, "more change")
+            )
+        )
+    end
 end
 
 --- @param tool_call_block agentic.ui.MessageWriter.ToolCallBlock
@@ -472,104 +877,7 @@ function MessageWriter:_prepare_block_lines(tool_call_block)
             table.insert(highlight_ranges, range)
         end
     elseif tool_call_block.diff then
-        local diff_path = tool_call_block.file_path or ""
-
-        local diff_blocks = ToolCallDiff.extract_diff_blocks({
-            path = diff_path,
-            old_text = tool_call_block.diff.old,
-            new_text = tool_call_block.diff.new,
-            replace_all = tool_call_block.diff.all,
-        })
-
-        local lang = Theme.get_language_from_path(diff_path)
-
-        -- Hack to avoid triple backtick conflicts in markdown files
-        local has_fences = lang ~= "md" and lang ~= "markdown"
-        if has_fences then
-            table.insert(lines, "```" .. lang)
-        end
-
-        for _, block in ipairs(diff_blocks) do
-            local old_count = #block.old_lines
-            local new_count = #block.new_lines
-            local is_new_file = old_count == 0
-            local is_modification = old_count == new_count and old_count > 0
-
-            if is_new_file then
-                for _, new_line in ipairs(block.new_lines) do
-                    local line_index = #lines
-                    table.insert(lines, new_line)
-
-                    --- @type agentic.ui.MessageWriter.HighlightRange
-                    local range = {
-                        line_index = line_index,
-                        type = "new",
-                        old_line = nil,
-                        new_line = new_line,
-                    }
-
-                    table.insert(highlight_ranges, range)
-                end
-            else
-                local filtered = ToolCallDiff.filter_unchanged_lines(
-                    block.old_lines,
-                    block.new_lines
-                )
-
-                -- Insert old lines (removed content)
-                for _, pair in ipairs(filtered.pairs) do
-                    if pair.old_line then
-                        local line_index = #lines
-                        table.insert(lines, pair.old_line)
-
-                        --- @type agentic.ui.MessageWriter.HighlightRange
-                        local range = {
-                            line_index = line_index,
-                            type = "old",
-                            old_line = pair.old_line,
-                            new_line = is_modification and pair.new_line or nil,
-                        }
-
-                        table.insert(highlight_ranges, range)
-                    end
-                end
-
-                -- Insert new lines (added content)
-                for _, pair in ipairs(filtered.pairs) do
-                    if pair.new_line then
-                        local line_index = #lines
-                        table.insert(lines, pair.new_line)
-
-                        if not is_modification then
-                            --- @type agentic.ui.MessageWriter.HighlightRange
-                            local range = {
-                                line_index = line_index,
-                                type = "new",
-                                old_line = nil,
-                                new_line = pair.new_line,
-                            }
-
-                            table.insert(highlight_ranges, range)
-                        else
-                            --- @type agentic.ui.MessageWriter.HighlightRange
-                            local range = {
-                                line_index = line_index,
-                                type = "new_modification",
-                                old_line = pair.old_line,
-                                new_line = pair.new_line,
-                            }
-
-                            table.insert(highlight_ranges, range)
-                        end
-                    end
-                end
-            end
-        end
-
-        -- Close code fences, if not markdown, to avoid conflicts
-        if has_fences then
-            table.insert(lines, "```")
-        end
+        append_diff_card(lines, highlight_ranges, tool_call_block)
     else
         if tool_call_block.body then
             vim.list_extend(lines, tool_call_block.body)
@@ -579,154 +887,6 @@ function MessageWriter:_prepare_block_lines(tool_call_block)
     table.insert(lines, "")
 
     return lines, highlight_ranges
-end
-
---- Display permission request buttons at the end of the buffer
---- @param options agentic.acp.PermissionOption[]
---- @return integer button_start_row Start row of button block
---- @return integer button_end_row End row of button block
---- @return table<integer, string> option_mapping Mapping from number (1-N) to option_id
-function MessageWriter:display_permission_buttons(tool_call_id, options)
-    local option_mapping = {}
-
-    local lines_to_append = {
-        "### Waiting for your response: ",
-        "",
-    }
-
-    local tracker = self.tool_call_blocks[tool_call_id]
-
-    if tracker then
-        -- Sanitize argument to prevent newlines in the permission request, neovim throws error
-        local sanitized_argument = tracker.argument:gsub("\n", "\\n")
-
-        -- Get buffer width and limit the display line
-        local winid = vim.fn.bufwinid(self.bufnr)
-
-        local buf_width = 80 -- default fallback width, in case buf is not visible
-        if winid ~= -1 then
-            buf_width = vim.api.nvim_win_get_width(winid)
-        end
-
-        local tool_line =
-            string.format(" %s(%s)", tracker.kind, sanitized_argument)
-
-        -- Truncate if longer than buffer width, leaving space for "...)"
-        if #tool_line > buf_width then
-            tool_line = tool_line:sub(1, buf_width - 4) .. "...)"
-        end
-
-        vim.list_extend(lines_to_append, {
-            tool_line,
-            "", -- Blank line prevents markdown inline markers from spanning to next content
-        })
-    end
-
-    for i, option in ipairs(options) do
-        table.insert(
-            lines_to_append,
-            string.format(
-                "%d. %s %s",
-                i,
-                Config.permission_icons[option.kind] or "",
-                option.name
-            )
-        )
-        option_mapping[i] = option.optionId
-    end
-
-    table.insert(lines_to_append, "--- ---")
-
-    local hint_line_index =
-        DiffPreview.add_navigation_hint(tracker, lines_to_append)
-
-    table.insert(lines_to_append, "")
-
-    -- Ensure exactly one empty separator line before the permission block.
-    -- During reanchor, remove_permission_buttons leaves a trailing empty
-    -- line — reuse it instead of adding another one.
-    local line_count = vim.api.nvim_buf_line_count(self.bufnr)
-    local last_line = vim.api.nvim_buf_get_lines(
-        self.bufnr,
-        line_count - 1,
-        line_count,
-        false
-    )[1]
-
-    if last_line == "" then
-        -- Buffer already ends with an empty line (left by
-        -- remove_permission_buttons during reanchor). Reuse it as
-        -- separator — include it in the block range so it gets
-        -- cleaned up, but don't add another one.
-        line_count = line_count - 1
-    else
-        -- No trailing empty line — prepend one as separator
-        table.insert(lines_to_append, 1, "")
-    end
-
-    -- The separator line shifts hint position by 1 in both cases:
-    -- existing empty line included in block range, or prepended empty line.
-    if hint_line_index then
-        hint_line_index = hint_line_index + 1
-    end
-
-    local button_start_row = line_count
-
-    self:_auto_scroll(self.bufnr)
-
-    BufHelpers.with_modifiable(self.bufnr, function()
-        self:_append_lines(lines_to_append)
-    end)
-
-    local button_end_row = vim.api.nvim_buf_line_count(self.bufnr) - 1
-
-    if hint_line_index then
-        DiffPreview.apply_hint_styling(
-            self.bufnr,
-            NS_PERMISSION_BUTTONS,
-            button_start_row,
-            hint_line_index
-        )
-    end
-
-    -- Create extmark to track button block
-    vim.api.nvim_buf_set_extmark(
-        self.bufnr,
-        NS_PERMISSION_BUTTONS,
-        button_start_row,
-        0,
-        {
-            end_row = button_end_row,
-            right_gravity = false,
-        }
-    )
-
-    return button_start_row, button_end_row, option_mapping
-end
-
---- @param start_row integer Start row of button block
---- @param end_row integer End row of button block
-function MessageWriter:remove_permission_buttons(start_row, end_row)
-    pcall(
-        vim.api.nvim_buf_clear_namespace,
-        self.bufnr,
-        NS_PERMISSION_BUTTONS,
-        start_row,
-        end_row + 1
-    )
-
-    BufHelpers.with_modifiable(self.bufnr, function(bufnr)
-        pcall(
-            vim.api.nvim_buf_set_lines,
-            bufnr,
-            start_row,
-            end_row + 1,
-            false,
-            {
-                "", -- a leading as separator from previous content
-            }
-        )
-    end)
 end
 
 --- Apply highlights to block content (either diff highlights or Comment for non-edit blocks)
@@ -778,6 +938,7 @@ function MessageWriter:_apply_diff_highlights(start_row, highlight_ranges)
 
     for _, hl_range in ipairs(highlight_ranges) do
         local buffer_line = start_row + hl_range.line_index
+        local col_offset = hl_range.display_prefix_len or 0
 
         if hl_range.type == "old" then
             DiffHighlighter.apply_diff_highlights(
@@ -785,7 +946,8 @@ function MessageWriter:_apply_diff_highlights(start_row, highlight_ranges)
                 NS_DIFF_HIGHLIGHTS,
                 buffer_line,
                 hl_range.old_line,
-                hl_range.new_line
+                hl_range.new_line,
+                col_offset
             )
         elseif hl_range.type == "new" then
             DiffHighlighter.apply_diff_highlights(
@@ -793,7 +955,8 @@ function MessageWriter:_apply_diff_highlights(start_row, highlight_ranges)
                 NS_DIFF_HIGHLIGHTS,
                 buffer_line,
                 nil,
-                hl_range.new_line
+                hl_range.new_line,
+                col_offset
             )
         elseif hl_range.type == "new_modification" then
             DiffHighlighter.apply_new_line_word_highlights(
@@ -801,7 +964,8 @@ function MessageWriter:_apply_diff_highlights(start_row, highlight_ranges)
                 NS_DIFF_HIGHLIGHTS,
                 buffer_line,
                 hl_range.old_line,
-                hl_range.new_line
+                hl_range.new_line,
+                col_offset
             )
         elseif hl_range.type == "comment" then
             local line = vim.api.nvim_buf_get_lines(

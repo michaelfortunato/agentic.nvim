@@ -1,4 +1,5 @@
 local Config = require("agentic.config")
+local DefaultConfig = require("agentic.config_default")
 local FileSystem = require("agentic.utils.file_system")
 local Logger = require("agentic.utils.logger")
 local ToolCallDiff = require("agentic.ui.tool_call_diff")
@@ -94,6 +95,25 @@ local function cleanup_stale_suggestion_buf(suggestion_name)
     pcall(vim.api.nvim_buf_delete, existing, { force = true })
 end
 
+--- @param target_winid number
+--- @return integer
+local function calculate_split_width(target_winid)
+    local target_width = vim.api.nvim_win_get_width(target_winid)
+    local ratio = tonumber(Config.diff_preview.split_width_ratio)
+        or DefaultConfig.diff_preview.split_width_ratio
+    local min_width = tonumber(Config.diff_preview.split_min_width)
+        or DefaultConfig.diff_preview.split_min_width
+    local max_width = tonumber(Config.diff_preview.split_max_width)
+        or DefaultConfig.diff_preview.split_max_width
+
+    local raw_width = math.floor(target_width * ratio)
+    local clamped_width = math.max(min_width, raw_width)
+    clamped_width = math.min(clamped_width, max_width)
+
+    -- Keep enough room for the original file pane to remain readable.
+    return math.max(1, math.min(clamped_width, math.max(1, target_width - 24)))
+end
+
 --- Open split diff view with original and modified content
 --- @param abs_path string
 --- @param bufnr number
@@ -116,6 +136,7 @@ local function open_split_view(abs_path, bufnr, target_winid, modified_lines)
     local new_winid = vim.api.nvim_open_win(scratch_bufnr, false, {
         split = "right",
         win = target_winid,
+        width = calculate_split_width(target_winid),
     })
 
     vim.api.nvim_win_call(target_winid, function()
@@ -135,6 +156,7 @@ local function open_split_view(abs_path, bufnr, target_winid, modified_lines)
     vim.bo[bufnr].modified = true
 
     vim.bo[scratch_bufnr].modifiable = false
+    vim.wo[new_winid].winfixwidth = true
 
     vim.schedule(function()
         if not vim.api.nvim_win_is_valid(target_winid) then

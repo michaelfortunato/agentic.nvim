@@ -87,35 +87,6 @@ function ChatHistory.get_file_path(session_id)
     )
 end
 
---- @param msg agentic.ui.ChatHistory.Message
-function ChatHistory:add_message(msg)
-    table.insert(self.messages, msg)
-end
-
---- Append text to the last agent or thought message, or create a new one
---- @param msg { type: "agent"|"thought", text: string, provider_name: string  }
-function ChatHistory:append_agent_text(msg)
-    local last = self.messages[#self.messages]
-    if last and last.type == msg.type then
-        last.text = last.text .. msg.text
-    else
-        table.insert(self.messages, msg)
-    end
-end
-
---- Update an existing tool_call by merging update data
---- @param tool_call_id string
---- @param update agentic.ui.ChatHistory.ToolCall
-function ChatHistory:update_tool_call(tool_call_id, update)
-    for i = #self.messages, 1, -1 do
-        local msg = self.messages[i]
-        if msg.type == "tool_call" and msg.tool_call_id == tool_call_id then
-            self.messages[i] = vim.tbl_deep_extend("force", msg, update)
-            return
-        end
-    end
-end
-
 --- Prepend restored messages to prompt in ACP Content format
 --- @param messages agentic.ui.ChatHistory.Message[]
 --- @param prompt agentic.acp.Content[] The prompt array to prepend to

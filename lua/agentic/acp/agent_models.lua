@@ -1,8 +1,8 @@
 --- Manages agent models for ACP sessions
---- Provides model selection via vim.ui.select
 
 local Logger = require("agentic.utils.logger")
 local List = require("agentic.utils.list")
+local Chooser = require("agentic.ui.chooser")
 
 --- @class agentic.acp.AgentModels
 --- @field _models agentic.acp.Model[]
@@ -48,21 +48,15 @@ function AgentModels:show_model_selector(set_model_callback)
     local ordered_models =
         List.move_to_head(self._models, "modelId", self.current_model_id or "")
 
-    vim.ui.select(ordered_models, {
+    Chooser.show(ordered_models, {
         prompt = "Select Model:",
         format_item = function(item)
             --- @cast item agentic.acp.Model
-            local prefix = item.modelId == self.current_model_id and "● "
-                or "  "
-            if item.description and item.description ~= "" then
-                return string.format(
-                    "%s%s: %s",
-                    prefix,
-                    item.name,
-                    item.description
-                )
-            end
-            return prefix .. item.name
+            return Chooser.format_named_item(
+                item.name,
+                item.description,
+                item.modelId == self.current_model_id
+            )
         end,
     }, function(selected_model)
         if

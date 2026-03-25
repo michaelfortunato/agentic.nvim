@@ -12,6 +12,13 @@ local ToolCallDiff = require("agentic.ui.tool_call_diff")
 local M = {}
 
 local NS_DIFF = HunkNavigation.NS_DIFF
+local NS_REVIEW = vim.api.nvim_create_namespace("agentic_diff_review")
+M.NS_REVIEW = NS_REVIEW
+local HINT_KINDS = {
+    edit = true,
+    create = true,
+    write = true,
+}
 
 --- Get diff preview buffer from tabpage
 --- @param tabpage number Tabpage ID
@@ -39,6 +46,48 @@ function M.get_active_diff_buffer(tabpage)
     end
 
     return get_diff_bufnr(tab)
+end
+
+--- @param file_path string
+--- @param hunk_count integer
+--- @return table
+local function build_review_banner(file_path, hunk_count)
+    local basename = vim.fs.basename(file_path)
+    local hunk_label =
+        string.format("%d hunk%s", hunk_count, hunk_count == 1 and "" or "s")
+    local diff_keymaps = Config.keymaps.diff_preview
+
+    return {
+        {
+            { " Agentic Review ", Theme.HL_GROUPS.REVIEW_BANNER_ACCENT },
+            { " " .. basename .. " ", Theme.HL_GROUPS.REVIEW_BANNER_ACCENT },
+            { " " .. hunk_label .. " ", Theme.HL_GROUPS.REVIEW_BANNER },
+            {
+                string.format(
+                    " %s prev  %s next ",
+                    diff_keymaps.prev_hunk,
+                    diff_keymaps.next_hunk
+                ),
+                Theme.HL_GROUPS.REVIEW_BANNER,
+            },
+        },
+    }
+end
+
+--- @param bufnr integer
+--- @param file_path string
+--- @param diff_blocks agentic.ui.ToolCallDiff.Block[]
+local function render_review_banner(bufnr, file_path, diff_blocks)
+    local first_block = diff_blocks[1]
+    if not first_block then
+        return
+    end
+
+    local anchor_line = math.max(0, first_block.start_line - 1)
+    vim.api.nvim_buf_set_extmark(bufnr, NS_REVIEW, anchor_line, 0, {
+        virt_lines = build_review_banner(file_path, #diff_blocks),
+        virt_lines_above = true,
+    })
 end
 
 --- Builds a highlight map for all lines parsed as a block
@@ -225,13 +274,6 @@ end
 
 --- @param opts agentic.ui.DiffPreview.ShowOpts
 function M.show_diff(opts)
-    -- Only show diff in normal mode to avoid disrupting user workflow
-    local mode = vim.api.nvim_get_mode().mode
-    if mode ~= "n" then
-        Logger.debug("show_diff: skipped, not in normal mode:", mode)
-        return
-    end
-
     if Config.diff_preview.layout == "split" then
         local success = DiffSplitView.show_split_diff(opts)
         if success then
@@ -268,14 +310,20 @@ function M.show_diff(opts)
         bufnr = vim.fn.bufadd(opts.file_path)
     end
 
-    -- Check if buffer is already visible, otherwise request a window
     local winid = vim.fn.bufwinid(bufnr)
-    local target_winid = winid ~= -1 and winid or opts.get_winid(bufnr)
+    local target_winid = winid ~= -1 and winid or nil
+    local opened_review_window = target_winid == nil
+
+    if not target_winid then
+        target_winid = opts.get_winid(bufnr)
+    end
+
     if not target_winid then
         return
     end
 
     M.clear_diff(bufnr)
+    pcall(vim.api.nvim_buf_clear_namespace, bufnr, NS_REVIEW, 0, -1)
 
     for _, block in ipairs(diff_blocks) do
         local old_count = #block.old_lines
@@ -345,7 +393,12 @@ function M.show_diff(opts)
         end
     end
 
-    -- Scroll target window to first diff block without moving cursor
+    if #diff_blocks > 0 then
+        render_review_banner(bufnr, opts.file_path, diff_blocks)
+    end
+
+    -- Only reposition newly opened review windows. If the user already has the
+    -- file open, keep their current viewport intact.
     if #diff_blocks > 0 then
         local ok, tabpage = pcall(vim.api.nvim_win_get_tabpage, target_winid)
         if not ok then
@@ -359,9 +412,13 @@ function M.show_diff(opts)
 
         HunkNavigation.setup_keymaps(bufnr)
 
-        vim.schedule(function()
-            HunkNavigation.navigate_next(bufnr)
-        end)
+        if opened_review_window then
+            pcall(
+                vim.api.nvim_win_set_cursor,
+                target_winid,
+                { math.max(1, diff_blocks[1].start_line), 0 }
+            )
+        end
     end
 end
 
@@ -390,6 +447,7 @@ function M.clear_diff(buf, is_rejection)
     HunkNavigation.restore_keymaps(bufnr)
 
     pcall(vim.api.nvim_buf_clear_namespace, bufnr, NS_DIFF, 0, -1)
+    pcall(vim.api.nvim_buf_clear_namespace, bufnr, NS_REVIEW, 0, -1)
 
     -- Restore modifiable state if it was saved
     local prev_modifiable = vim.b[bufnr]._agentic_prev_modifiable
@@ -432,7 +490,7 @@ function M.add_navigation_hint(tracker, lines_to_append)
     -- Only add hint for edit tools with diff preview enabled
     if
         not tracker
-        or tracker.kind ~= "edit"
+        or not HINT_KINDS[tracker.kind]
         or not Config.diff_preview
         or not Config.diff_preview.enabled
     then
@@ -441,7 +499,7 @@ function M.add_navigation_hint(tracker, lines_to_append)
 
     local diff_keymaps = Config.keymaps.diff_preview
     local hint_text = string.format(
-        "HINT: %s next hunk, %s previous hunk",
+        "Review in buffer: %s next, %s prev",
         diff_keymaps.next_hunk,
         diff_keymaps.prev_hunk
     )

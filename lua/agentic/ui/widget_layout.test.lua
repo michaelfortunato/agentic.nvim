@@ -6,16 +6,25 @@ local Logger = require("agentic.utils.logger")
 
 describe("WidgetLayout", function()
     local original_position
+    local original_stack_width_ratio
+    local original_stack_min_width
+    local original_stack_max_width
     local notify_stub
 
     before_each(function()
         original_position = Config.windows.position
+        original_stack_width_ratio = Config.windows.stack_width_ratio
+        original_stack_min_width = Config.windows.stack_min_width
+        original_stack_max_width = Config.windows.stack_max_width
         notify_stub = spy.stub(Logger, "notify")
     end)
 
     after_each(function()
         notify_stub:revert()
         Config.windows.position = original_position
+        Config.windows.stack_width_ratio = original_stack_width_ratio
+        Config.windows.stack_min_width = original_stack_min_width
+        Config.windows.stack_max_width = original_stack_max_width
     end)
 
     describe("calculate_width", function()
@@ -95,6 +104,40 @@ describe("WidgetLayout", function()
         it("should return at least 1", function()
             local height = WidgetLayout.calculate_height(0.01)
             assert.are.equal(math.max(1, math.floor(lines * 0.01)), height)
+        end)
+    end)
+
+    describe("calculate_stack_width", function()
+        it("uses the configured ratio when within clamps", function()
+            Config.windows.stack_width_ratio = 0.28
+            Config.windows.stack_min_width = 32
+            Config.windows.stack_max_width = 68
+
+            assert.equal(56, WidgetLayout.calculate_stack_width(200))
+        end)
+
+        it("honors minimum width clamp", function()
+            Config.windows.stack_width_ratio = 0.1
+            Config.windows.stack_min_width = 32
+            Config.windows.stack_max_width = 68
+
+            assert.equal(32, WidgetLayout.calculate_stack_width(120))
+        end)
+
+        it("honors maximum width clamp", function()
+            Config.windows.stack_width_ratio = 0.8
+            Config.windows.stack_min_width = 32
+            Config.windows.stack_max_width = 68
+
+            assert.equal(68, WidgetLayout.calculate_stack_width(200))
+        end)
+
+        it("never consumes the entire chat width", function()
+            Config.windows.stack_width_ratio = 0.8
+            Config.windows.stack_min_width = 32
+            Config.windows.stack_max_width = 68
+
+            assert.equal(19, WidgetLayout.calculate_stack_width(20))
         end)
     end)
 

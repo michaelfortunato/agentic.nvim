@@ -5,6 +5,8 @@ local spy = require("tests.helpers.spy")
 local AgentModes = require("agentic.acp.agent_modes")
 local Config = require("agentic.config")
 local Logger = require("agentic.utils.logger")
+local SessionEvents = require("agentic.session.session_events")
+local SessionState = require("agentic.session.session_state")
 local SessionManager = require("agentic.session_manager")
 
 --- @param mode_id string
@@ -41,17 +43,20 @@ describe("agentic.SessionManager", function()
             session = {
                 config_options = {
                     legacy_agent_modes = legacy_modes,
-                    get_mode_name = function(_self, mode_id)
-                        local mode = legacy_modes:get_mode(mode_id)
-                        return mode and mode.name or nil
+                    get_header_context = function()
+                        local current_mode =
+                            legacy_modes:get_mode(legacy_modes.current_mode_id)
+                        return current_mode and ("Mode: " .. current_mode.name)
+                            or nil
                     end,
                 },
+                chat_history = { title = "" },
                 widget = {
                     render_header = render_header_spy,
                     buf_nrs = { chat = test_bufnr },
                 },
                 _on_session_update = SessionManager._on_session_update,
-                _set_mode_to_chat_header = SessionManager._set_mode_to_chat_header,
+                _render_window_headers = SessionManager._render_window_headers,
             } --[[@as agentic.SessionManager]]
         end)
 
@@ -68,9 +73,11 @@ describe("agentic.SessionManager", function()
                 session.config_options.legacy_agent_modes.current_mode_id
             )
 
-            assert.spy(render_header_spy).was.called(1)
+            assert.spy(render_header_spy).was.called(2)
             assert.equal("chat", render_header_spy.calls[1][2])
             assert.equal("Mode: Code", render_header_spy.calls[1][3])
+            assert.equal("input", render_header_spy.calls[2][2])
+            assert.equal("", render_header_spy.calls[2][3])
 
             assert.spy(notify_stub).was.called(1)
             assert.equal("Mode changed to: code", notify_stub.calls[1][1])
@@ -118,12 +125,13 @@ describe("agentic.SessionManager", function()
 
             session = {
                 config_options = config_opts,
+                chat_history = { title = "" },
                 widget = {
                     render_header = render_header_spy,
                     buf_nrs = { chat = test_bufnr },
                 },
                 _on_session_update = SessionManager._on_session_update,
-                _set_mode_to_chat_header = SessionManager._set_mode_to_chat_header,
+                _render_window_headers = SessionManager._render_window_headers,
                 _handle_new_config_options = SessionManager._handle_new_config_options,
             } --[[@as agentic.SessionManager]]
         end)
@@ -158,8 +166,370 @@ describe("agentic.SessionManager", function()
 
             assert.is_not_nil(session.config_options.mode)
             assert.equal("plan", session.config_options.mode.currentValue)
-            assert.spy(render_header_spy).was.called(1)
+            assert.spy(render_header_spy).was.called(2)
+            assert.equal("chat", render_header_spy.calls[1][2])
             assert.equal("Mode: Plan", render_header_spy.calls[1][3])
+            assert.equal("input", render_header_spy.calls[2][2])
+            assert.equal("", render_header_spy.calls[2][3])
+        end)
+
+        it("preserves provider config ordering in the prompt header", function()
+            --- @type agentic.acp.ConfigOptionsUpdate
+            local update = {
+                sessionUpdate = "config_option_update",
+                configOptions = {
+                    {
+                        id = "thought-1",
+                        category = "thought_level",
+                        currentValue = "deep",
+                        description = "Thought Level",
+                        name = "Thought Level",
+                        options = {
+                            { value = "deep", name = "Deep", description = "" },
+                        },
+                    },
+                    {
+                        id = "model-1",
+                        category = "model",
+                        currentValue = "gpt-5.4",
+                        description = "Model",
+                        name = "Model",
+                        options = {
+                            {
+                                value = "gpt-5.4",
+                                name = "GPT-5.4",
+                                description = "",
+                            },
+                        },
+                    },
+                    {
+                        id = "mode-1",
+                        category = "mode",
+                        currentValue = "code",
+                        description = "Mode",
+                        name = "Mode",
+                        options = {
+                            { value = "code", name = "Code", description = "" },
+                        },
+                    },
+                },
+            }
+
+            session:_on_session_update(update)
+
+            assert.equal(
+                "Thought Level: Deep | Model: GPT-5.4 | Mode: Code",
+                render_header_spy.calls[1][3]
+            )
+        end)
+    end)
+
+    describe("_on_session_update: session_info_update", function()
+        --- @type agentic.SessionManager
+        local session
+
+        before_each(function()
+            local session_state = SessionState:new()
+            session_state:dispatch(SessionEvents.set_session_title("Old title"))
+            session = {
+                session_state = session_state,
+                chat_history = session_state:get_history(),
+                config_options = {
+                    get_header_context = function()
+                        return "Mode: Code"
+                    end,
+                },
+                widget = {
+                    render_header = function() end,
+                },
+                _on_session_update = SessionManager._on_session_update,
+                _render_window_headers = SessionManager._render_window_headers,
+            } --[[@as agentic.SessionManager]]
+        end)
+
+        it(
+            "updates the stored chat title when the agent sends session info",
+            function()
+                session:_on_session_update({
+                    sessionUpdate = "session_info_update",
+                    title = "New session title",
+                })
+
+                assert.equal("New session title", session.chat_history.title)
+            end
+        )
+    end)
+
+    describe("_handle_mode_change", function()
+        --- @type TestStub
+        local notify_stub
+        --- @type agentic.SessionManager
+        local session
+        --- @type integer
+        local test_bufnr
+        --- @type TestSpy
+        local set_config_option_spy
+
+        before_each(function()
+            notify_stub = spy.stub(Logger, "notify")
+            test_bufnr = vim.api.nvim_create_buf(false, true)
+
+            local AgentConfigOptions =
+                require("agentic.acp.agent_config_options")
+            local BufHelpers = require("agentic.utils.buf_helpers")
+            local keymap_stub = spy.stub(BufHelpers, "multi_keymap_set")
+            local config_opts = AgentConfigOptions:new(
+                { chat = test_bufnr },
+                function() end,
+                function() end
+            )
+            keymap_stub:revert()
+
+            config_opts:set_options({
+                {
+                    id = "mode-1",
+                    category = "mode",
+                    currentValue = "plan",
+                    description = "Mode",
+                    name = "Mode",
+                    options = {
+                        { value = "plan", name = "Plan", description = "" },
+                        { value = "code", name = "Code", description = "" },
+                    },
+                },
+            })
+
+            set_config_option_spy = spy.new(function(_agent, _session_id, _config_id, _value, callback)
+                callback({
+                    configOptions = {
+                        {
+                            id = "mode-1",
+                            category = "mode",
+                            currentValue = "code",
+                            description = "Mode",
+                            name = "Mode",
+                            options = {
+                                { value = "plan", name = "Plan", description = "" },
+                                { value = "code", name = "Code", description = "" },
+                            },
+                        },
+                    },
+                }, nil)
+            end)
+
+            session = {
+                session_id = "sess-1",
+                agent = {
+                    set_config_option = set_config_option_spy,
+                },
+                config_options = config_opts,
+                chat_history = { title = "" },
+                widget = {
+                    render_header = spy.new(function() end),
+                    buf_nrs = { chat = test_bufnr },
+                },
+                _handle_mode_change = SessionManager._handle_mode_change,
+                _handle_new_config_options = SessionManager._handle_new_config_options,
+                _render_window_headers = SessionManager._render_window_headers,
+            } --[[@as agentic.SessionManager]]
+        end)
+
+        after_each(function()
+            notify_stub:revert()
+            vim.api.nvim_buf_delete(test_bufnr, { force = true })
+        end)
+
+        it("uses the provider-advertised config option id", function()
+            session:_handle_mode_change("code", false)
+
+            assert.equal("sess-1", set_config_option_spy.calls[1][2])
+            assert.equal("mode-1", set_config_option_spy.calls[1][3])
+            assert.equal("code", set_config_option_spy.calls[1][4])
+        end)
+    end)
+
+    describe("_handle_config_option_change", function()
+        --- @type TestStub
+        local notify_stub
+        --- @type agentic.SessionManager
+        local session
+        --- @type TestSpy
+        local set_config_option_spy
+
+        before_each(function()
+            notify_stub = spy.stub(Logger, "notify")
+
+            local AgentConfigOptions =
+                require("agentic.acp.agent_config_options")
+            local config_opts = AgentConfigOptions:new(
+                {},
+                function() end,
+                function() end,
+                function() end
+            )
+
+            config_opts:set_options({
+                {
+                    id = "thought-1",
+                    category = "thought_level",
+                    currentValue = "normal",
+                    description = "Thought Level",
+                    name = "Thought Level",
+                    options = {
+                        { value = "normal", name = "Normal", description = "" },
+                        { value = "deep", name = "Deep", description = "" },
+                    },
+                },
+            })
+
+            set_config_option_spy = spy.new(function(_agent, _session_id, _config_id, _value, callback)
+                callback({
+                    configOptions = {
+                        {
+                            id = "thought-1",
+                            category = "thought_level",
+                            currentValue = "deep",
+                            description = "Thought Level",
+                            name = "Thought Level",
+                            options = {
+                                { value = "normal", name = "Normal", description = "" },
+                                { value = "deep", name = "Deep", description = "" },
+                            },
+                        },
+                    },
+                }, nil)
+            end)
+
+            session = {
+                session_id = "sess-2",
+                agent = {
+                    set_config_option = set_config_option_spy,
+                },
+                config_options = config_opts,
+                chat_history = { title = "" },
+                widget = {
+                    render_header = function() end,
+                },
+                _handle_config_option_change = SessionManager._handle_config_option_change,
+                _handle_new_config_options = SessionManager._handle_new_config_options,
+                _render_window_headers = SessionManager._render_window_headers,
+            } --[[@as agentic.SessionManager]]
+        end)
+
+        after_each(function()
+            notify_stub:revert()
+        end)
+
+        it("routes generic config options through session/set_config_option", function()
+            session:_handle_config_option_change("thought-1", "deep")
+
+            assert.equal("sess-2", set_config_option_spy.calls[1][2])
+            assert.equal("thought-1", set_config_option_spy.calls[1][3])
+            assert.equal("deep", set_config_option_spy.calls[1][4])
+            assert.spy(notify_stub).was.called(1)
+            assert.equal("Thought Level changed to: Deep", notify_stub.calls[1][1])
+        end)
+
+        it("notes that live config changes do not interrupt generation", function()
+            session.is_generating = true
+
+            session:_handle_config_option_change("thought-1", "deep")
+
+            assert.equal(
+                "Thought Level changed to: Deep. Applies without interrupting the current response.",
+                notify_stub.calls[1][1]
+            )
+        end)
+    end)
+
+    describe("queued submissions", function()
+        --- @type TestStub
+        local notify_stub
+        --- @type integer
+        local test_bufnr
+
+        before_each(function()
+            notify_stub = spy.stub(Logger, "notify")
+            test_bufnr = vim.api.nvim_create_buf(false, true)
+        end)
+
+        after_each(function()
+            notify_stub:revert()
+            vim.api.nvim_buf_delete(test_bufnr, { force = true })
+        end)
+
+        it("queues follow-up prompts submitted while generating", function()
+            local session_state = SessionState:new()
+            local send_prompt_spy = spy.new(function() end)
+
+            local session = {
+                session_id = "sess-queue-1",
+                is_generating = true,
+                _queued_submissions = {},
+                _next_queue_id = 0,
+                session_state = session_state,
+                chat_history = session_state:get_history(),
+                agent = {
+                    provider_config = { name = "Codex" },
+                    send_prompt = send_prompt_spy,
+                },
+                todo_list = { close_if_all_completed = function() end },
+                code_selection = { is_empty = function() return true end },
+                file_list = { is_empty = function() return true end },
+                diagnostics_list = { is_empty = function() return true end },
+                widget = {
+                    render_header = function() end,
+                    win_nrs = {},
+                    buf_nrs = { chat = test_bufnr, input = test_bufnr },
+                },
+                _is_first_message = false,
+                _render_window_headers = SessionManager._render_window_headers,
+                _enqueue_submission = SessionManager._enqueue_submission,
+                _handle_input_submit = SessionManager._handle_input_submit,
+            } --[[@as agentic.SessionManager]]
+
+            session:_handle_input_submit("follow up")
+
+            assert.spy(send_prompt_spy).was.called(0)
+            assert.equal(1, #session._queued_submissions)
+            assert.equal("follow up", session._queued_submissions[1].input_text)
+            assert.equal(
+                "Queued follow-up. It will be sent when the agent is ready.",
+                notify_stub.calls[1][1]
+            )
+        end)
+
+        it("drains the next queued submission when the agent becomes ready", function()
+            local dispatch_spy = spy.new(function() end)
+            local queued_submission = {
+                id = 1,
+                input_text = "queued prompt",
+                prompt = {
+                    { type = "text", text = "queued prompt" },
+                },
+                message_lines = { "queued prompt" },
+                user_msg = {
+                    type = "user",
+                    text = "queued prompt",
+                    timestamp = 1,
+                    provider_name = "Codex",
+                },
+            }
+
+            local session = {
+                is_generating = false,
+                _queued_submissions = { queued_submission },
+                _interrupt_submission = nil,
+                _render_window_headers = function() end,
+                _dispatch_submission = dispatch_spy,
+                _pop_next_queued_submission = SessionManager._pop_next_queued_submission,
+                _drain_queued_submissions = SessionManager._drain_queued_submissions,
+            } --[[@as agentic.SessionManager]]
+
+            session:_drain_queued_submissions()
+
+            assert.equal(0, #session._queued_submissions)
+            assert.spy(dispatch_spy).was.called_with(queued_submission)
         end)
     end)
 
@@ -211,6 +581,55 @@ describe("agentic.SessionManager", function()
         end)
     end)
 
+    describe("_handle_permission_request", function()
+        it("marks review state but leaves queueing to PermissionManager", function()
+            local session_state = SessionState:new()
+            local stop_spy = spy.new(function() end)
+            local add_request_spy = spy.new(function() end)
+            local observed_queue_length = nil
+
+            session_state:dispatch(SessionEvents.upsert_tool_call({
+                tool_call_id = "tc-perm-1",
+                kind = "edit",
+                status = "pending",
+                file_path = "/tmp/demo.lua",
+                diff = { old = { "a" }, new = { "b" } },
+            }))
+
+            local session = {
+                session_state = session_state,
+                status_animation = { stop = stop_spy },
+                permission_manager = {
+                    add_request = function(_self, request, callback)
+                        observed_queue_length =
+                            #session_state:get_state().permissions.queue
+                        add_request_spy(request, callback)
+                    end,
+                },
+                _handle_permission_request = SessionManager._handle_permission_request,
+            } --[[@as agentic.SessionManager]]
+
+            session:_handle_permission_request({
+                toolCall = { toolCallId = "tc-perm-1" },
+                options = {
+                    {
+                        optionId = "allow-once",
+                        name = "Allow once",
+                        kind = "allow_once",
+                    },
+                },
+            }, function() end)
+
+            assert.equal(0, observed_queue_length)
+            assert.spy(stop_spy).was.called(1)
+            assert.spy(add_request_spy).was.called(1)
+
+            local state = session_state:get_state()
+            assert.equal("requested", state.tools.by_id["tc-perm-1"].permission_state)
+            assert.equal("tc-perm-1", state.review.active_tool_call_id)
+        end)
+    end)
+
     describe("switch_provider", function()
         --- @type TestStub
         local notify_stub
@@ -256,7 +675,8 @@ describe("agentic.SessionManager", function()
             "soft cancels old session without clearing widget/history",
             function()
                 local cancel_spy = spy.new(function() end)
-                local perm_clear_spy = spy.new(function() end)
+                local permission_clear_spy = spy.new(function() end)
+                local status_stop_spy = spy.new(function() end)
                 local todo_clear_spy = spy.new(function() end)
                 local widget_clear_spy = spy.new(function() end)
                 local file_list_clear_spy = spy.new(function() end)
@@ -291,7 +711,8 @@ describe("agentic.SessionManager", function()
                         cancel_session = cancel_spy,
                         provider_config = { name = "Old Provider" },
                     },
-                    permission_manager = { clear = perm_clear_spy },
+                    permission_manager = { clear = permission_clear_spy },
+                    status_animation = { stop = status_stop_spy },
                     todo_list = { clear = todo_clear_spy },
                     widget = { clear = widget_clear_spy },
                     file_list = { clear = file_list_clear_spy },
@@ -307,7 +728,8 @@ describe("agentic.SessionManager", function()
 
                 assert.spy(cancel_spy).was.called(1)
                 assert.is_nil(session.session_id)
-                assert.spy(perm_clear_spy).was.called(1)
+                assert.spy(permission_clear_spy).was.called(1)
+                assert.spy(status_stop_spy).was.called(1)
                 assert.spy(todo_clear_spy).was.called(1)
 
                 assert.spy(widget_clear_spy).was.called(0)
@@ -359,7 +781,9 @@ describe("agentic.SessionManager", function()
                         provider_config = { name = "Old" },
                     },
                     permission_manager = { clear = function() end },
+                    status_animation = { stop = function() end },
                     todo_list = { clear = function() end },
+                    session_state = SessionState:new({ chat_history = saved_history }),
                     chat_history = saved_history,
                     _is_first_message = false,
                     _history_to_send = nil,
@@ -402,17 +826,18 @@ describe("agentic.SessionManager", function()
 
             Config.provider = "some-provider"
 
-            local session = {
-                is_generating = false,
-                session_id = nil,
+                local session = {
+                    is_generating = false,
+                    session_id = nil,
 
-                agent = mock_agent,
-                permission_manager = { clear = spy.new(function() end) },
-                todo_list = { clear = spy.new(function() end) },
-                chat_history = { messages = {} },
-                _is_first_message = false,
-                _history_to_send = nil,
-                new_session = spy.new(function() end),
+                    agent = mock_agent,
+                    permission_manager = { clear = spy.new(function() end) },
+                    status_animation = { stop = spy.new(function() end) },
+                    todo_list = { clear = spy.new(function() end) },
+                    chat_history = { messages = {} },
+                    _is_first_message = false,
+                    _history_to_send = nil,
+                    new_session = spy.new(function() end),
                 switch_provider = SessionManager.switch_provider,
             } --[[@as agentic.SessionManager]]
 
@@ -420,6 +845,7 @@ describe("agentic.SessionManager", function()
 
             assert.spy(mock_agent.cancel_session).was.called(0)
             assert.spy(session.permission_manager.clear).was.called(1)
+            assert.spy(session.status_animation.stop).was.called(1)
             assert.spy(session.todo_list.clear).was.called(1)
             assert.spy(session.new_session).was.called(1)
         end)
@@ -458,21 +884,17 @@ describe("agentic.SessionManager", function()
         --- @return agentic.SessionManager
         local function make_session(tool_call_blocks)
             return {
-                message_writer = {
-                    update_tool_call_block = function() end,
-                    tool_call_blocks = tool_call_blocks,
-                },
+                session_state = SessionState:new(),
                 permission_manager = {
-                    current_request = nil,
-                    queue = {},
-                    remove_request_by_tool_call_id = function() end,
+                    remove_request_by_tool_call_id = spy.new(function() end),
                 },
-                status_animation = { start = function() end },
-                _clear_diff_in_buffer = function() end,
-                _on_tool_call = function() end,
-                chat_history = {
-                    update_tool_call = function() end,
-                    add_message = function() end,
+                status_animation = {
+                    start = spy.new(function() end),
+                },
+                message_writer = {
+                    tool_call_blocks = tool_call_blocks,
+                    update_tool_call_block = spy.new(function() end),
+                    write_tool_call_block = spy.new(function() end),
                 },
             } --[[@as agentic.SessionManager]]
         end

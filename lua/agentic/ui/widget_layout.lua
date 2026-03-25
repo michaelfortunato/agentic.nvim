@@ -60,6 +60,23 @@ function WidgetLayout.calculate_height(size)
     return calculate_dimension(size, vim.o.lines, DefaultConfig.windows.height)
 end
 
+--- @param chat_width integer
+--- @return integer
+function WidgetLayout.calculate_stack_width(chat_width)
+    local ratio = tonumber(Config.windows.stack_width_ratio)
+        or DefaultConfig.windows.stack_width_ratio
+    local min_width = tonumber(Config.windows.stack_min_width)
+        or DefaultConfig.windows.stack_min_width
+    local max_width = tonumber(Config.windows.stack_max_width)
+        or DefaultConfig.windows.stack_max_width
+
+    local raw_width = math.floor(chat_width * ratio)
+    local clamped_width = math.max(min_width, raw_width)
+    clamped_width = math.min(clamped_width, max_width)
+
+    return math.max(1, math.min(clamped_width, math.max(1, chat_width - 1)))
+end
+
 --- @param bufnr integer
 --- @param max_height integer
 --- @return integer
@@ -98,11 +115,17 @@ local function open_win(bufnr, enter, opts, window_name, win_opts)
         linebreak = true,
         winfixbuf = true,
         winfixheight = true,
+        number = false,
+        relativenumber = false,
+        signcolumn = "no",
+        foldcolumn = "0",
     }, win_opts or {}, config_win_opts)
 
     for name, value in pairs(merged_win_opts) do
         vim.api.nvim_set_option_value(name, value, { win = winid })
     end
+
+    WindowDecoration.apply_window_style(winid)
 
     return winid
 end
@@ -205,10 +228,8 @@ local function show_layout(params, position)
     local input_opts = { win = win_nrs.chat, fixed = true }
     if is_bottom then
         local chat_width = vim.api.nvim_win_get_width(win_nrs.chat)
-        local ratio = tonumber(Config.windows.stack_width_ratio) or 0.4
-        local raw_width = math.floor(chat_width * ratio)
         input_opts.split = "right"
-        input_opts.width = math.max(1, math.min(raw_width, chat_width - 1))
+        input_opts.width = WidgetLayout.calculate_stack_width(chat_width)
     else
         input_opts.split = "below"
         input_opts.height = Config.windows.input.height
@@ -216,6 +237,7 @@ local function show_layout(params, position)
 
     get_or_create_window(win_nrs, "input", buf_nrs.input, input_opts, {
         winfixheight = not is_bottom,
+        winfixwidth = is_bottom,
     })
 
     open_or_resize_dynamic_window(buf_nrs, win_nrs, "code", {

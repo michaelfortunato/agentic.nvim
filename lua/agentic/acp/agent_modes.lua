@@ -1,7 +1,7 @@
 --- Manages agent modes for ACP sessions
---- Provides mode selection via vim.ui.select
 
 local Logger = require("agentic.utils.logger")
+local Chooser = require("agentic.ui.chooser")
 
 --- @class agentic.acp.AgentModes
 --- @field _modes agentic.acp.AgentMode[]
@@ -44,20 +44,15 @@ function AgentModes:show_mode_selector(set_mode_callback)
         return false
     end
 
-    vim.ui.select(self._modes, {
+    Chooser.show(self._modes, {
         prompt = "Select Agent Mode:",
         format_item = function(item)
             --- @cast item agentic.acp.AgentMode -- need to cast because `select` has a Generic, but not for `format_item`
-            local prefix = item.id == self.current_mode_id and "● " or "  "
-            if item.description and item.description ~= "" then
-                return string.format(
-                    "%s%s: %s",
-                    prefix,
-                    item.name,
-                    item.description
-                )
-            end
-            return prefix .. item.name
+            return Chooser.format_named_item(
+                item.name,
+                item.description,
+                item.id == self.current_mode_id
+            )
         end,
     }, function(selected_mode)
         if selected_mode and selected_mode.id ~= self.current_mode_id then

@@ -104,6 +104,10 @@ describe("config selector", function()
                     function() end,
                     function() end
                 ),
+                chat_history = { title = "" },
+                widget = {
+                    render_header = function() end,
+                },
                 agent = {
                     set_model = function(_self, _id, _model, callback)
                         callback({}, nil) -- Success
@@ -111,6 +115,7 @@ describe("config selector", function()
                 },
                 ---@diagnostic disable-next-line: invisible
                 _handle_model_change = SessionManager._handle_model_change,
+                _render_window_headers = SessionManager._render_window_headers,
             }
 
             session.config_options:set_legacy_models({
@@ -157,6 +162,119 @@ describe("config selector", function()
             )
 
             assert.same({ "● M1: D1", "  M2: D2" }, second_render)
+        end)
+
+        it("preserves provider config option ordering in the config selector", function()
+            local generic_change = spy.new(function() end)
+            local config = AgentConfigOptions:new(
+                {},
+                function() end,
+                function() end,
+                generic_change --[[@as fun(config_id: string, value: string)]]
+            )
+
+            ---@diagnostic disable-next-line: missing-fields
+            config:set_options({
+                {
+                    id = "thought-1",
+                    category = "thought_level",
+                    currentValue = "normal",
+                    name = "Thought Level",
+                    options = {
+                        { value = "normal", name = "Normal" },
+                        { value = "deep", name = "Deep" },
+                    },
+                },
+                {
+                    id = "model-1",
+                    category = "model",
+                    currentValue = "m2",
+                    name = "Model",
+                    options = {
+                        { value = "m1", name = "M1" },
+                        { value = "m2", name = "M2" },
+                    },
+                },
+                {
+                    id = "mode-1",
+                    category = "mode",
+                    currentValue = "code",
+                    name = "Mode",
+                    options = {
+                        { value = "plan", name = "Plan" },
+                        { value = "code", name = "Code" },
+                    },
+                },
+            })
+
+            local steering_render = {}
+            local select_call = 0
+
+            select_stub:invokes(function(items, opts, on_choice)
+                select_call = select_call + 1
+
+                if select_call == 1 then
+                    steering_render = format_all(items, opts)
+                    on_choice(items[1])
+                    return
+                end
+
+                on_choice(items[2])
+            end)
+
+            config:show_config_selector()
+
+            assert.same({
+                "  Thought Level: Normal",
+                "  Model: M2",
+                "  Mode: Code",
+            }, steering_render)
+            assert.spy(generic_change).was.called_with("thought-1", "deep")
+        end)
+
+        it("builds header context in provider order", function()
+            local config = AgentConfigOptions:new(
+                {},
+                function() end,
+                function() end
+            )
+
+            ---@diagnostic disable-next-line: missing-fields
+            config:set_options({
+                {
+                    id = "thought-1",
+                    category = "thought_level",
+                    currentValue = "deep",
+                    name = "Thought Level",
+                    options = {
+                        { value = "normal", name = "Normal" },
+                        { value = "deep", name = "Deep" },
+                    },
+                },
+                {
+                    id = "model-1",
+                    category = "model",
+                    currentValue = "m2",
+                    name = "Model",
+                    options = {
+                        { value = "m2", name = "M2" },
+                    },
+                },
+                {
+                    id = "mode-1",
+                    category = "mode",
+                    currentValue = "code",
+                    name = "Mode",
+                    options = {
+                        { value = "code", name = "Code" },
+                    },
+                },
+            })
+
+            assert.equal(
+                "Thought Level: Deep | Model: M2 | Mode: Code",
+                config:get_header_context()
+            )
         end)
     end)
 end)

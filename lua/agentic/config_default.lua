@@ -88,6 +88,8 @@
 --- @field width string|number
 --- @field height string|number
 --- @field stack_width_ratio number
+--- @field stack_min_width integer
+--- @field stack_max_width integer
 --- @field chat agentic.UserConfig.Windows.Chat
 --- @field input agentic.UserConfig.Windows.Input
 --- @field code agentic.UserConfig.Windows.Code
@@ -122,18 +124,23 @@
 
 --- @class agentic.UserConfig.FilePicker
 --- @field enabled boolean
+--- @field hidden boolean Include dotfiles and files inside hidden directories
 
 --- @class agentic.UserConfig.ImagePaste
 --- @field enabled boolean Enable image drag-and-drop to add images to referenced files
 
 --- @class agentic.UserConfig.AutoScroll
 --- @field threshold integer Lines from bottom to trigger auto-scroll (default: 10)
+--- @field debounce_ms integer Milliseconds to debounce repeated auto-scroll requests (default: 150)
 
 --- Show diff preview for edit tool calls in the buffer
 --- @class agentic.UserConfig.DiffPreview
 --- @field enabled boolean
---- @field layout "inline" | "split"
+--- @field layout "inline" | "interwoven" | "split"
 --- @field center_on_navigate_hunks boolean
+--- @field split_width_ratio number
+--- @field split_min_width integer
+--- @field split_max_width integer
 
 --- @class agentic.UserConfig.Hooks
 --- @field on_prompt_submit? fun(data: agentic.UserConfig.PromptSubmitData): nil
@@ -281,9 +288,11 @@ local ConfigDefault = {
 
     windows = {
         position = "right",
-        width = "40%",
+        width = "32%",
         height = "30%",
-        stack_width_ratio = 0.4,
+        stack_width_ratio = 0.28,
+        stack_min_width = 32,
+        stack_max_width = 68,
         chat = { win_opts = {} },
         input = { height = 10, win_opts = {} },
         code = { max_height = 15, win_opts = {} },
@@ -304,6 +313,8 @@ local ConfigDefault = {
             },
             switch_provider = "<localLeader>s",
             switch_model = "<localLeader>m",
+            switch_thought_level = "<localLeader>e",
+            manage_queue = "<localLeader>q",
         },
 
         --- Keys bindings for the prompt buffer
@@ -374,6 +385,7 @@ local ConfigDefault = {
 
     file_picker = {
         enabled = true,
+        hidden = false,
     },
 
     image_paste = {
@@ -382,12 +394,16 @@ local ConfigDefault = {
 
     auto_scroll = {
         threshold = 10,
+        debounce_ms = 150,
     },
 
     diff_preview = {
         enabled = true,
-        layout = "split",
+        layout = "interwoven",
         center_on_navigate_hunks = true,
+        split_width_ratio = 0.36,
+        split_min_width = 44,
+        split_max_width = 88,
     },
 
     hooks = {
@@ -399,7 +415,7 @@ local ConfigDefault = {
     headers = {},
 
     settings = {
-        move_cursor_to_chat_on_submit = true,
+        move_cursor_to_chat_on_submit = false,
     },
 
     session_restore = {

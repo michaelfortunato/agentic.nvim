@@ -2,6 +2,8 @@ local assert = require("tests.helpers.assert")
 local spy = require("tests.helpers.spy")
 local Config = require("agentic.config")
 local Logger = require("agentic.utils.logger")
+local WidgetLayout = require("agentic.ui.widget_layout")
+local WindowDecoration = require("agentic.ui.window_decoration")
 
 describe("agentic.ui.ChatWidget", function()
     --- @type agentic.ui.ChatWidget
@@ -28,9 +30,12 @@ describe("agentic.ui.ChatWidget", function()
             local tab_page_id
             local widget
             local original_position
+            local original_move_cursor_setting
 
             before_each(function()
                 original_position = Config.windows.position
+                original_move_cursor_setting =
+                    Config.settings.move_cursor_to_chat_on_submit
                 Config.windows.position = position
 
                 vim.cmd("tabnew")
@@ -54,6 +59,8 @@ describe("agentic.ui.ChatWidget", function()
                 end)
 
                 Config.windows.position = original_position
+                Config.settings.move_cursor_to_chat_on_submit =
+                    original_move_cursor_setting
             end)
 
             it("creates widget with valid buffer IDs", function()
@@ -63,6 +70,23 @@ describe("agentic.ui.ChatWidget", function()
                 assert.is_true(vim.api.nvim_buf_is_valid(widget.buf_nrs.files))
                 assert.is_true(vim.api.nvim_buf_is_valid(widget.buf_nrs.todos))
             end)
+
+            it(
+                "does not attach treesitter highlighters to side buffers",
+                function()
+                    for _, name in ipairs({
+                        "todos",
+                        "code",
+                        "files",
+                        "diagnostics",
+                        "input",
+                    }) do
+                        assert.is_nil(
+                            vim.treesitter.highlighter.active[widget.buf_nrs[name]]
+                        )
+                    end
+                end
+            )
 
             it(
                 "show() creates chat and input windows only when buffers are empty",
@@ -115,6 +139,29 @@ describe("agentic.ui.ChatWidget", function()
                 assert.is_true(vim.api.nvim_win_is_valid(widget.win_nrs.chat))
             end)
 
+            it(
+                "open_left_window can create a review window without stealing focus",
+                function()
+                    widget:show({ focus_prompt = false })
+
+                    local original_winid = vim.api.nvim_get_current_win()
+                    local review_bufnr = vim.api.nvim_create_buf(false, true)
+
+                    local review_winid =
+                        widget:open_left_window(review_bufnr, false)
+
+                    assert.truthy(review_winid)
+                    assert.is_true(vim.api.nvim_win_is_valid(review_winid))
+                    assert.equal(original_winid, vim.api.nvim_get_current_win())
+                    assert.equal(
+                        review_bufnr,
+                        vim.api.nvim_win_get_buf(review_winid)
+                    )
+
+                    vim.api.nvim_buf_delete(review_bufnr, { force = true })
+                end
+            )
+
             it("hide() is safe when called multiple times", function()
                 widget:show()
                 widget:hide()
@@ -158,6 +205,230 @@ describe("agentic.ui.ChatWidget", function()
 
                 assert.are_not.equal("i", vim.fn.mode())
             end)
+
+            it("focus_input restores chat to the latest message", function()
+                local schedule_stub = spy.stub(vim, "schedule")
+                schedule_stub:invokes(function(fn)
+                    fn()
+                end)
+
+                local lines = {}
+                for i = 1, 40 do
+                    lines[i] = "chat line " .. i
+                end
+
+                fill_buffer(widget, "chat", lines)
+                fill_buffer(widget, "code", { "local value = 1" })
+
+                widget:show({ focus_prompt = false })
+
+                vim.api.nvim_win_set_cursor(widget.win_nrs.chat, { 1, 0 })
+                vim.api.nvim_set_current_win(widget.win_nrs.code)
+
+                widget:focus_input()
+
+                assert.equal(
+                    widget.win_nrs.input,
+                    vim.api.nvim_get_current_win()
+                )
+                assert.equal(
+                    #lines,
+                    vim.api.nvim_win_get_cursor(widget.win_nrs.chat)[1]
+                )
+
+                schedule_stub:revert()
+            end)
+
+            it(
+                "scroll_chat_to_bottom follows output without taking focus",
+                function()
+                    local lines = {}
+                    for i = 1, 60 do
+                        lines[i] = "chat line " .. i
+                    end
+
+                    fill_buffer(widget, "chat", lines)
+                    widget:show({ focus_prompt = false })
+
+                    vim.api.nvim_win_set_cursor(widget.win_nrs.chat, { 1, 0 })
+                    vim.api.nvim_set_current_win(widget.win_nrs.input)
+
+                    widget:scroll_chat_to_bottom()
+
+                    assert.equal(
+                        widget.win_nrs.input,
+                        vim.api.nvim_get_current_win()
+                    )
+                    assert.equal(
+                        #lines,
+                        vim.api.nvim_win_get_cursor(widget.win_nrs.chat)[1]
+                    )
+                    assert.is_true(widget:should_follow_chat_output())
+                end
+            )
+
+            it("tracks follow mode from the chat viewport", function()
+                local lines = {}
+                for i = 1, 100 do
+                    lines[i] = "chat line " .. i
+                end
+
+                fill_buffer(widget, "chat", lines)
+                widget:show({ focus_prompt = false })
+                widget:scroll_chat_to_bottom()
+
+                assert.is_true(widget:should_follow_chat_output())
+
+                vim.api.nvim_win_set_cursor(widget.win_nrs.chat, { 1, 0 })
+                assert.is_false(widget:_update_chat_follow_output())
+                assert.is_false(widget:should_follow_chat_output())
+            end)
+
+            it("restores a paused chat view after hide and show", function()
+                local lines = {}
+                for i = 1, 100 do
+                    lines[i] = "chat line " .. i
+                end
+
+                fill_buffer(widget, "chat", lines)
+                widget:show({ focus_prompt = false })
+
+                vim.api.nvim_win_set_cursor(widget.win_nrs.chat, { 1, 0 })
+                widget:_update_chat_follow_output()
+                widget:_store_chat_view()
+
+                widget:hide()
+                widget:show({ focus_prompt = false })
+
+                assert.is_false(widget:should_follow_chat_output())
+                assert.equal(
+                    1,
+                    vim.api.nvim_win_get_cursor(widget.win_nrs.chat)[1]
+                )
+            end)
+
+            it(
+                "shows unread output context while follow mode is paused",
+                function()
+                    local lines = {}
+                    local content_changed_callback
+
+                    for i = 1, 100 do
+                        lines[i] = "chat line " .. i
+                    end
+
+                    widget:bind_message_writer({
+                        add_content_changed_listener = function(_, callback)
+                            content_changed_callback = callback
+                            return 1
+                        end,
+                        remove_content_changed_listener = function() end,
+                    })
+
+                    fill_buffer(widget, "chat", lines)
+                    widget:show({ focus_prompt = false })
+                    widget:scroll_chat_to_bottom()
+
+                    vim.api.nvim_win_set_cursor(widget.win_nrs.chat, { 1, 0 })
+                    widget:_update_chat_follow_output()
+                    content_changed_callback()
+
+                    assert.equal(
+                        "New output below",
+                        widget:_get_effective_header_context("chat")
+                    )
+
+                    widget:scroll_chat_to_bottom()
+                    assert.is_nil(widget:_get_effective_header_context("chat"))
+                end
+            )
+
+            it(
+                "submit keeps a paused chat viewport untouched when chat focus is disabled",
+                function()
+                    local lines = {}
+                    local on_submit_spy = spy.new(function() end)
+
+                    for i = 1, 100 do
+                        lines[i] = "chat line " .. i
+                    end
+
+                    widget.on_submit_input = on_submit_spy --[[@as function]]
+                    fill_buffer(widget, "chat", lines)
+                    widget:show({ focus_prompt = false })
+                    widget:scroll_chat_to_bottom()
+
+                    vim.api.nvim_win_set_cursor(widget.win_nrs.chat, { 1, 0 })
+                    widget:_update_chat_follow_output()
+                    vim.api.nvim_set_current_win(widget.win_nrs.input)
+                    vim.api.nvim_buf_set_lines(
+                        widget.buf_nrs.input,
+                        0,
+                        -1,
+                        false,
+                        { "test prompt" }
+                    )
+
+                    widget:_submit_input()
+
+                    assert.spy(on_submit_spy).was.called(1)
+                    assert.equal(
+                        widget.win_nrs.input,
+                        vim.api.nvim_get_current_win()
+                    )
+                    assert.equal(
+                        1,
+                        vim.api.nvim_win_get_cursor(widget.win_nrs.chat)[1]
+                    )
+                    assert.is_false(widget:should_follow_chat_output())
+                end
+            )
+
+            it(
+                "submit resumes follow mode only when chat focus on submit is enabled",
+                function()
+                    local schedule_stub = spy.stub(vim, "schedule")
+                    local lines = {}
+
+                    schedule_stub:invokes(function(fn)
+                        fn()
+                    end)
+                    Config.settings.move_cursor_to_chat_on_submit = true
+
+                    for i = 1, 100 do
+                        lines[i] = "chat line " .. i
+                    end
+
+                    fill_buffer(widget, "chat", lines)
+                    widget:show({ focus_prompt = false })
+                    widget:scroll_chat_to_bottom()
+
+                    vim.api.nvim_win_set_cursor(widget.win_nrs.chat, { 1, 0 })
+                    widget:_update_chat_follow_output()
+                    vim.api.nvim_set_current_win(widget.win_nrs.input)
+                    vim.api.nvim_buf_set_lines(
+                        widget.buf_nrs.input,
+                        0,
+                        -1,
+                        false,
+                        { "test prompt" }
+                    )
+
+                    widget:_submit_input()
+
+                    assert.equal(
+                        widget.win_nrs.chat,
+                        vim.api.nvim_get_current_win()
+                    )
+                    assert.equal(
+                        #lines,
+                        vim.api.nvim_win_get_cursor(widget.win_nrs.chat)[1]
+                    )
+                    assert.is_true(widget:should_follow_chat_output())
+
+                    schedule_stub:revert()
+                end
+            )
 
             describe("dynamic window creation", function()
                 local test_cases = {
@@ -438,23 +709,16 @@ describe("agentic.ui.ChatWidget", function()
             assert.is_true(input_pos[2] > chat_pos[2])
         end)
 
-        it(
-            "input width is proportional to chat via stack_width_ratio",
-            function()
-                widget:show()
+        it("input width follows the configured stack width policy", function()
+            widget:show()
 
-                local chat_width =
-                    vim.api.nvim_win_get_width(widget.win_nrs.chat)
-                local input_width =
-                    vim.api.nvim_win_get_width(widget.win_nrs.input)
-                local ratio = Config.windows.stack_width_ratio
+            local chat_width = vim.api.nvim_win_get_width(widget.win_nrs.chat)
+            local input_width = vim.api.nvim_win_get_width(widget.win_nrs.input)
+            local total_width = chat_width + input_width
+            local expected = WidgetLayout.calculate_stack_width(total_width)
 
-                local expected = math.floor((chat_width + input_width) * ratio)
-
-                -- Allow +-1 rounding tolerance
-                assert.is_true(math.abs(input_width - expected) <= 1)
-            end
-        )
+            assert.equal(expected, input_width)
+        end)
     end)
 
     describe("rotate_layout", function()
