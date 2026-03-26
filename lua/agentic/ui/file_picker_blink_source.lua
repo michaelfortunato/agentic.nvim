@@ -1,0 +1,93 @@
+local FilePicker = require("agentic.ui.file_picker")
+
+local Source = {}
+Source.__index = Source
+
+local function empty_response()
+    return {
+        items = {},
+        is_incomplete_forward = false,
+        is_incomplete_backward = false,
+    }
+end
+
+--- @param item table
+--- @param index integer
+--- @param context blink.cmp.Context
+--- @param mention_start_col integer
+--- @return lsp.CompletionItem
+local function to_completion_item(item, index, context, mention_start_col)
+    local path = item.word:sub(2)
+    return {
+        label = path,
+        kind = vim.lsp.protocol.CompletionItemKind.File,
+        filterText = path,
+        sortText = string.format("%04d", index),
+        insertTextFormat = vim.lsp.protocol.InsertTextFormat.PlainText,
+        textEdit = {
+            newText = item.word,
+            range = {
+                start = {
+                    line = context.cursor[1] - 1,
+                    character = mention_start_col,
+                },
+                ["end"] = {
+                    line = context.cursor[1] - 1,
+                    character = context.cursor[2],
+                },
+            },
+        },
+    }
+end
+
+function Source.new(_opts)
+    return setmetatable({}, Source)
+end
+
+function Source:enabled()
+    return vim.bo.filetype == "AgenticInput"
+end
+
+function Source:get_trigger_characters()
+    return { "@" }
+end
+
+function Source:get_completions(context, callback)
+    local picker = FilePicker.get_instance(context.bufnr)
+    if not picker then
+        callback(empty_response())
+        return function() end
+    end
+
+    local mention = FilePicker.get_active_mention(context.line, context.cursor[2])
+    if not mention then
+        callback(empty_response())
+        return function() end
+    end
+
+    local cancelled = false
+
+    picker:request_source_items(function(matches)
+        if cancelled then
+            return
+        end
+
+        local items = {}
+        for index, item in ipairs(matches) do
+            items[index] =
+                to_completion_item(item, index, context, mention.start_col)
+        end
+
+        callback({
+            items = items,
+            is_incomplete_forward = true,
+            is_incomplete_backward = true,
+        })
+    end)
+
+    return function()
+        cancelled = true
+    end
+end
+
+return Source

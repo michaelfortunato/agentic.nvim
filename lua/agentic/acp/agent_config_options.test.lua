@@ -61,6 +61,26 @@ describe("agentic.acp.AgentConfigOptions", function()
         },
     }
 
+    --- @type agentic.acp.ConfigOption
+    local approval_option = {
+        id = "approval-1",
+        currentValue = "read-only",
+        description = "Approval Preset",
+        name = "Approval Preset",
+        options = {
+            {
+                value = "read-only",
+                name = "Read Only",
+                description = "No write access",
+            },
+            {
+                value = "default",
+                name = "Default",
+                description = "Standard access",
+            },
+        },
+    }
+
     --- @type integer
     local test_bufnr
 
@@ -83,21 +103,25 @@ describe("agentic.acp.AgentConfigOptions", function()
     end)
 
     describe("constructor", function()
-        it("registers keymaps for steer, model, and reasoning effort on all buffers", function()
-            -- multi_keymap_set is stubbed in before_each; constructor called there
-            -- Each buffer gets 3 keymaps (steer + switch_model + switch_thought_level),
-            -- we pass 1 buffer so expect 3 calls
-            assert.stub(multi_keymap_stub).was.called(3)
+        it(
+            "registers keymaps for config, model, reasoning effort, and approval preset on all buffers",
+            function()
+                assert.stub(multi_keymap_stub).was.called(4)
 
-            local mode_call = multi_keymap_stub.calls[1]
-            assert.equal("function", type(mode_call[3]))
+                local mode_call = multi_keymap_stub.calls[1]
+                assert.equal("function", type(mode_call[3]))
 
-            local model_call = multi_keymap_stub.calls[2]
-            assert.equal("function", type(model_call[3]))
+                local model_call = multi_keymap_stub.calls[2]
+                assert.equal("function", type(model_call[3]))
 
-            local thought_call = multi_keymap_stub.calls[3]
-            assert.equal("function", type(thought_call[3]))
-        end)
+                local thought_call = multi_keymap_stub.calls[3]
+                assert.equal("function", type(thought_call[3]))
+
+                local approval_call = multi_keymap_stub.calls[4]
+                assert.equal("function", type(approval_call[3]))
+                assert.equal("<localLeader>p", approval_call[1])
+            end
+        )
     end)
 
     describe("set_options", function()
@@ -106,11 +130,26 @@ describe("agentic.acp.AgentConfigOptions", function()
                 mode_option,
                 model_option,
                 thought_option,
+                approval_option,
             })
 
             assert.equal("mode-1", config_options.mode.id)
             assert.equal("model-1", config_options.model.id)
             assert.equal("thought-1", config_options.thought_level.id)
+            assert.equal("approval-1", config_options.approval_preset.id)
+        end)
+
+        it("detects approval preset options by approval-like labels", function()
+            --- @type agentic.acp.ConfigOption
+            local aliased_approval = vim.tbl_extend("force", approval_option, {
+                category = "sandbox_mode",
+                name = "Approval Mode",
+                description = "Approval access level",
+            }) --[[@as agentic.acp.ConfigOption]]
+
+            config_options:set_options({ aliased_approval })
+
+            assert.equal("approval-1", config_options.approval_preset.id)
         end)
 
         it("does nothing when configOptions is nil", function()
@@ -119,6 +158,7 @@ describe("agentic.acp.AgentConfigOptions", function()
             assert.is_nil(config_options.mode)
             assert.is_nil(config_options.model)
             assert.is_nil(config_options.thought_level)
+            assert.is_nil(config_options.approval_preset)
         end)
 
         it("ignores unknown categories", function()
@@ -582,60 +622,157 @@ describe("agentic.acp.AgentConfigOptions", function()
             select_stub:revert()
         end)
 
-        it("routes the selected reasoning effort through set_config_option", function()
-            local generic_change = spy.new(function() end)
-            local fresh = AgentConfigOptions:new(
-                { chat = test_bufnr },
-                function() end,
-                function() end,
-                generic_change --[[@as fun(config_id: string, value: string)]]
-            )
-            local multi_thought = vim.tbl_extend("force", thought_option, {
-                options = {
-                    {
-                        value = "normal",
-                        name = "Normal",
-                        description = "Standard",
-                    },
-                    {
-                        value = "deep",
-                        name = "Deep",
-                        description = "Extended",
-                    },
-                },
-            }) --[[@as agentic.acp.ConfigOption]]
-
-            fresh:set_options({ multi_thought })
-
-            select_stub:invokes(function(items, _opts, on_choice)
-                on_choice(items[2])
-            end)
-
-            assert.is_true(fresh:show_thought_level_selector())
-            assert.spy(generic_change).was.called_with("thought-1", "deep")
-        end)
-
-        it("returns false and notifies when reasoning effort is unavailable", function()
-            local Logger = require("agentic.utils.logger")
-            local notify_stub = spy.stub(Logger, "notify")
-            local fresh = AgentConfigOptions:new(
-                { chat = test_bufnr },
-                function() end,
-                function() end
-            )
-
-            assert.is_false(fresh:show_thought_level_selector())
-            assert.stub(select_stub).was.called(0)
-            assert.stub(notify_stub).was.called(1)
-            assert.truthy(
-                string.find(
-                    notify_stub.calls[1][1],
-                    "reasoning effort switching"
+        it(
+            "routes the selected reasoning effort through set_config_option",
+            function()
+                local generic_change = spy.new(function() end)
+                local fresh = AgentConfigOptions:new(
+                    { chat = test_bufnr },
+                    function() end,
+                    function() end,
+                    generic_change --[[@as fun(config_id: string, value: string)]]
                 )
-            )
+                local multi_thought = vim.tbl_extend("force", thought_option, {
+                    options = {
+                        {
+                            value = "normal",
+                            name = "Normal",
+                            description = "Standard",
+                        },
+                        {
+                            value = "deep",
+                            name = "Deep",
+                            description = "Extended",
+                        },
+                    },
+                }) --[[@as agentic.acp.ConfigOption]]
 
-            notify_stub:revert()
+                fresh:set_options({ multi_thought })
+
+                select_stub:invokes(function(items, _opts, on_choice)
+                    on_choice(items[2])
+                end)
+
+                assert.is_true(fresh:show_thought_level_selector())
+                assert.spy(generic_change).was.called_with("thought-1", "deep")
+            end
+        )
+
+        it(
+            "returns false and notifies when reasoning effort is unavailable",
+            function()
+                local Logger = require("agentic.utils.logger")
+                local notify_stub = spy.stub(Logger, "notify")
+                local fresh = AgentConfigOptions:new(
+                    { chat = test_bufnr },
+                    function() end,
+                    function() end
+                )
+
+                assert.is_false(fresh:show_thought_level_selector())
+                assert.stub(select_stub).was.called(0)
+                assert.stub(notify_stub).was.called(1)
+                assert.truthy(
+                    string.find(
+                        notify_stub.calls[1][1],
+                        "reasoning effort switching"
+                    )
+                )
+
+                notify_stub:revert()
+            end
+        )
+    end)
+
+    describe("show_approval_preset_selector", function()
+        --- @type TestStub
+        local select_stub
+
+        before_each(function()
+            select_stub = spy.stub(vim.ui, "select")
         end)
+
+        after_each(function()
+            select_stub:revert()
+        end)
+
+        it(
+            "routes the selected approval preset through set_config_option",
+            function()
+                local generic_change = spy.new(function() end)
+                local fresh = AgentConfigOptions:new(
+                    { chat = test_bufnr },
+                    function() end,
+                    function() end,
+                    generic_change --[[@as fun(config_id: string, value: string)]]
+                )
+
+                fresh:set_options({ approval_option })
+
+                select_stub:invokes(function(items, _opts, on_choice)
+                    on_choice(items[2])
+                end)
+
+                assert.is_true(fresh:show_approval_preset_selector())
+                assert.spy(generic_change).was.called_with("approval-1", "default")
+            end
+        )
+
+        it(
+            "falls back to matching provider options even if approval_preset was not assigned yet",
+            function()
+                local generic_change = spy.new(function() end)
+                local fresh = AgentConfigOptions:new(
+                    { chat = test_bufnr },
+                    function() end,
+                    function() end,
+                    generic_change --[[@as fun(config_id: string, value: string)]]
+                )
+
+                local aliased_approval = vim.tbl_extend("force", approval_option, {
+                    category = "sandbox_mode",
+                    name = "Approval Mode",
+                    description = "Approval access level",
+                }) --[[@as agentic.acp.ConfigOption]]
+
+                fresh._options = { aliased_approval }
+                fresh._options_by_id = {
+                    [aliased_approval.id] = aliased_approval,
+                }
+
+                select_stub:invokes(function(items, _opts, on_choice)
+                    on_choice(items[2])
+                end)
+
+                assert.is_true(fresh:show_approval_preset_selector())
+                assert.spy(generic_change).was.called_with("approval-1", "default")
+            end
+        )
+
+        it(
+            "returns false and notifies when approval preset is unavailable",
+            function()
+                local Logger = require("agentic.utils.logger")
+                local notify_stub = spy.stub(Logger, "notify")
+                local fresh = AgentConfigOptions:new(
+                    { chat = test_bufnr },
+                    function() end,
+                    function() end
+                )
+
+                assert.is_false(fresh:show_approval_preset_selector())
+                assert.stub(select_stub).was.called(0)
+                assert.stub(notify_stub).was.called(1)
+                assert.truthy(
+                    string.find(
+                        notify_stub.calls[1][1],
+                        "approval preset switching"
+                    )
+                )
+
+                notify_stub:revert()
+            end
+        )
     end)
 
     describe("set_legacy_models", function()
@@ -666,6 +803,7 @@ describe("agentic.acp.AgentConfigOptions", function()
                 mode_option,
                 model_option,
                 thought_option,
+                approval_option,
             })
             config_options.legacy_agent_modes:set_modes({
                 availableModes = {
@@ -689,6 +827,7 @@ describe("agentic.acp.AgentConfigOptions", function()
             assert.is_nil(config_options.mode)
             assert.is_nil(config_options.model)
             assert.is_nil(config_options.thought_level)
+            assert.is_nil(config_options.approval_preset)
             assert.is_nil(config_options.legacy_agent_modes:get_mode("legacy"))
             assert.is_nil(config_options.legacy_agent_modes.current_mode_id)
             assert.is_nil(config_options.legacy_agent_models:get_model("opus"))

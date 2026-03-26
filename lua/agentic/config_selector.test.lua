@@ -91,6 +91,41 @@ describe("config selector", function()
 
             assert.same({ "● M1", "  M2" }, second_render)
         end)
+
+        it("renders approval preset labels exactly as provided", function()
+            local config = AgentConfigOptions:new(
+                {},
+                function() end,
+                function() end
+            )
+
+            config:set_options({
+                {
+                    id = "approval-1",
+                    category = "unknown",
+                    currentValue = "read_only",
+                    name = "Approval Preset",
+                    options = {
+                        { value = "read_only", name = "Read Only" },
+                        { value = "default", name = "Default" },
+                    },
+                },
+            })
+
+            local steering_render = {}
+            select_stub:invokes(function(items, opts, on_choice)
+                steering_render = format_all(items, opts)
+                on_choice(nil)
+            end)
+
+            config:show_config_selector()
+
+            assert.equal(
+                "Approval Preset: Read Only",
+                config:get_header_context()
+            )
+            assert.same({ "  Approval Preset: Read Only" }, steering_render)
+        end)
     end)
 
     describe("AgentModels (legacy provider integration)", function()
@@ -164,73 +199,76 @@ describe("config selector", function()
             assert.same({ "● M1: D1", "  M2: D2" }, second_render)
         end)
 
-        it("preserves provider config option ordering in the config selector", function()
-            local generic_change = spy.new(function() end)
-            local config = AgentConfigOptions:new(
-                {},
-                function() end,
-                function() end,
-                generic_change --[[@as fun(config_id: string, value: string)]]
-            )
+        it(
+            "preserves provider config option ordering in the config selector",
+            function()
+                local generic_change = spy.new(function() end)
+                local config = AgentConfigOptions:new(
+                    {},
+                    function() end,
+                    function() end,
+                    generic_change --[[@as fun(config_id: string, value: string)]]
+                )
 
-            ---@diagnostic disable-next-line: missing-fields
-            config:set_options({
-                {
-                    id = "thought-1",
-                    category = "thought_level",
-                    currentValue = "normal",
-                    name = "Thought Level",
-                    options = {
-                        { value = "normal", name = "Normal" },
-                        { value = "deep", name = "Deep" },
+                ---@diagnostic disable-next-line: missing-fields
+                config:set_options({
+                    {
+                        id = "thought-1",
+                        category = "thought_level",
+                        currentValue = "normal",
+                        name = "Thought Level",
+                        options = {
+                            { value = "normal", name = "Normal" },
+                            { value = "deep", name = "Deep" },
+                        },
                     },
-                },
-                {
-                    id = "model-1",
-                    category = "model",
-                    currentValue = "m2",
-                    name = "Model",
-                    options = {
-                        { value = "m1", name = "M1" },
-                        { value = "m2", name = "M2" },
+                    {
+                        id = "model-1",
+                        category = "model",
+                        currentValue = "m2",
+                        name = "Model",
+                        options = {
+                            { value = "m1", name = "M1" },
+                            { value = "m2", name = "M2" },
+                        },
                     },
-                },
-                {
-                    id = "mode-1",
-                    category = "mode",
-                    currentValue = "code",
-                    name = "Mode",
-                    options = {
-                        { value = "plan", name = "Plan" },
-                        { value = "code", name = "Code" },
+                    {
+                        id = "mode-1",
+                        category = "mode",
+                        currentValue = "code",
+                        name = "Mode",
+                        options = {
+                            { value = "plan", name = "Plan" },
+                            { value = "code", name = "Code" },
+                        },
                     },
-                },
-            })
+                })
 
-            local steering_render = {}
-            local select_call = 0
+                local steering_render = {}
+                local select_call = 0
 
-            select_stub:invokes(function(items, opts, on_choice)
-                select_call = select_call + 1
+                select_stub:invokes(function(items, opts, on_choice)
+                    select_call = select_call + 1
 
-                if select_call == 1 then
-                    steering_render = format_all(items, opts)
-                    on_choice(items[1])
-                    return
-                end
+                    if select_call == 1 then
+                        steering_render = format_all(items, opts)
+                        on_choice(items[1])
+                        return
+                    end
 
-                on_choice(items[2])
-            end)
+                    on_choice(items[2])
+                end)
 
-            config:show_config_selector()
+                config:show_config_selector()
 
-            assert.same({
-                "  Thought Level: Normal",
-                "  Model: M2",
-                "  Mode: Code",
-            }, steering_render)
-            assert.spy(generic_change).was.called_with("thought-1", "deep")
-        end)
+                assert.same({
+                    "  Thought Level: Normal",
+                    "  Model: M2",
+                    "  Mode: Code",
+                }, steering_render)
+                assert.spy(generic_change).was.called_with("thought-1", "deep")
+            end
+        )
 
         it("builds header context in provider order", function()
             local config = AgentConfigOptions:new(

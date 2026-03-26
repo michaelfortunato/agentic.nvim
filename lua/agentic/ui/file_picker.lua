@@ -1,7 +1,6 @@
 local FileSystem = require("agentic.utils.file_system")
 local Config = require("agentic.config")
 local Logger = require("agentic.utils.logger")
-local BufHelpers = require("agentic.utils.buf_helpers")
 
 --- @class agentic.ui.FilePicker
 --- @field _files table[]
@@ -31,6 +30,16 @@ FilePicker.CMD_FD = {
 }
 
 FilePicker.CMD_GIT = { "git", "ls-files", "-co", "--exclude-standard" }
+FilePicker.CMD_BFS = {
+    "bfs",
+    "-name",
+    ".git",
+    "-prune",
+    "-o",
+    "-type",
+    "f",
+    "-print",
+}
 
 --- Buffer-local storage (weak values for automatic cleanup)
 local instances_by_buffer = setmetatable({}, { __mode = "v" })
@@ -38,6 +47,9 @@ local CACHE_REFRESH_MS = 10000
 local MAX_COMPLETION_RESULTS = 200
 local files_by_root = {}
 local executable_by_command = {}
+local BLINK_SOURCE_ID = "agentic_files"
+local blink_provider_registered = false
+local blink_filetype_registered = false
 
 --- @class agentic.ui.FilePicker.Opts
 --- @field resolve_root? fun(): string|nil
@@ -130,70 +142,81 @@ function FilePicker:new(bufnr, opts)
         _root = normalize_root(vim.fn.getcwd()),
         _resolve_root = opts.resolve_root,
     }, self)
-    instance:_setup_completion(bufnr)
+    instance:_setup_blink_completion(bufnr)
     return instance
 end
 
---- Completion menu accept sequence
---- Space after <C-y> ensures completion menu closes and user is ready to start a new completion
-local COMPLETION_ACCEPT =
-    vim.api.nvim_replace_termcodes("<C-y> ", true, true, true)
+--- @param line string
+--- @param cursor_col integer
+--- @return { start_col: integer, query: string }|nil
+local function get_active_mention(line, cursor_col)
+    local before_cursor = line:sub(1, cursor_col)
+    local at_col = before_cursor:match(".*()@[^%s]*$")
+    if not at_col then
+        return nil
+    end
 
---- Sets up omnifunc completion and @ trigger detection
+    if at_col > 1 then
+        local prefix = before_cursor:sub(at_col - 1, at_col - 1)
+        if not prefix:match("%s") then
+            return nil
+        end
+    end
+
+    return {
+        start_col = at_col - 1,
+        query = before_cursor:sub(at_col),
+    }
+end
+
+--- @return blink.cmp.API|nil
+function FilePicker:_get_blink()
+    local ok, blink = pcall(require, "blink.cmp")
+    if not ok then
+        return nil
+    end
+
+    return blink
+end
+
+function FilePicker:_ensure_blink_registered()
+    local blink = self:_get_blink()
+    if not blink then
+        return nil
+    end
+
+    if not blink_provider_registered then
+        local ok_config, blink_config = pcall(require, "blink.cmp.config")
+        local already_registered = ok_config
+            and blink_config.sources
+            and blink_config.sources.providers
+            and blink_config.sources.providers[BLINK_SOURCE_ID] ~= nil
+
+        if not already_registered then
+            blink.add_source_provider(BLINK_SOURCE_ID, {
+                name = "Agentic Files",
+                module = "agentic.ui.file_picker_blink_source",
+                async = true,
+                max_items = MAX_COMPLETION_RESULTS,
+            })
+        end
+
+        blink_provider_registered = true
+    end
+
+    if not blink_filetype_registered then
+        blink.add_filetype_source("AgenticInput", BLINK_SOURCE_ID)
+        blink_filetype_registered = true
+    end
+
+    return blink
+end
+
+--- Sets up blink-triggered completion for @ file mentions
 --- @param bufnr number
-function FilePicker:_setup_completion(bufnr)
-    vim.bo[bufnr].omnifunc =
-        "v:lua.require'agentic.ui.file_picker'.complete_func"
-    vim.bo[bufnr].completeopt = "menu,menuone,noinsert,popup,fuzzy"
-    vim.bo[bufnr].iskeyword = vim.bo[bufnr].iskeyword .. ",@"
+function FilePicker:_setup_blink_completion(bufnr)
     instances_by_buffer[bufnr] = self
-
-    BufHelpers.multi_keymap_set(
-        Config.keymaps.prompt.accept_completion,
-        bufnr,
-        function()
-            if vim.fn.pumvisible() == 1 then
-                return COMPLETION_ACCEPT
-            end
-
-            return ""
-        end,
-        {
-            desc = "Agentic accept completion",
-            expr = true,
-            replace_keycodes = false,
-        }
-    )
-
-    local last_at_pos = nil
-
-    vim.api.nvim_create_autocmd("TextChangedI", {
-        buffer = bufnr,
-        callback = function()
-            local cursor = vim.api.nvim_win_get_cursor(0)
-            local line = vim.api.nvim_get_current_line()
-            local before_cursor = line:sub(1, cursor[2])
-
-            -- Match @ at start of line or after whitespace (space/tab)
-            local at_match = before_cursor:match("^@[^%s]*$")
-                or before_cursor:match("[%s]@[^%s]*$")
-
-            if at_match then
-                local at_pos = before_cursor:reverse():find("@")
-                local current_pos = cursor[2] - at_pos
-
-                -- Only scan if this is a new @ position
-                if current_pos ~= last_at_pos then
-                    last_at_pos = current_pos
-                    self:_prime_files()
-                elseif self._files and #self._files > 0 then
-                    self:_trigger_completion_menu()
-                end
-            else
-                last_at_pos = nil
-            end
-        end,
-    })
+    self:_ensure_blink_registered()
 end
 
 --- @return boolean
@@ -357,45 +380,36 @@ function FilePicker:_cache_is_fresh(root)
     return (now_ms() - cache.updated_at) <= CACHE_REFRESH_MS
 end
 
-function FilePicker:_trigger_completion_menu()
-    vim.opt_local.pumwidth = math.floor(vim.o.columns * 0.45)
-
-    vim.api.nvim_feedkeys(
-        vim.api.nvim_replace_termcodes("<C-x><C-o>", true, false, true),
-        "n",
-        false
-    )
-end
-
---- @return boolean
-function FilePicker:_should_trigger_completion()
-    if vim.api.nvim_get_current_buf() ~= self._bufnr then
-        return false
-    end
-
-    local cursor = vim.api.nvim_win_get_cursor(0)
-    local line = vim.api.nvim_get_current_line()
-    local before_cursor = line:sub(1, cursor[2])
-
-    return before_cursor:match("^@[^%s]*$") ~= nil
-        or before_cursor:match("[%s]@[^%s]*$") ~= nil
-end
-
-function FilePicker:_prime_files()
+--- @param query string
+--- @param callback fun(items: table[])
+function FilePicker:request_completion_items(query, callback)
     local root = self:_resolve_scan_root()
     local cache = self:_get_cached_files(root)
-
     self._root = root
 
     if cache then
         self._files = cache.files
-        if #cache.files > 0 then
-            self:_trigger_completion_menu()
+    end
+
+    if cache then
+        callback(self:_filter_completion_items(query))
+    else
+        callback({})
+    end
+
+    if cache and (self:_cache_is_fresh(root) or cache.scanning) then
+        if cache.scanning then
+            self:_scan_files_async(root, function(files)
+                if not vim.api.nvim_buf_is_valid(self._bufnr) or self._root ~= root then
+                    return
+                end
+
+                self._files = files
+                callback(self:_filter_completion_items(query))
+            end)
         end
 
-        if self:_cache_is_fresh(root) or cache.scanning then
-            return
-        end
+        return
     end
 
     self:_scan_files_async(root, function(files)
@@ -404,10 +418,46 @@ function FilePicker:_prime_files()
         end
 
         self._files = files
+        callback(self:_filter_completion_items(query))
+    end)
+end
 
-        if #files > 0 and self:_should_trigger_completion() then
-            self:_trigger_completion_menu()
+--- Returns the raw cached source items for blink to fuzzy match itself.
+--- @param callback fun(items: table[])
+function FilePicker:request_source_items(callback)
+    local root = self:_resolve_scan_root()
+    local cache = self:_get_cached_files(root)
+    self._root = root
+
+    if cache then
+        self._files = cache.files
+        callback(cache.files)
+    else
+        callback({})
+    end
+
+    if cache and (self:_cache_is_fresh(root) or cache.scanning) then
+        if cache.scanning then
+            self:_scan_files_async(root, function(files)
+                if not vim.api.nvim_buf_is_valid(self._bufnr) or self._root ~= root then
+                    return
+                end
+
+                self._files = files
+                callback(files)
+            end)
         end
+
+        return
+    end
+
+    self:_scan_files_async(root, function(files)
+        if not vim.api.nvim_buf_is_valid(self._bufnr) or self._root ~= root then
+            return
+        end
+
+        self._files = files
+        callback(files)
     end)
 end
 
@@ -531,13 +581,14 @@ function FilePicker:_build_scan_commands(root)
     local commands = {}
     local include_hidden = self:_include_hidden_files()
 
-    if is_executable(FilePicker.CMD_RG[1]) then
-        local cmd = vim.list_extend({}, FilePicker.CMD_RG)
-        if include_hidden then
-            table.insert(cmd, "--hidden")
-        end
-        table.insert(cmd, root)
-        table.insert(commands, cmd)
+    local git_marker = vim.uv.fs_stat(root .. "/.git")
+    if is_executable(FilePicker.CMD_GIT[1]) and git_marker then
+        table.insert(commands, {
+            "git",
+            "-C",
+            root,
+            unpack(FilePicker.CMD_GIT, 2),
+        })
     end
 
     if is_executable(FilePicker.CMD_FD[1]) then
@@ -550,16 +601,19 @@ function FilePicker:_build_scan_commands(root)
         table.insert(commands, cmd)
     end
 
-    if is_executable(FilePicker.CMD_GIT[1]) then
-        local git_marker = vim.uv.fs_stat(root .. "/.git")
-        if git_marker then
-            table.insert(commands, {
-                "git",
-                "-C",
-                root,
-                unpack(FilePicker.CMD_GIT, 2),
-            })
+    if is_executable(FilePicker.CMD_RG[1]) then
+        local cmd = vim.list_extend({}, FilePicker.CMD_RG)
+        if include_hidden then
+            table.insert(cmd, "--hidden")
         end
+        table.insert(cmd, root)
+        table.insert(commands, cmd)
+    end
+
+    if is_executable(FilePicker.CMD_BFS[1]) then
+        local cmd = { FilePicker.CMD_BFS[1], root }
+        vim.list_extend(cmd, vim.list_slice(FilePicker.CMD_BFS, 2))
+        table.insert(commands, cmd)
     end
 
     return commands
@@ -660,33 +714,12 @@ function FilePicker:_scan_files_glob(root)
     return files
 end
 
---- Omnifunc completion function (called by Neovim)
---- @param findstart number 1 for finding start position, 0 for returning matches
---- @param _base string The text to complete
---- @return number|table
-function FilePicker.complete_func(findstart, _base)
-    if findstart == 1 then
-        local line = vim.api.nvim_get_current_line()
-        local cursor = vim.api.nvim_win_get_cursor(0)
-        local before_cursor = line:sub(1, cursor[2])
-
-        local at_pos = before_cursor:reverse():find("@")
-        if at_pos then
-            local start_col = cursor[2] - at_pos
-            return start_col
-        end
-        -- Return -3: Cancel silently and leave completion mode (see :h complete-functions)
-        return -3
-    else
-        local bufnr = vim.api.nvim_get_current_buf()
-        local instance = instances_by_buffer[bufnr]
-        if not instance then
-            Logger.debug("[FilePicker] No instance found for buffer:", bufnr)
-            return {}
-        end
-
-        return instance:_filter_completion_items(_base)
-    end
+--- @param bufnr integer
+--- @return agentic.ui.FilePicker|nil
+function FilePicker.get_instance(bufnr)
+    return instances_by_buffer[bufnr]
 end
+
+FilePicker.get_active_mention = get_active_mention
 
 return FilePicker

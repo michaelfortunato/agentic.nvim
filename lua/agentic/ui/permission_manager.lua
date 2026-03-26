@@ -40,10 +40,11 @@ function PermissionManager:new(session_state)
     }, self)
 
     instance:_sync_state()
-    instance._state_listener_id =
-        instance.session_state:subscribe(function(state)
+    instance._state_listener_id = instance.session_state:subscribe(
+        function(state)
             instance:_sync_state(state)
-        end)
+        end
+    )
 
     return instance
 end
@@ -67,7 +68,10 @@ function PermissionManager:add_request(request, callback)
     end
 
     local tool_call_id = request.toolCall.toolCallId
-    if self.current_request and self.current_request.toolCallId == tool_call_id then
+    if
+        self.current_request
+        and self.current_request.toolCallId == tool_call_id
+    then
         Logger.debug(
             "PermissionManager: ignoring duplicate permission request",
             tool_call_id
@@ -157,6 +161,7 @@ function PermissionManager:_show_chooser(tool_call_id, options)
     self._chooser_tabpage = vim.api.nvim_get_current_tabpage()
     Chooser.show(options, {
         prompt = self:_build_prompt(tool_call_id),
+        show_title = false,
         format_item = function(option)
             return self:_format_option(option)
         end,

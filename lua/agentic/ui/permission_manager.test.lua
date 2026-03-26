@@ -94,26 +94,32 @@ describe("agentic.ui.PermissionManager", function()
     it("shows sorted approval options in the chooser", function()
         add_tool_call("tc-1", "edit")
 
-        pm:add_request(make_request("tc-1", {
-            {
-                optionId = "reject-once",
-                name = "Reject once",
-                kind = "reject_once",
-            },
-            {
-                optionId = "allow-once",
-                name = "Allow once",
-                kind = "allow_once",
-            },
-        }), spy.new(function() end) --[[@as function]])
+        pm:add_request(
+            make_request("tc-1", {
+                {
+                    optionId = "reject-once",
+                    name = "Reject once",
+                    kind = "reject_once",
+                },
+                {
+                    optionId = "allow-once",
+                    name = "Allow once",
+                    kind = "allow_once",
+                },
+            }),
+            spy.new(function() end) --[[@as function]]
+        )
 
         assert.spy(chooser_show_stub).was.called(1)
         assert.equal("tc-1", pm.current_request.toolCallId)
         assert.equal(0, #pm.queue)
         assert.equal("Approve edit?", shown_opts.prompt)
+        assert.equal(false, shown_opts.show_title)
         assert.equal("allow-once", shown_items[1].optionId)
         assert.equal("reject-once", shown_items[2].optionId)
-        assert.truthy(shown_opts.format_item(shown_items[1]):find("Allow once", 1, true))
+        assert.truthy(
+            shown_opts.format_item(shown_items[1]):find("Allow once", 1, true)
+        )
     end)
 
     it("completes the request when a choice is selected", function()
@@ -150,18 +156,21 @@ describe("agentic.ui.PermissionManager", function()
         local callback = spy.new(function() end) --[[@as function]]
 
         add_tool_call("tc-escape-1", "edit")
-        pm:add_request(make_request("tc-escape-1", {
-            {
-                optionId = "allow-once",
-                name = "Allow once",
-                kind = "allow_once",
-            },
-            {
-                optionId = "reject-once",
-                name = "Reject once",
-                kind = "reject_once",
-            },
-        }), callback)
+        pm:add_request(
+            make_request("tc-escape-1", {
+                {
+                    optionId = "allow-once",
+                    name = "Allow once",
+                    kind = "allow_once",
+                },
+                {
+                    optionId = "reject-once",
+                    name = "Reject once",
+                    kind = "reject_once",
+                },
+            }),
+            callback
+        )
 
         shown_callback(shown_opts.escape_choice)
 
@@ -171,19 +180,22 @@ describe("agentic.ui.PermissionManager", function()
         assert.equal(0, #pm.queue)
     end)
 
-    it("ignores duplicate permission requests for the same tool call", function()
-        local callback = spy.new(function() end) --[[@as function]]
-        local request = make_request("tc-dup-1")
+    it(
+        "ignores duplicate permission requests for the same tool call",
+        function()
+            local callback = spy.new(function() end) --[[@as function]]
+            local request = make_request("tc-dup-1")
 
-        add_tool_call("tc-dup-1", "edit")
-        pm:add_request(request, callback)
-        pm:add_request(request, callback)
+            add_tool_call("tc-dup-1", "edit")
+            pm:add_request(request, callback)
+            pm:add_request(request, callback)
 
-        assert.is_not_nil(pm.current_request)
-        assert.equal("tc-dup-1", pm.current_request.toolCallId)
-        assert.equal(0, #pm.queue)
-        assert.spy(chooser_show_stub).was.called(1)
-    end)
+            assert.is_not_nil(pm.current_request)
+            assert.equal("tc-dup-1", pm.current_request.toolCallId)
+            assert.equal(0, #pm.queue)
+            assert.spy(chooser_show_stub).was.called(1)
+        end
+    )
 
     it("clear() cancels current and queued requests", function()
         local callback_1 = spy.new(function() end) --[[@as function]]

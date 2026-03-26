@@ -375,8 +375,9 @@ configure it per provider:
 }
 ```
 
-The mode will only be set if it's available from the provider. Use `<S-Tab>` to
-see available modes for your provider.
+The mode will only be set if it's available from the provider. Agentic no
+longer binds a default key for the generic session-config picker; if you want
+one, set `keymaps.widget.change_mode` yourself.
 
 ### Window Layout
 
@@ -438,7 +439,7 @@ a table configuration or a custom render function.
     headers = {
       chat = {
         title = "󰻞 My Custom Chat Title",
-        suffix = "<S-Tab>: change mode",
+        suffix = "<localLeader>m: model",
       },
       -- ...
     },
@@ -545,13 +546,14 @@ These keybindings are automatically set in Agentic buffers:
 
 | Keybinding       | Mode  | Description                                                     |
 | ---------------- | ----- | --------------------------------------------------------------- |
-| `<S-Tab>`        | n/v/i | Switch agent mode (only available if provider supports modes)   |
 | `<CR>`           | n     | Submit prompt                                                   |
 | `<C-s>`          | n/v/i | Submit prompt                                                   |
-| `<localLeader>p` | n     | Paste image from clipboard in the Prompt buffer                 |
+| `<localLeader>p` | n     | Switch approval preset when the provider exposes it             |
 | `<C-v>`          | i     | Paste image from clipboard (same as Claude-code)                |
 | `<localLeader>s` | n     | Switch ACP provider (preserves chat history)                    |
 | `<localLeader>m` | n     | Switch model without (preserves chat history)                   |
+| `<localLeader>e` | n     | Switch reasoning effort when the provider exposes it            |
+| `<localLeader>q` | n     | Open the queued-message manager                                 |
 | `q`              | n     | Close chat widget                                               |
 | `d`              | n     | Remove file, code selection, or diagnostic at cursor            |
 | `d`              | v     | Remove multiple selected files, code selections, or diagnostics |
@@ -561,7 +563,8 @@ These keybindings are automatically set in Agentic buffers:
 #### Customizing Keybindings
 
 You can customize the default keybindings by configuring the `keymaps` option in
-your setup:
+your setup. The generic session-config picker is unbound by default, so add a
+binding explicitly if you want one:
 
 ```lua
 {
@@ -573,12 +576,15 @@ your setup:
         close = "q",  -- String for a single keybinding
         change_mode = {
           {
-            "<S-Tab>",
-            mode = { "i", "n", "v" },  -- Specify modes for this keybinding
+            "<localLeader>c",
+            mode = { "i", "n", "v" },
           },
         },
         switch_provider = "<localLeader>s",  -- Switch ACP provider
         switch_model = "<localLeader>m",     -- Switch model
+        switch_thought_level = "<localLeader>e",
+        switch_approval_preset = "<localLeader>p",
+        manage_queue = "<localLeader>q",
       },
 
       -- Keybindings for the prompt buffer only
@@ -592,10 +598,6 @@ your setup:
         },
 
         paste_image = {
-          {
-            "<localLeader>p",
-            mode = { "n" },
-          },
           {
             "<C-v>", -- Same as Claude-code in insert mode
             mode = { "i" },
@@ -965,21 +967,26 @@ setup.
 
 ### Blink.cmp
 
-You can disable `blink.cmp` from attaching to Agentic prompt buffers by adding
-the following to your `blink.cmp` setup:
+Agentic registers a native `blink.cmp` source for `@` file mentions inside
+`AgenticInput` automatically. No omnifunc setup is required.
+
+If you use another completion plugin alongside `blink.cmp`, disable the other
+plugin on `AgenticInput` so the prompt only has one completion menu.
 
 ```lua
 require('blink.cmp').setup({
-  enabled = function()
-    return not vim.tbl_contains({"AgenticInput"}, vim.bo.filetype)
-  end,
+  sources = {
+    per_filetype = {
+      AgenticInput = { "snippets", "path", "buffer", inherit_defaults = false },
+    },
+  },
 })
 ```
 
 ### nvim-cmp
 
-You can disable `nvim-cmp` from attaching to Agentic prompt buffers by using
-filetype-specific setup or the `enabled` option:
+If `nvim-cmp` is also attached to `AgenticInput`, disable it there so it does
+not compete with Agentic's `blink.cmp` source:
 
 ```lua
 -- Option 1: Filetype-specific setup (disable all sources)

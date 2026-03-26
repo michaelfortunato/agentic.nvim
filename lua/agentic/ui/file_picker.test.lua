@@ -3,6 +3,7 @@ local spy = require("tests.helpers.spy")
 
 local Config = require("agentic.config")
 local FilePicker = require("agentic.ui.file_picker")
+local BlinkSource = require("agentic.ui.file_picker_blink_source")
 
 --- Computes the differences between two tables
 --- @param left table
@@ -43,6 +44,7 @@ describe("FilePicker:scan_files", function()
     local original_cmd_rg
     local original_cmd_fd
     local original_cmd_git
+    local original_cmd_bfs
     local original_hidden
 
     --- @type agentic.ui.FilePicker
@@ -52,6 +54,7 @@ describe("FilePicker:scan_files", function()
         original_cmd_rg = FilePicker.CMD_RG[1]
         original_cmd_fd = FilePicker.CMD_FD[1]
         original_cmd_git = FilePicker.CMD_GIT[1]
+        original_cmd_bfs = FilePicker.CMD_BFS[1]
         original_hidden = Config.file_picker.hidden
         Config.file_picker.hidden = false
         picker = FilePicker:new(vim.api.nvim_create_buf(false, true)) --[[@as agentic.ui.FilePicker]]
@@ -65,6 +68,7 @@ describe("FilePicker:scan_files", function()
         FilePicker.CMD_RG[1] = original_cmd_rg
         FilePicker.CMD_FD[1] = original_cmd_fd
         FilePicker.CMD_GIT[1] = original_cmd_git
+        FilePicker.CMD_BFS[1] = original_cmd_bfs
         Config.file_picker.hidden = original_hidden
     end)
 
@@ -74,6 +78,7 @@ describe("FilePicker:scan_files", function()
             FilePicker.CMD_RG[1] = "echo"
             FilePicker.CMD_FD[1] = "echo"
             FilePicker.CMD_GIT[1] = "echo"
+            FilePicker.CMD_BFS[1] = "echo"
 
             system_stub = spy.stub(vim.fn, "system")
             system_stub:invokes(function(_cmd)
@@ -97,6 +102,7 @@ describe("FilePicker:scan_files", function()
             FilePicker.CMD_RG[1] = "echo"
             FilePicker.CMD_FD[1] = "echo"
             FilePicker.CMD_GIT[1] = "echo"
+            FilePicker.CMD_BFS[1] = "echo"
 
             system_stub = spy.stub(vim.fn, "system")
             system_stub:returns("file1.lua\n.env\nfoo/.secret\n")
@@ -113,6 +119,7 @@ describe("FilePicker:scan_files", function()
             FilePicker.CMD_RG[1] = "echo"
             FilePicker.CMD_FD[1] = "echo"
             FilePicker.CMD_GIT[1] = "echo"
+            FilePicker.CMD_BFS[1] = "echo"
 
             system_stub = spy.stub(vim.fn, "system")
             system_stub:returns("/tmp/agentic-file-picker/src/main.lua\n")
@@ -140,18 +147,21 @@ describe("FilePicker:scan_files", function()
             FilePicker.CMD_RG[1] = original_cmd_rg
             FilePicker.CMD_FD[1] = "nonexistent_fd"
             FilePicker.CMD_GIT[1] = "nonexistent_git"
+            FilePicker.CMD_BFS[1] = "nonexistent_bfs"
             local files_rg = picker:scan_files()
 
             -- Test fd
             FilePicker.CMD_RG[1] = "nonexistent_rg"
             FilePicker.CMD_FD[1] = original_cmd_fd
             FilePicker.CMD_GIT[1] = "nonexistent_git"
+            FilePicker.CMD_BFS[1] = "nonexistent_bfs"
             local files_fd = picker:scan_files()
 
             -- Test git
             FilePicker.CMD_RG[1] = "nonexistent_rg"
             FilePicker.CMD_FD[1] = "nonexistent_fd"
             FilePicker.CMD_GIT[1] = original_cmd_git
+            FilePicker.CMD_BFS[1] = "nonexistent_bfs"
             local files_git = picker:scan_files()
 
             -- All commands should return more than 0 files
@@ -185,12 +195,14 @@ describe("FilePicker:scan_files", function()
             FilePicker.CMD_RG[1] = original_cmd_rg
             FilePicker.CMD_FD[1] = "nonexistent_fd"
             FilePicker.CMD_GIT[1] = "nonexistent_git"
+            FilePicker.CMD_BFS[1] = "nonexistent_bfs"
             local files_rg = picker:scan_files()
 
             -- Disable all commands to force glob fallback
             FilePicker.CMD_RG[1] = "nonexistent_rg"
             FilePicker.CMD_FD[1] = "nonexistent_fd"
             FilePicker.CMD_GIT[1] = "nonexistent_git"
+            FilePicker.CMD_BFS[1] = "nonexistent_bfs"
 
             -- deps is the temp folder where mini.nvim is installed during tests
             table.insert(FilePicker.GLOB_EXCLUDE_PATTERNS, "deps/")
@@ -232,7 +244,7 @@ describe("FilePicker:scan_files", function()
     end)
 end)
 
-describe("FilePicker.complete_func", function()
+describe("FilePicker:request_completion_items", function()
     --- @type agentic.ui.FilePicker
     local picker
     --- @type integer
@@ -258,7 +270,7 @@ describe("FilePicker.complete_func", function()
     end)
 
     it("returns only matching completion items", function()
-        picker._files = {
+        local files = {
             {
                 word = "@src/main.lua",
                 _path_lc = "src/main.lua",
@@ -275,8 +287,12 @@ describe("FilePicker.complete_func", function()
                 _basename_lc = "main_spec.lua",
             },
         }
+        picker:_store_files(picker:_resolve_scan_root(), files)
 
-        local matches = FilePicker.complete_func(0, "@main")
+        local matches
+        picker:request_completion_items("@main", function(items)
+            matches = items
+        end)
         local words = vim.tbl_map(function(item)
             return item.word
         end, matches)
@@ -285,78 +301,109 @@ describe("FilePicker.complete_func", function()
     end)
 
     it("caps completion results to a bounded set", function()
-        picker._files = {}
+        local files = {}
 
         for i = 1, 260 do
             local path = string.format("src/file-%03d.lua", i)
-            picker._files[i] = {
+            files[i] = {
                 word = "@" .. path,
                 _path_lc = path,
                 _basename_lc = path:match("([^/]+)$"),
             }
         end
 
-        local matches = FilePicker.complete_func(0, "@file")
+        picker:_store_files(picker:_resolve_scan_root(), files)
+
+        local matches
+        picker:request_completion_items("@file", function(items)
+            matches = items
+        end)
 
         assert.equal(200, #matches)
         assert.equal("@src/file-001.lua", matches[1].word)
         assert.equal("@src/file-200.lua", matches[#matches].word)
     end)
+
+    it("returns cached source items for blink to fuzzy match", function()
+        local files = {
+            {
+                word = "@src/main.lua",
+                _path_lc = "src/main.lua",
+                _basename_lc = "main.lua",
+            },
+            {
+                word = "@tests/main_spec.lua",
+                _path_lc = "tests/main_spec.lua",
+                _basename_lc = "main_spec.lua",
+            },
+        }
+
+        picker:_store_files(picker:_resolve_scan_root(), files)
+
+        local matches
+        picker:request_source_items(function(items)
+            matches = items
+        end)
+
+        assert.same(files, matches)
+    end)
 end)
 
-describe("FilePicker keymap fallback", function()
-    local child = require("tests.helpers.child").new()
-
-    --- Setup a tracking expr keymap using vimscript (fully typed, no child.lua needed)
-    --- @param key string The key to map (e.g., "<Tab>", "<CR>")
-    --- @param global_name string The global variable name (g:) to track calls
-    local function setup_tracking_keymap(key, global_name)
-        child.g[global_name] = false
-        -- vimscript expr: execute() returns "" on success, concat with return value
-        local rhs = ("execute('let g:%s = v:true') .. '%s_CALLED'"):format(
-            global_name,
-            key:upper():gsub("[<>]", "")
-        )
-        child.api.nvim_set_keymap("i", key, rhs, { expr = true })
-    end
-
-    --- Load FilePicker in child process to void polluting main test env
-    local function load_file_picker()
-        child.lua([[require("agentic.ui.file_picker"):new(0)]])
-    end
+describe("Blink file picker source", function()
+    local source = BlinkSource.new({})
+    local picker
+    local bufnr
 
     before_each(function()
-        child.setup()
+        bufnr = vim.api.nvim_create_buf(false, true)
+        picker = FilePicker:new(bufnr) --[[@as agentic.ui.FilePicker]]
+        vim.bo[bufnr].filetype = "AgenticInput"
+        picker:_store_files(picker:_resolve_scan_root(), {
+            {
+                word = "@src/main.lua",
+                _path_lc = "src/main.lua",
+                _basename_lc = "main.lua",
+            },
+            {
+                word = "@src/other.lua",
+                _path_lc = "src/other.lua",
+                _basename_lc = "other.lua",
+            },
+        })
     end)
 
     after_each(function()
-        child.stop()
+        if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+            vim.api.nvim_buf_delete(bufnr, { force = true })
+        end
     end)
 
-    it("should accept completion when completion menu is visible", function()
-        local prop_name = "tab_called"
-        setup_tracking_keymap("<Tab>", prop_name)
-        load_file_picker()
+    it("returns raw source items for an active @ mention", function()
+        local response
+        source:get_completions({
+            bufnr = bufnr,
+            line = "review @main",
+            cursor = { 1, 12 },
+        }, function(items)
+            response = items
+        end)
 
-        -- Set up buffer with multiple completion candidates
-        child.api.nvim_buf_set_lines(
-            0,
-            0,
-            -1,
-            false,
-            { "hello help helicopter", "" }
-        )
-        child.api.nvim_win_set_cursor(0, { 2, 0 })
+        assert.equal(2, #response.items)
+        assert.equal("src/main.lua", response.items[1].label)
+        assert.equal("@src/main.lua", response.items[1].textEdit.newText)
+        assert.equal(7, response.items[1].textEdit.range.start.character)
+    end)
 
-        -- Type partial word and trigger keyword completion
-        child.type_keys("i", "hel", "<C-x><C-n>")
+    it("returns no completions outside an @ mention", function()
+        local response
+        source:get_completions({
+            bufnr = bufnr,
+            line = "email@example.com",
+            cursor = { 1, 17 },
+        }, function(items)
+            response = items
+        end)
 
-        -- Verify completion menu is actually visible
-        assert.equal(1, child.fn.pumvisible())
-
-        -- Now press Tab while menu is visible - should accept completion, not call fallback
-        child.type_keys("<Tab>")
-
-        assert.is_false(child.g[prop_name])
+        assert.same({}, response.items)
     end)
 end)

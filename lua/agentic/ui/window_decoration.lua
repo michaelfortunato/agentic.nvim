@@ -1,15 +1,8 @@
---- Window decoration module for managing window titles, statuslines, and highlights.
+--- Window decoration module for managing window titles and highlights.
 ---
---- This module provides utilities to render headers (winbar) and statuslines for windows.
+--- This module provides utilities to render Agentic window labels and in-buffer context.
 ---
 --- ## Lualine Compatibility
----
---- If you're using lualine or similar statusline plugins, ensure windows have their
---- statusline set to prevent the plugin from hijacking them:
----
---- ```lua
---- vim.api.nvim_set_option_value("statusline", " ", { win = winid })
---- ```
 ---
 --- Alternatively, configure lualine to ignore specific filetypes:
 --- ```lua
@@ -26,16 +19,23 @@
 local Config = require("agentic.config")
 local Logger = require("agentic.utils.logger")
 local Theme = require("agentic.theme")
+local BufHelpers = require("agentic.utils.buf_helpers")
 
 --- @class agentic.ui.WindowDecoration
 local WindowDecoration = {}
+local NS_CHAT_CONTEXT = vim.api.nvim_create_namespace("agentic_chat_context")
+local CHAT_CONTEXT_LINE_COUNT_KEY = "agentic_chat_context_line_count"
 
 --- @type agentic.ui.ChatWidget.Headers
 local WINDOW_HEADERS = {
     chat = {
         title = "󰻞 Agentic Chat",
     },
-    input = { title = "󰦨 Prompt", suffix = "<S-Tab>: config · <C-s>: submit" },
+    queue = {
+        title = "Agentic Queue",
+        suffix = "<CR>: actions · !: send now · d: remove · Esc: prompt",
+    },
+    input = { title = "󰦨 Prompt", suffix = "<C-s>: submit" },
     code = {
         title = "󰪸 Selected Code Snippets",
         suffix = "d: remove block",
@@ -53,16 +53,6 @@ local WINDOW_HEADERS = {
     },
 }
 
---- @class agentic.ui.WindowDecoration.Config
---- @field align? "left"|"center"|"right" Header text alignment
---- @field hl? string Highlight group for the header text
---- @field reverse_hl? string Highlight group for the separator
-local default_config = {
-    align = "left",
-    hl = Theme.HL_GROUPS.WIN_BAR_TITLE,
-    reverse_hl = Theme.HL_GROUPS.WIN_BAR_HINT,
-}
-
 --- Concatenates header parts (title, context, suffix) into a single string
 --- @param parts agentic.ui.ChatWidget.HeaderParts
 --- @return string header_text
@@ -75,12 +65,6 @@ local function concat_header_parts(parts)
         table.insert(pieces, parts.suffix)
     end
     return table.concat(pieces, " | ")
-end
-
---- @param text string
---- @return string
-local function escape_status_text(text)
-    return tostring(text):gsub("%%", "%%%%")
 end
 
 --- @param option string
@@ -109,46 +93,171 @@ local function serialize_option_map(items)
     return table.concat(parts, ",")
 end
 
---- @param parts agentic.ui.ChatWidget.HeaderParts
---- @param base_hl string
---- @return string
-local function build_structured_status_text(parts, base_hl)
-    local segments = {
-        string.format(
-            "%%#%s# %s ",
-            Theme.HL_GROUPS.WIN_BAR_TITLE,
-            escape_status_text(parts.title)
-        ),
-    }
+--- @param text string
+--- @param max_width integer
+--- @return string[]
+local function wrap_context_text(text, max_width)
+    max_width = math.max(8, max_width)
 
-    if parts.context and parts.context ~= "" then
-        segments[#segments + 1] = string.format(
-            "%%#%s# %s ",
-            Theme.HL_GROUPS.WIN_BAR_CONTEXT,
-            escape_status_text(parts.context)
-        )
+    --- @param segment string
+    --- @return string[]
+    local function wrap_segment(segment)
+        local lines = {}
+        local current = ""
+
+        local function push_current()
+            if current ~= "" then
+                lines[#lines + 1] = current
+                current = ""
+            end
+        end
+
+        local function split_long_word(word)
+            local pieces = {}
+            local remaining = word
+
+            while remaining ~= "" do
+                local piece = remaining
+                while
+                    piece ~= ""
+                    and vim.fn.strdisplaywidth(piece) > max_width
+                do
+                    piece = vim.fn.strcharpart(
+                        piece,
+                        0,
+                        math.max(1, vim.fn.strchars(piece) - 1)
+                    )
+                end
+
+                pieces[#pieces + 1] = piece
+                remaining = vim.fn.strcharpart(
+                    remaining,
+                    vim.fn.strchars(piece)
+                )
+            end
+
+            return pieces
+        end
+
+        for word in segment:gmatch("%S+") do
+            local words = { word }
+            if vim.fn.strdisplaywidth(word) > max_width then
+                words = split_long_word(word)
+            end
+
+            for _, wrapped_word in ipairs(words) do
+                local candidate = current == "" and wrapped_word
+                    or (current .. " " .. wrapped_word)
+                if vim.fn.strdisplaywidth(candidate) <= max_width then
+                    current = candidate
+                else
+                    push_current()
+                    current = wrapped_word
+                end
+            end
+        end
+
+        push_current()
+        return lines
     end
 
-    local text = string.format("%%#%s#", base_hl) .. table.concat(segments)
+    local lines = {}
+    local current = nil
+    local segments = vim.split(text, " | ", { plain = true })
 
-    if parts.suffix and parts.suffix ~= "" then
-        text = text
-            .. "%="
-            .. string.format(
-                "%%#%s# %s ",
-                Theme.HL_GROUPS.WIN_BAR_HINT,
-                escape_status_text(parts.suffix)
-            )
+    for _, segment in ipairs(segments) do
+        local wrapped_segment = wrap_segment(segment)
+        for line_index, segment_line in ipairs(wrapped_segment) do
+            if not current then
+                current = segment_line
+            elseif line_index == 1 then
+                local candidate = current .. " | " .. segment_line
+                if vim.fn.strdisplaywidth(candidate) <= max_width then
+                    current = candidate
+                else
+                    lines[#lines + 1] = current
+                    current = segment_line
+                end
+            else
+                lines[#lines + 1] = current
+                current = segment_line
+            end
+        end
     end
 
-    return text
+    if current and current ~= "" then
+        lines[#lines + 1] = current
+    end
+
+    return lines
 end
 
---- @param text string
---- @param base_hl string
---- @return string
-local function build_fallback_status_text(text, base_hl)
-    return string.format("%%#%s# %s ", base_hl, escape_status_text(text))
+--- @param bufnr integer
+--- @param winid integer
+--- @param context string|nil
+local function set_chat_context(bufnr, winid, context)
+    if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+        return
+    end
+
+    local existing_count = vim.b[bufnr][CHAT_CONTEXT_LINE_COUNT_KEY] or 0
+    local new_lines = {}
+    local wrapped = {}
+
+    if context and context ~= "" then
+        local max_width = math.max(12, vim.api.nvim_win_get_width(winid) - 4)
+        wrapped = wrap_context_text(context, max_width)
+
+        for _, line in ipairs(wrapped) do
+            new_lines[#new_lines + 1] = line
+        end
+
+        if #wrapped > 0 then
+            new_lines[#new_lines + 1] = ""
+        end
+    end
+
+    local existing_lines = existing_count > 0
+            and vim.api.nvim_buf_get_lines(bufnr, 0, existing_count, false)
+        or {}
+    if vim.deep_equal(existing_lines, new_lines) then
+        vim.api.nvim_buf_clear_namespace(bufnr, NS_CHAT_CONTEXT, 0, -1)
+        for line_idx = 0, #wrapped - 1 do
+            vim.api.nvim_buf_add_highlight(
+                bufnr,
+                NS_CHAT_CONTEXT,
+                Theme.HL_GROUPS.WIN_BAR_CONTEXT,
+                line_idx,
+                0,
+                -1
+            )
+        end
+        return
+    end
+
+    BufHelpers.with_modifiable(bufnr, function()
+        local is_empty = existing_count == 0 and BufHelpers.is_buffer_empty(bufnr)
+        vim.api.nvim_buf_set_lines(
+            bufnr,
+            0,
+            is_empty and -1 or existing_count,
+            false,
+            new_lines
+        )
+    end)
+
+    vim.b[bufnr][CHAT_CONTEXT_LINE_COUNT_KEY] = #new_lines
+    vim.api.nvim_buf_clear_namespace(bufnr, NS_CHAT_CONTEXT, 0, -1)
+    for line_idx = 0, #wrapped - 1 do
+        vim.api.nvim_buf_add_highlight(
+            bufnr,
+            NS_CHAT_CONTEXT,
+            Theme.HL_GROUPS.WIN_BAR_CONTEXT,
+            line_idx,
+            0,
+            -1
+        )
+    end
 end
 
 --- Gets or initializes headers for a tabpage
@@ -229,66 +338,24 @@ local function resolve_header(dynamic_header, window_name)
 end
 
 --- @param winid integer
---- @param header_parts agentic.ui.ChatWidget.HeaderParts|nil
---- @param header_text string
+--- @param _header_parts agentic.ui.ChatWidget.HeaderParts|nil
+--- @param _header_text string
 local function set_winbar(winid, header_parts, header_text)
     if not winid or not vim.api.nvim_win_is_valid(winid) then
         return
     end
 
-    if header_text == "" then
-        vim.api.nvim_set_option_value("winbar", " ", { win = winid })
-        return
-    end
-
-    local opts = default_config
-    local winbar_text
-    if header_parts then
-        winbar_text = build_structured_status_text(header_parts, opts.hl)
-    else
-        winbar_text = build_fallback_status_text(header_text, opts.hl)
-    end
-
-    vim.api.nvim_set_option_value("winbar", winbar_text, { win = winid })
-end
-
---- @param winid integer
---- @param header_parts agentic.ui.ChatWidget.HeaderParts|nil
---- @param header_text string
-local function set_statusline(winid, header_parts, header_text)
-    if not winid or not vim.api.nvim_win_is_valid(winid) then
-        return
-    end
-
-    if header_text == "" then
-        vim.api.nvim_set_option_value("statusline", " ", { win = winid })
-        return
-    end
-
-    local statusline_text
-    if header_parts then
-        statusline_text = build_structured_status_text(
-            header_parts,
-            Theme.HL_GROUPS.STATUS_LINE
-        )
-    else
-        statusline_text =
-            build_fallback_status_text(header_text, Theme.HL_GROUPS.STATUS_LINE)
-    end
-
-    vim.api.nvim_set_option_value(
-        "statusline",
-        statusline_text,
-        { win = winid }
-    )
+    vim.api.nvim_set_option_value("winbar", "", { win = winid })
 end
 
 --- Sets the buffer name based on header text and tab count
 --- @param bufnr integer Buffer number
+--- @param header_parts agentic.ui.ChatWidget.HeaderParts|nil
 --- @param header_text string|nil Resolved header text
 --- @param tab_page_id integer Tab page ID for suffix
-local function set_buffer_name(bufnr, header_text, tab_page_id)
-    if not header_text or header_text == "" then
+local function set_buffer_name(bufnr, header_parts, header_text, tab_page_id)
+    local base_name = header_parts and header_parts.title or header_text
+    if not base_name or base_name == "" then
         return
     end
 
@@ -298,9 +365,9 @@ local function set_buffer_name(bufnr, header_text, tab_page_id)
     --- @type string|nil
     local buf_name
     if total_tabs > 1 then
-        buf_name = string.format("%s (Tab %d)", header_text, tab_page_id)
+        buf_name = string.format("%s (Tab %d)", base_name, tab_page_id)
     else
-        buf_name = header_text
+        buf_name = base_name
     end
 
     vim.api.nvim_buf_set_name(bufnr, buf_name)
@@ -314,8 +381,6 @@ function WindowDecoration.apply_window_style(winid)
 
     local winhl = parse_option_map(vim.wo[winid].winhighlight)
     winhl.WinSeparator = Theme.HL_GROUPS.WIN_SEPARATOR
-    winhl.StatusLine = Theme.HL_GROUPS.STATUS_LINE
-    winhl.StatusLineNC = Theme.HL_GROUPS.STATUS_LINE
 
     vim.api.nvim_set_option_value(
         "winhighlight",
@@ -366,12 +431,20 @@ function WindowDecoration.render_header(bufnr, window_name, context)
             Logger.notify(err)
         end
 
+        local rendered_parts = header_parts and vim.deepcopy(header_parts) or nil
+        if window_name == "chat" and rendered_parts then
+            set_chat_context(bufnr, winid, rendered_parts.context)
+            rendered_parts.context = nil
+            header_text = concat_header_parts(rendered_parts)
+        else
+            set_chat_context(bufnr, winid, nil)
+        end
+
         local text = (header_text and header_text ~= "") and header_text or ""
 
         WindowDecoration.apply_window_style(winid)
-        set_winbar(winid, header_parts, text)
-        set_statusline(winid, header_parts, text)
-        set_buffer_name(bufnr, header_text, tab_page_id)
+        set_winbar(winid, rendered_parts or header_parts, text)
+        set_buffer_name(bufnr, rendered_parts or header_parts, header_text, tab_page_id)
     end)
 end
 

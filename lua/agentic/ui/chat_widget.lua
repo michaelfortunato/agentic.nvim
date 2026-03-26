@@ -6,7 +6,7 @@ local Logger = require("agentic.utils.logger")
 local WindowDecoration = require("agentic.ui.window_decoration")
 local WidgetLayout = require("agentic.ui.widget_layout")
 
---- @alias agentic.ui.ChatWidget.PanelNames "chat"|"todos"|"code"|"files"|"input"|"diagnostics"
+--- @alias agentic.ui.ChatWidget.PanelNames "chat"|"todos"|"code"|"files"|"queue"|"input"|"diagnostics"
 
 --- Runtime header parts with dynamic context
 --- @class agentic.ui.ChatWidget.HeaderParts
@@ -39,6 +39,7 @@ local WidgetLayout = require("agentic.ui.widget_layout")
 --- @field win_nrs agentic.ui.ChatWidget.WinNrs
 --- @field on_submit_input fun(prompt: string) external callback to be called when user submits the input
 --- @field _chat_viewport agentic.ui.ChatViewport
+--- @field _message_writer? agentic.ui.MessageWriter
 local ChatWidget = {}
 ChatWidget.__index = ChatWidget
 
@@ -146,6 +147,32 @@ function ChatWidget:rotate_layout(layouts)
     end)
 end
 
+--- Rebuild the widget windows while preserving the current widget focus when possible.
+--- Useful when a dynamic panel needs to appear in the middle of the layout stack.
+--- @param opts agentic.ui.ChatWidget.ShowOpts|nil
+function ChatWidget:refresh_layout(opts)
+    opts = opts or {}
+
+    local previous_mode = vim.fn.mode()
+    local previous_buf = vim.api.nvim_get_current_buf()
+
+    self:hide()
+    self:show(vim.tbl_extend("force", {
+        focus_prompt = false,
+    }, opts))
+
+    vim.schedule(function()
+        local winid = vim.fn.bufwinid(previous_buf)
+        if winid ~= -1 then
+            vim.api.nvim_set_current_win(winid)
+        end
+
+        if previous_mode == "i" then
+            vim.cmd("startinsert")
+        end
+    end)
+end
+
 --- Closes all windows but keeps buffers in memory
 function ChatWidget:hide()
     vim.cmd("stopinsert")
@@ -242,23 +269,30 @@ end
 
 --- @param message_writer agentic.ui.MessageWriter
 function ChatWidget:bind_message_writer(message_writer)
+    self._message_writer = message_writer
     self._chat_viewport:bind_message_writer(message_writer)
 end
 
 function ChatWidget:_unbind_message_writer()
+    self._message_writer = nil
     self._chat_viewport:unbind_message_writer()
 end
 
 function ChatWidget:_submit_input()
-    vim.cmd("stopinsert")
-
     local lines = vim.api.nvim_buf_get_lines(self.buf_nrs.input, 0, -1, false)
 
     local prompt = table.concat(lines, "\n"):match("^%s*(.-)%s*$")
+    local mode = vim.fn.mode()
+    local should_restore_insert = mode:sub(1, 1) == "i"
+        and not Config.settings.move_cursor_to_chat_on_submit
 
     -- Check if prompt is empty or contains only whitespace
     if not prompt or prompt == "" or not prompt:match("%S") then
         return
+    end
+
+    if Config.settings.move_cursor_to_chat_on_submit then
+        vim.cmd("stopinsert")
     end
 
     vim.api.nvim_buf_set_lines(self.buf_nrs.input, 0, -1, false, {})
@@ -277,6 +311,19 @@ function ChatWidget:_submit_input()
 
     if Config.settings.move_cursor_to_chat_on_submit then
         self:move_cursor_to(self.win_nrs.chat)
+    elseif should_restore_insert then
+        vim.schedule(function()
+            local winid = self.win_nrs.input
+            if not winid or not vim.api.nvim_win_is_valid(winid) then
+                return
+            end
+
+            if vim.api.nvim_get_current_win() ~= winid then
+                return
+            end
+
+            BufHelpers.start_insert_on_last_char()
+        end)
     end
 end
 
@@ -415,6 +462,27 @@ function ChatWidget:_bind_keymaps()
         )
     end
 
+    BufHelpers.keymap_set(self.buf_nrs.chat, "n", "<CR>", function()
+        local winid = self.win_nrs.chat
+        if not winid or not vim.api.nvim_win_is_valid(winid) then
+            return
+        end
+
+        if not self._message_writer then
+            return
+        end
+
+        local cursor = vim.api.nvim_win_get_cursor(winid)
+        local toggled =
+            self._message_writer:toggle_diff_block_at_line(cursor[1] - 1)
+
+        if not toggled then
+            vim.cmd("normal! \\<CR>")
+        end
+    end, {
+        desc = "Agentic: Toggle chat card details",
+    })
+
     -- Add keybindings to chat, todos, code, and files buffers to jump back to input and start insert mode
     for panel_name, bufnr in pairs(self.buf_nrs) do
         if panel_name ~= "input" then
@@ -458,6 +526,10 @@ function ChatWidget:_create_buf_nrs()
         filetype = "AgenticFiles",
     })
 
+    local queue = self:_create_new_buf({
+        filetype = "AgenticQueue",
+    })
+
     local diagnostics = self:_create_new_buf({
         filetype = "AgenticDiagnostics",
     })
@@ -477,6 +549,7 @@ function ChatWidget:_create_buf_nrs()
         todos = todos,
         code = code,
         files = files,
+        queue = queue,
         diagnostics = diagnostics,
         input = input,
     }
@@ -511,6 +584,10 @@ local function find_keymap(keymaps, mode)
         return keymaps
     end
 
+    if type(keymaps) ~= "table" then
+        return nil
+    end
+
     for _, keymap in ipairs(keymaps) do
         if type(keymap) == "string" and mode == "n" then
             return keymap
@@ -531,55 +608,63 @@ local function find_keymap(keymaps, mode)
     end
 end
 
+--- @param mode string
+--- @return string|nil
+local function build_input_suffix(mode)
+    local parts = {}
+    local config_key = find_keymap(Config.keymaps.widget.change_mode, mode)
+    local queue_key = find_keymap(Config.keymaps.widget.manage_queue, mode)
+    local submit_key = find_keymap(Config.keymaps.prompt.submit, mode)
+
+    if config_key ~= nil then
+        parts[#parts + 1] = string.format("%s: config", config_key)
+    end
+
+    if queue_key ~= nil then
+        parts[#parts + 1] = string.format("%s: queue", queue_key)
+    end
+
+    if submit_key ~= nil then
+        parts[#parts + 1] = string.format("%s: submit", submit_key)
+    end
+
+    if #parts == 0 then
+        return nil
+    end
+
+    return table.concat(parts, " · ")
+end
+
+function ChatWidget:_refresh_header_keymap_hints()
+    if not vim.api.nvim_tabpage_is_valid(self.tab_page_id) then
+        return
+    end
+
+    local headers = WindowDecoration.get_headers_state(self.tab_page_id)
+
+    headers.chat.suffix = nil
+    headers.input.suffix = build_input_suffix(vim.fn.mode())
+
+    WindowDecoration.set_headers_state(self.tab_page_id, headers)
+end
+
 --- Binds events to change the suffix header texts based on current mode keymaps
 --- For the Chat and Input buffers only
 function ChatWidget:_bind_events_to_change_headers()
-    local tab_page_id = self.tab_page_id
-
-    local function build_input_suffix(mode)
-        local parts = {}
-        local steer_key = find_keymap(Config.keymaps.widget.change_mode, mode)
-        local submit_key = find_keymap(Config.keymaps.prompt.submit, mode)
-
-        if steer_key ~= nil then
-            parts[#parts + 1] = string.format("%s: config", steer_key)
-        end
-
-        if submit_key ~= nil then
-            parts[#parts + 1] = string.format("%s: submit", submit_key)
-        end
-
-        if #parts == 0 then
-            return nil
-        end
-
-        return table.concat(parts, " · ")
+    local function refresh_header_hints()
+        self:_refresh_header_keymap_hints()
+        self:render_header("chat")
+        self:render_header("input")
     end
+
+    refresh_header_hints()
 
     for _, bufnr in ipairs({ self.buf_nrs.chat, self.buf_nrs.input }) do
         vim.api.nvim_create_autocmd("ModeChanged", {
             buffer = bufnr,
             callback = function()
                 vim.schedule(function()
-                    -- Check if tabpage is still valid before accessing vim.t
-                    -- I couldn't test it, it seems to only happen from command -> normal, not from insert -> normal
-                    if not vim.api.nvim_tabpage_is_valid(tab_page_id) then
-                        return
-                    end
-
-                    -- Get headers from tabpage-local storage (must reassign after modification)
-                    local headers =
-                        WindowDecoration.get_headers_state(tab_page_id)
-
-                    local mode = vim.fn.mode()
-                    headers.chat.suffix = nil
-                    headers.input.suffix = build_input_suffix(mode)
-
-                    -- Reassign to persist changes
-                    WindowDecoration.set_headers_state(tab_page_id, headers)
-
-                    self:render_header("chat")
-                    self:render_header("input")
+                    refresh_header_hints()
                 end)
             end,
         })
@@ -608,6 +693,18 @@ end
 --- @param panel_name agentic.ui.ChatWidget.PanelNames
 function ChatWidget:close_optional_window(panel_name)
     WidgetLayout.close_optional_window(self.win_nrs, panel_name)
+end
+
+--- @param panel_name agentic.ui.ChatWidget.PanelNames
+--- @param max_height integer
+--- @return boolean resized
+function ChatWidget:resize_optional_window(panel_name, max_height)
+    return WidgetLayout.resize_dynamic_window(
+        self.buf_nrs,
+        self.win_nrs,
+        panel_name,
+        max_height
+    )
 end
 
 --- Filetypes that should be excluded when finding fallback windows

@@ -1,5 +1,46 @@
 local ACPPayloads = require("agentic.acp.acp_payloads")
 local ChatHistory = require("agentic.ui.chat_history")
+
+--- @param label string
+--- @param value string
+--- @return string
+local function build_meta_line(label, value)
+    return string.format("%s · %s", label, value)
+end
+
+--- @param input_text string
+--- @return string|nil
+local function parse_review_prompt(input_text)
+    local review_body = input_text:match("^/review%s*(.*)$")
+    if review_body == nil then
+        return nil
+    end
+
+    return review_body:match("^%s*(.-)%s*$")
+end
+
+--- @param input_text string
+--- @param timestamp string
+--- @return string[]
+local function build_user_message_lines(input_text, timestamp)
+    local review_body = parse_review_prompt(input_text)
+    if review_body ~= nil then
+        local lines = {
+            build_meta_line("Review", timestamp),
+        }
+
+        if review_body ~= "" then
+            lines[#lines + 1] = review_body
+        end
+
+        return lines
+    end
+
+    return {
+        build_meta_line("User", timestamp),
+        input_text,
+    }
+end
 local Chooser = require("agentic.ui.chooser")
 local Logger = require("agentic.utils.logger")
 local SessionRegistry = require("agentic.session_registry")
@@ -116,22 +157,19 @@ end
 function SessionRestore.replay_messages(writer, messages)
     for _, msg in ipairs(messages) do
         if msg.type == "user" then
+            writer:begin_turn()
             -- Format user message for display with original timestamp
             local timestamp_str = msg.timestamp
                     and os.date("%Y-%m-%d %H:%M:%S", msg.timestamp)
                 or os.date("%Y-%m-%d %H:%M:%S")
-            local message_lines = {
-                string.format("##  User - %s", timestamp_str),
-                "",
-                msg.text,
-                "\n\n### 󱚠 Agent - "
-                    .. (msg.provider_name or "Unknown provider"),
-            }
+            local message_lines = build_user_message_lines(msg.text, timestamp_str)
             local user_message =
                 ACPPayloads.generate_user_message(message_lines)
             writer:write_message(user_message)
         elseif msg.type == "agent" then
             local agent_message = ACPPayloads.generate_agent_message(msg.text)
+            agent_message.is_agent_reply = true
+            agent_message.provider_name = msg.provider_name or "Unknown provider"
             writer:write_message(agent_message)
         elseif msg.type == "thought" then
             --- @type agentic.acp.AgentThoughtChunk
@@ -149,6 +187,7 @@ function SessionRestore.replay_messages(writer, messages)
                 status = msg.status,
                 body = msg.body,
                 diff = msg.diff,
+                file_path = msg.file_path,
             }
             writer:write_tool_call_block(tool_block)
         end

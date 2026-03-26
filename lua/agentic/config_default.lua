@@ -60,6 +60,10 @@
 --- @class agentic.UserConfig.Windows.Chat
 --- @field win_opts? agentic.UserConfig.WinOpts
 
+--- @class agentic.UserConfig.Windows.Queue
+--- @field max_height number
+--- @field win_opts? agentic.UserConfig.WinOpts
+
 --- @class agentic.UserConfig.Windows.Input
 --- @field height number
 --- @field win_opts? agentic.UserConfig.WinOpts
@@ -91,6 +95,7 @@
 --- @field stack_min_width integer
 --- @field stack_max_width integer
 --- @field chat agentic.UserConfig.Windows.Chat
+--- @field queue agentic.UserConfig.Windows.Queue
 --- @field input agentic.UserConfig.Windows.Input
 --- @field code agentic.UserConfig.Windows.Code
 --- @field files agentic.UserConfig.Windows.Files
@@ -102,6 +107,7 @@
 --- @field thinking string[]
 --- @field searching string[]
 --- @field busy string[]
+--- @field waiting string[]
 
 --- Icons used to identify tool call states
 --- @class agentic.UserConfig.StatusIcons
@@ -293,7 +299,20 @@ local ConfigDefault = {
         stack_width_ratio = 0.28,
         stack_min_width = 32,
         stack_max_width = 68,
-        chat = { win_opts = {} },
+        chat = {
+            win_opts = {
+                breakindent = true,
+                breakindentopt = "shift:2",
+            },
+        },
+        queue = {
+            max_height = 12,
+            win_opts = {
+                cursorline = true,
+                wrap = false,
+                linebreak = false,
+            },
+        },
         input = { height = 10, win_opts = {} },
         code = { max_height = 15, win_opts = {} },
         files = { max_height = 10, win_opts = {} },
@@ -305,15 +324,11 @@ local ConfigDefault = {
         --- Keys bindings for ALL buffers in the widget
         widget = {
             close = "q",
-            change_mode = {
-                {
-                    "<S-Tab>",
-                    mode = { "i", "n", "v" },
-                },
-            },
+            change_mode = {},
             switch_provider = "<localLeader>s",
             switch_model = "<localLeader>m",
             switch_thought_level = "<localLeader>e",
+            switch_approval_preset = "<localLeader>p",
             manage_queue = "<localLeader>q",
         },
 
@@ -329,18 +344,7 @@ local ConfigDefault = {
 
             paste_image = {
                 {
-                    "<localLeader>p",
-                    mode = { "n" },
-                },
-                {
                     "<C-v>", -- Same as Claude-code in insert mode
-                    mode = { "i" },
-                },
-            },
-
-            accept_completion = {
-                {
-                    "<Tab>",
                     mode = { "i" },
                 },
             },
@@ -355,10 +359,11 @@ local ConfigDefault = {
 
     -- stylua: ignore start
     spinner_chars = {
-        generating = { "·", "✢", "✳", "∗", "✻", "✽" },
-        thinking = { "🤔", "🤨" },
-        searching = { "🔎. . .", ". 🔎. .", ". . 🔎." },
-        busy = { "⡀", "⠄", "⠂", "⠁", "⠈", "⠐", "⠠", "⢀", "⣀", "⢄", "⢂", "⢁", "⢈", "⢐", "⢠", "⣠", "⢤", "⢢", "⢡", "⢨", "⢰", "⣰", "⢴", "⢲", "⢱", "⢸", "⣸", "⢼", "⢺", "⢹", "⣹", "⢽", "⢻", "⣻", "⢿", "⣿", },
+        generating = { "·", "∙", "•", "∙" },
+        thinking = { "·", "∙", "•", "∙" },
+        searching = { "·", "∙", "•", "∙" },
+        busy = { "·", "∙", "•", "∙" },
+        waiting = { "·", "∙", "•", "∙" },
     },
     -- stylua: ignore end
 

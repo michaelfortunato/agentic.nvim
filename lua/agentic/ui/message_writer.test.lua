@@ -120,6 +120,15 @@ describe("agentic.ui.MessageWriter", function()
         }
     end
 
+    --- @param text string
+    --- @return agentic.acp.SessionUpdateMessage
+    local function make_thought_update(text)
+        return {
+            sessionUpdate = "agent_thought_chunk",
+            content = { type = "text", text = text },
+        }
+    end
+
     --- @param id string
     --- @param status agentic.acp.ToolCallStatus
     --- @param body? string[]
@@ -317,7 +326,11 @@ describe("agentic.ui.MessageWriter", function()
 
                 assert.is_true(writer._scroll_scheduled)
                 assert.equal(1, #fake_timer.start_calls)
-                assert.is_true(vim.api.nvim_buf_line_count(bufnr) > 20)
+                assert.is_true(vim.api.nvim_buf_line_count(bufnr) > 0)
+                assert.is_true(vim.tbl_contains(
+                    vim.api.nvim_buf_get_lines(bufnr, 0, -1, false),
+                    "▸ Run ls -la"
+                ))
             end
         )
 
@@ -336,6 +349,133 @@ describe("agentic.ui.MessageWriter", function()
                 assert.equal(0, #fake_timer.start_calls)
             end
         )
+    end)
+
+    describe("thought chunk rendering", function()
+        it("renders thought chunks as their own separated block", function()
+            writer:write_message_chunk(make_message_update("Working on it."))
+            writer:write_message_chunk(make_thought_update("Checking the file"))
+            writer:write_message_chunk(make_message_update("Done."))
+
+            local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+
+            assert.same({
+                "Working on it.",
+                "",
+                "Checking the file",
+                "",
+                "Done.",
+            }, lines)
+        end)
+
+        it(
+            "continues consecutive thought chunks inside the same block",
+            function()
+                writer:write_message_chunk(make_thought_update("First thought"))
+                writer:write_message_chunk(make_thought_update("\nSecond line"))
+
+                local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+
+                assert.same({
+                    "First thought",
+                    "Second line",
+                }, lines)
+            end
+        )
+    end)
+
+    describe("agent reply formatting", function()
+        it("inserts the agent header on the first reply chunk without an extra blank line", function()
+            writer:begin_turn()
+            writer:write_message({
+                sessionUpdate = "user_message_chunk",
+                content = {
+                    type = "text",
+                    text = "User · 2026-03-25 23:41:39\nhi",
+                },
+            })
+
+            writer:write_message_chunk({
+                sessionUpdate = "agent_message_chunk",
+                content = { type = "text", text = "hi" },
+                is_agent_reply = true,
+                provider_name = "Codex ACP",
+            })
+
+            local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+
+            assert.same({
+                "User · 2026-03-25 23:41:39",
+                "hi",
+                "",
+                "Agent · Codex ACP",
+                "hi",
+            }, lines)
+        end)
+
+        it("applies transcript meta highlights to both user and agent headers", function()
+            writer:begin_turn()
+            writer:write_message({
+                sessionUpdate = "user_message_chunk",
+                content = {
+                    type = "text",
+                    text = "User · 2026-03-25 23:41:39\nhi",
+                },
+            })
+
+            writer:write_message_chunk({
+                sessionUpdate = "agent_message_chunk",
+                content = { type = "text", text = "hi" },
+                is_agent_reply = true,
+                provider_name = "Codex ACP",
+            })
+
+            local ns = vim.api.nvim_get_namespaces().agentic_transcript_meta
+            local extmarks = vim.api.nvim_buf_get_extmarks(
+                bufnr,
+                ns,
+                0,
+                -1,
+                { details = true }
+            )
+
+            assert.is_true(vim.iter(extmarks):any(function(mark)
+                return mark[2] == 0
+                    and mark[4]
+                    and mark[4].hl_group == "Comment"
+                    and mark[4].end_col == #"User · "
+            end))
+
+            assert.is_true(vim.iter(extmarks):any(function(mark)
+                return mark[2] == 3
+                    and mark[4]
+                    and mark[4].hl_group == "Comment"
+                    and mark[4].end_col == #"Agent · "
+            end))
+        end)
+
+        it("reuses the same agent reply block for subsequent chunks", function()
+            writer:begin_turn()
+            writer:write_message_chunk({
+                sessionUpdate = "agent_message_chunk",
+                content = { type = "text", text = "Hel" },
+                is_agent_reply = true,
+                provider_name = "Codex ACP",
+            })
+            writer:write_message_chunk({
+                sessionUpdate = "agent_message_chunk",
+                content = { type = "text", text = "lo" },
+                is_agent_reply = true,
+                provider_name = "Codex ACP",
+            })
+
+            local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+
+            assert.same({
+                "Agent · Codex ACP",
+                "Hello",
+            }, lines)
+        end)
     end)
 
     describe("destroy", function()
@@ -388,9 +528,7 @@ describe("agentic.ui.MessageWriter", function()
 
         it("does not fire listeners when content is empty", function()
             local callback_spy = spy.new(function() end)
-            writer:add_content_changed_listener(
-                callback_spy --[[@as function]]
-            )
+            writer:add_content_changed_listener(callback_spy --[[@as function]])
 
             writer:write_message(make_message_update(""))
             writer:write_message_chunk(make_message_update(""))
@@ -446,6 +584,7 @@ describe("agentic.ui.MessageWriter", function()
                 tool_call_id = "test-hl",
                 status = "pending",
                 kind = "edit",
+                collapsed = false,
                 argument = "/test.lua",
                 file_path = "/test.lua",
                 diff = {
@@ -458,20 +597,127 @@ describe("agentic.ui.MessageWriter", function()
 
             local found_inserted = false
             for _, line in ipairs(lines) do
-                if line == "+ inserted" then
+                if line == "    + inserted" then
                     found_inserted = true
                     break
                 end
             end
             assert.is_true(found_inserted)
-            assert.is_true(vim.tbl_contains(lines, "@@ insert near line 2 @@"))
+            assert.is_true(
+                vim.tbl_contains(lines, "  @@ insert near line 2 @@")
+            )
 
             local new_ranges = vim.tbl_filter(function(r)
                 return r.type == "new"
             end, highlight_ranges)
             assert.is_true(#new_ranges > 0)
             assert.equal("inserted", new_ranges[1].new_line)
-            assert.equal(2, new_ranges[1].display_prefix_len)
+            assert.equal(6, new_ranges[1].display_prefix_len)
+        end)
+
+        it("renders read cards as compact context summaries", function()
+            --- @type agentic.ui.MessageWriter.ToolCallBlock
+            local block = {
+                tool_call_id = "read-summary",
+                status = "completed",
+                kind = "read",
+                argument = "Read lua/agentic/ui/chat_history.lua",
+                file_path = "lua/agentic/ui/chat_history.lua",
+                body = {
+                    "local Config = require(\"agentic.config\")",
+                    "local Logger = require(\"agentic.utils.logger\")",
+                    "local FileSystem = require(\"agentic.utils.file_system\")",
+                },
+            }
+
+            local lines = writer:_prepare_block_lines(block)
+
+            assert.is_true(
+                vim.tbl_contains(
+                    lines,
+                    "Read lua/agentic/ui/chat_history.lua"
+                )
+            )
+            assert.is_true(
+                vim.tbl_contains(lines, "  3 lines loaded into context")
+            )
+            assert.is_false(vim.tbl_contains(lines, block.body[1]))
+        end)
+
+        it("renders execute cards as summary-first previews", function()
+            --- @type agentic.ui.MessageWriter.ToolCallBlock
+            local block = {
+                tool_call_id = "execute-summary",
+                status = "completed",
+                kind = "execute",
+                collapsed = true,
+                argument = "rg -n queue lua/agentic",
+                body = {
+                    "lua/agentic/ui/queue_list.lua:45:Queued messages",
+                    "lua/agentic/session_manager.lua:643:Queue: 3",
+                    "lua/agentic/ui/window_decoration.lua:35:Queue",
+                },
+            }
+
+            local lines = writer:_prepare_block_lines(block)
+
+            assert.is_true(
+                vim.tbl_contains(lines, "▸ Run rg -n queue lua/agentic")
+            )
+            assert.is_true(vim.tbl_contains(lines, "  3 output lines"))
+            assert.is_true(
+                vim.tbl_contains(
+                    lines,
+                    "  lua/agentic/ui/queue_list.lua:45:Queued messages"
+                )
+            )
+            assert.is_true(
+                vim.tbl_contains(lines, "  1 more line · <CR> expand")
+            )
+            assert.is_false(
+                vim.tbl_contains(
+                    lines,
+                    "lua/agentic/ui/window_decoration.lua:35:Queue"
+                )
+            )
+        end)
+
+        it("normalizes wrapped execute titles into action-first headers", function()
+            --- @type agentic.ui.MessageWriter.ToolCallBlock
+            local block = {
+                tool_call_id = "execute-normalized",
+                status = "completed",
+                kind = "execute",
+                collapsed = true,
+                argument = "execute(ls -la)",
+                body = { "file-a", "file-b" },
+            }
+
+            local lines = writer:_prepare_block_lines(block)
+
+            assert.is_true(vim.tbl_contains(lines, "▸ Run ls -la"))
+        end)
+
+        it("renders failed tool status inline instead of as overlay chrome", function()
+            --- @type agentic.ui.MessageWriter.ToolCallBlock
+            local block = {
+                tool_call_id = "execute-failed",
+                status = "failed",
+                kind = "execute",
+                collapsed = true,
+                argument = "rg -n queue lua/agentic",
+                body = {
+                    "ripgrep: README.md: IO error",
+                },
+            }
+
+            local lines = writer:_prepare_block_lines(block)
+
+            assert.is_true(
+                vim.tbl_contains(lines, "▸ Run rg -n queue lua/agentic")
+            )
+            assert.is_true(vim.tbl_contains(lines, "  1 error line"))
+            assert.is_true(vim.tbl_contains(lines, "  failed"))
         end)
 
         it("renders modifications as explicit old/new line pairs", function()
@@ -483,6 +729,7 @@ describe("agentic.ui.MessageWriter", function()
                 tool_call_id = "test-mod",
                 status = "pending",
                 kind = "edit",
+                collapsed = false,
                 argument = "/test.lua",
                 file_path = "/test.lua",
                 diff = {
@@ -493,10 +740,10 @@ describe("agentic.ui.MessageWriter", function()
 
             local lines, highlight_ranges = writer:_prepare_block_lines(block)
 
-            local old_line_index = vim.fn.index(lines, "- old value")
-            local new_line_index = vim.fn.index(lines, "+ new value")
+            local old_line_index = vim.fn.index(lines, "    - old value")
+            local new_line_index = vim.fn.index(lines, "    + new value")
 
-            assert.is_true(vim.tbl_contains(lines, "@@ line 1 @@"))
+            assert.is_true(vim.tbl_contains(lines, "  @@ line 1 @@"))
             assert.is_true(old_line_index >= 0)
             assert.is_true(new_line_index > old_line_index)
 
@@ -511,8 +758,8 @@ describe("agentic.ui.MessageWriter", function()
             assert.equal("new value", old_ranges[1].new_line)
             assert.equal("old value", new_ranges[1].old_line)
             assert.equal("new value", new_ranges[1].new_line)
-            assert.equal(2, old_ranges[1].display_prefix_len)
-            assert.equal(2, new_ranges[1].display_prefix_len)
+            assert.equal(6, old_ranges[1].display_prefix_len)
+            assert.equal(6, new_ranges[1].display_prefix_len)
         end)
 
         it(
@@ -541,12 +788,16 @@ describe("agentic.ui.MessageWriter", function()
                 }
 
                 local lines = writer:_prepare_block_lines(block)
+                local title_index =
+                    vim.fn.index(lines, "▸ Edited /test.lua +6 -6")
                 local summary_index =
-                    vim.fn.index(lines, "1 hunk · 6 modified lines")
-                local hint_index =
-                    vim.fn.index(lines, "Review in buffer: ]c next, [c prev")
+                    vim.fn.index(lines, "  1 hunk · 6 modified lines")
+                local hint_index = vim.fn.index(
+                    lines,
+                    "  Review in buffer: ]c next, [c prev · <CR> expand"
+                )
 
-                assert.is_true(vim.tbl_contains(lines, "/test.lua"))
+                assert.is_true(title_index >= 0)
                 assert.is_true(summary_index >= 0)
                 assert.is_true(hint_index > summary_index)
                 assert.is_false(vim.tbl_contains(lines, "@@ lines 1-6 @@"))
@@ -561,7 +812,50 @@ describe("agentic.ui.MessageWriter", function()
             end
         )
 
-        it("summarizes larger diffs before showing a compact sample", function()
+        it(
+            "keeps large chat diffs collapsed until the user expands them",
+            function()
+                Config.diff_preview.enabled = false
+                read_stub:returns({
+                    "a1",
+                    "a2",
+                    "a3",
+                    "a4",
+                    "a5",
+                    "a6",
+                })
+
+                --- @type agentic.ui.MessageWriter.ToolCallBlock
+                local block = {
+                    tool_call_id = "test-collapsed",
+                    status = "pending",
+                    kind = "edit",
+                    argument = "/test.lua",
+                    file_path = "/test.lua",
+                    diff = {
+                        old = { "a1", "a2", "a3", "a4", "a5", "a6" },
+                        new = { "b1", "b2", "b3", "b4", "b5", "b6" },
+                    },
+                }
+
+                local lines = writer:_prepare_block_lines(block)
+
+                assert.is_true(
+                    vim.tbl_contains(lines, "▸ Edited /test.lua +6 -6")
+                )
+                assert.is_true(
+                    vim.tbl_contains(lines, "  1 hunk · 6 modified lines")
+                )
+                assert.is_true(
+                    vim.tbl_contains(lines, "  Details hidden · <CR> expand")
+                )
+                assert.is_false(vim.tbl_contains(lines, "@@ lines 1-6 @@"))
+                assert.is_false(vim.tbl_contains(lines, "- a1"))
+                assert.is_false(vim.tbl_contains(lines, "+ b1"))
+            end
+        )
+
+        it("shows a compact sample once a diff card is expanded", function()
             Config.diff_preview.enabled = false
             read_stub:returns({
                 "a1",
@@ -577,6 +871,7 @@ describe("agentic.ui.MessageWriter", function()
                 tool_call_id = "test-summary",
                 status = "pending",
                 kind = "edit",
+                collapsed = false,
                 argument = "/test.lua",
                 file_path = "/test.lua",
                 diff = {
@@ -586,20 +881,22 @@ describe("agentic.ui.MessageWriter", function()
             }
 
             local lines = writer:_prepare_block_lines(block)
+            local title_index =
+                vim.fn.index(lines, "▾ Edited /test.lua +6 -6")
             local summary_index =
-                vim.fn.index(lines, "1 hunk · 6 modified lines")
-            local hunk_index = vim.fn.index(lines, "@@ lines 1-6 @@")
+                vim.fn.index(lines, "  1 hunk · 6 modified lines")
+            local hunk_index = vim.fn.index(lines, "  @@ lines 1-6 @@")
 
-            assert.is_true(vim.tbl_contains(lines, "/test.lua"))
+            assert.is_true(title_index >= 0)
             assert.is_true(summary_index >= 0)
             assert.is_true(hunk_index > summary_index)
             assert.is_true(
-                vim.tbl_contains(lines, "... 2 more changes in buffer review")
+                vim.tbl_contains(lines, "  ... 2 more changes in buffer review")
             )
-            assert.is_true(vim.tbl_contains(lines, "- a4"))
-            assert.is_true(vim.tbl_contains(lines, "+ b4"))
-            assert.is_false(vim.tbl_contains(lines, "- a5"))
-            assert.is_false(vim.tbl_contains(lines, "+ b5"))
+            assert.is_true(vim.tbl_contains(lines, "    - a4"))
+            assert.is_true(vim.tbl_contains(lines, "    + b4"))
+            assert.is_false(vim.tbl_contains(lines, "    - a5"))
+            assert.is_false(vim.tbl_contains(lines, "    + b5"))
         end)
 
         it("limits transcript samples when a diff spans many hunks", function()
@@ -618,6 +915,7 @@ describe("agentic.ui.MessageWriter", function()
                 tool_call_id = "test-many-hunks",
                 status = "pending",
                 kind = "edit",
+                collapsed = false,
                 argument = "/test.lua",
                 file_path = "/test.lua",
                 diff = {
@@ -629,13 +927,217 @@ describe("agentic.ui.MessageWriter", function()
             local lines = writer:_prepare_block_lines(block)
 
             assert.is_true(
-                vim.tbl_contains(lines, "3 hunks · 3 modified lines")
+                vim.tbl_contains(lines, "  3 hunks · 3 modified lines")
             )
-            assert.is_true(vim.tbl_contains(lines, "@@ line 1 @@"))
-            assert.is_true(vim.tbl_contains(lines, "@@ line 3 @@"))
-            assert.is_false(vim.tbl_contains(lines, "@@ line 5 @@"))
+            assert.is_true(vim.tbl_contains(lines, "  @@ line 1 @@"))
+            assert.is_true(vim.tbl_contains(lines, "  @@ line 3 @@"))
+            assert.is_false(vim.tbl_contains(lines, "  @@ line 5 @@"))
             assert.is_true(
-                vim.tbl_contains(lines, "... 1 more change in buffer review")
+                vim.tbl_contains(lines, "  ... 1 more change in buffer review")
+            )
+        end)
+
+        it("toggles diff details from collapsed to expanded", function()
+            Config.diff_preview.enabled = false
+            read_stub:returns({ "old value" })
+
+            local block = {
+                tool_call_id = "toggle-diff",
+                status = "pending",
+                kind = "edit",
+                argument = "/test.lua",
+                file_path = "/test.lua",
+                diff = {
+                    old = { "old value" },
+                    new = { "new value" },
+                },
+            }
+
+            writer:write_tool_call_block(block)
+
+            local collapsed_lines =
+                vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+            assert.is_true(
+                vim.tbl_contains(collapsed_lines, "▸ Edited /test.lua +1 -1")
+            )
+            assert.is_false(
+                vim.tbl_contains(collapsed_lines, "    - old value")
+            )
+
+            local tracker = writer.tool_call_blocks["toggle-diff"]
+            local tool_ns = vim.api.nvim_get_namespaces().agentic_tool_blocks
+            local pos = vim.api.nvim_buf_get_extmark_by_id(
+                bufnr,
+                tool_ns,
+                tracker.extmark_id,
+                { details = true }
+            )
+
+            assert.is_true(writer:toggle_diff_block_at_line(pos[1]))
+
+            local expanded_lines =
+                vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+            assert.is_true(
+                vim.tbl_contains(expanded_lines, "▾ Edited /test.lua +1 -1")
+            )
+            assert.is_true(
+                vim.tbl_contains(expanded_lines, "    - old value")
+            )
+            assert.is_true(
+                vim.tbl_contains(expanded_lines, "    + new value")
+            )
+        end)
+
+        it("toggles execute previews from collapsed to expanded", function()
+            local block = {
+                tool_call_id = "toggle-execute",
+                status = "completed",
+                kind = "execute",
+                argument = "rg -n queue lua/agentic",
+                body = {
+                    "lua/agentic/ui/queue_list.lua:45:Queued messages",
+                    "lua/agentic/session_manager.lua:643:Queue: 3",
+                    "lua/agentic/ui/window_decoration.lua:35:Queue",
+                },
+            }
+
+            writer:write_tool_call_block(block)
+
+            local collapsed_lines =
+                vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+            assert.is_true(
+                vim.tbl_contains(
+                    collapsed_lines,
+                    "▸ Run rg -n queue lua/agentic"
+                )
+            )
+            assert.is_false(
+                vim.tbl_contains(
+                    collapsed_lines,
+                    "lua/agentic/ui/window_decoration.lua:35:Queue"
+                )
+            )
+
+            local tracker = writer.tool_call_blocks["toggle-execute"]
+            local tool_ns = vim.api.nvim_get_namespaces().agentic_tool_blocks
+            local pos = vim.api.nvim_buf_get_extmark_by_id(
+                bufnr,
+                tool_ns,
+                tracker.extmark_id,
+                { details = true }
+            )
+
+            assert.is_true(writer:toggle_diff_block_at_line(pos[1]))
+
+            local expanded_lines =
+                vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+            assert.is_true(
+                vim.tbl_contains(
+                    expanded_lines,
+                    "▾ Run rg -n queue lua/agentic"
+                )
+            )
+            assert.is_true(
+                vim.tbl_contains(
+                    expanded_lines,
+                    "  lua/agentic/ui/window_decoration.lua:35:Queue"
+                )
+            )
+            assert.is_true(
+                vim.tbl_contains(expanded_lines, "  <CR> collapse")
+            )
+        end)
+
+        it("groups multiple diff edits for the same file within one turn", function()
+            Config.diff_preview.enabled = false
+            read_stub:returns({ "keep1", "keep2", "keep3", "keep4" })
+
+            writer:begin_turn()
+            writer:write_tool_call_block({
+                tool_call_id = "edit-1",
+                status = "completed",
+                kind = "edit",
+                collapsed = false,
+                argument = "/test.lua",
+                file_path = "/test.lua",
+                diff = {
+                    old = { "keep1", "old one", "keep2", "keep3", "keep4" },
+                    new = { "keep1", "new one", "keep2", "keep3", "keep4" },
+                },
+            })
+            writer:write_tool_call_block({
+                tool_call_id = "edit-2",
+                status = "completed",
+                kind = "edit",
+                collapsed = false,
+                argument = "/test.lua",
+                file_path = "/test.lua",
+                diff = {
+                    old = { "keep1", "new one", "keep2", "keep3", "old two", "keep4" },
+                    new = { "keep1", "new one", "keep2", "keep3", "new two", "keep4" },
+                },
+            })
+
+            local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+
+            assert.equal(
+                writer.tool_call_blocks["edit-1"],
+                writer.tool_call_blocks["edit-2"]
+            )
+            assert.equal(
+                1,
+                vim.tbl_count(vim.tbl_filter(function(line)
+                    return line == "▾ Edited /test.lua +2 -2"
+                end, lines))
+            )
+            assert.is_true(
+                vim.tbl_contains(lines, "  2 edits · 2 hunks · 2 modified lines")
+            )
+            assert.is_true(vim.tbl_contains(lines, "  @@ line 2 @@"))
+            assert.is_true(vim.tbl_contains(lines, "  @@ line 5 @@"))
+        end)
+
+        it("starts a new file card for the same file in a later turn", function()
+            Config.diff_preview.enabled = false
+            read_stub:returns({ "old value" })
+
+            writer:begin_turn()
+            writer:write_tool_call_block({
+                tool_call_id = "turn-one",
+                status = "completed",
+                kind = "edit",
+                argument = "/test.lua",
+                file_path = "/test.lua",
+                diff = {
+                    old = { "old value" },
+                    new = { "new value" },
+                },
+            })
+
+            writer:begin_turn()
+            writer:write_tool_call_block({
+                tool_call_id = "turn-two",
+                status = "completed",
+                kind = "edit",
+                argument = "/test.lua",
+                file_path = "/test.lua",
+                diff = {
+                    old = { "new value" },
+                    new = { "newest value" },
+                },
+            })
+
+            local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+
+            assert.is_true(
+                writer.tool_call_blocks["turn-one"]
+                    ~= writer.tool_call_blocks["turn-two"]
+            )
+            assert.equal(
+                2,
+                vim.tbl_count(vim.tbl_filter(function(line)
+                    return line == "▸ Edited /test.lua +1 -1"
+                end, lines))
             )
         end)
     end)

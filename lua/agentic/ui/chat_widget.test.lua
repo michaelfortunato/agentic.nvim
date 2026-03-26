@@ -11,6 +11,12 @@ describe("agentic.ui.ChatWidget", function()
 
     ChatWidget = require("agentic.ui.chat_widget")
 
+    after_each(function()
+        pcall(vim.cmd, "silent! stopinsert")
+        pcall(vim.cmd, "silent! tabonly")
+        pcall(vim.cmd, "silent! only")
+    end)
+
     --- Helper to populate a dynamic buffer with content
     --- @param widget agentic.ui.ChatWidget
     --- @param name string
@@ -68,8 +74,23 @@ describe("agentic.ui.ChatWidget", function()
                 assert.is_true(vim.api.nvim_buf_is_valid(widget.buf_nrs.input))
                 assert.is_true(vim.api.nvim_buf_is_valid(widget.buf_nrs.code))
                 assert.is_true(vim.api.nvim_buf_is_valid(widget.buf_nrs.files))
+                assert.is_true(vim.api.nvim_buf_is_valid(widget.buf_nrs.queue))
                 assert.is_true(vim.api.nvim_buf_is_valid(widget.buf_nrs.todos))
             end)
+
+            it(
+                "initializes prompt header hints from the current keymaps",
+                function()
+                    local headers =
+                        WindowDecoration.get_headers_state(tab_page_id)
+
+                    assert.is_nil(headers.chat.suffix)
+                    assert.equal(
+                        "<localLeader>q: queue · <CR>: submit",
+                        headers.input.suffix
+                    )
+                end
+            )
 
             it(
                 "does not attach treesitter highlighters to side buffers",
@@ -78,6 +99,7 @@ describe("agentic.ui.ChatWidget", function()
                         "todos",
                         "code",
                         "files",
+                        "queue",
                         "diagnostics",
                         "input",
                     }) do
@@ -103,7 +125,63 @@ describe("agentic.ui.ChatWidget", function()
                     )
                     assert.is_nil(widget.win_nrs.code)
                     assert.is_nil(widget.win_nrs.files)
+                    assert.is_nil(widget.win_nrs.queue)
                     assert.is_nil(widget.win_nrs.todos)
+                end
+            )
+
+            it("uses a hanging indent for wrapped chat lines", function()
+                widget:show({ focus_prompt = false })
+
+                assert.is_true(vim.wo[widget.win_nrs.chat].breakindent)
+                assert.equal(
+                    "shift:2",
+                    vim.wo[widget.win_nrs.chat].breakindentopt
+                )
+            end)
+
+            it(
+                "<CR> toggles a chat card from a preview line, not just its header",
+                function()
+                    local MessageWriter = require("agentic.ui.message_writer")
+                    local writer = MessageWriter:new(widget.buf_nrs.chat)
+
+                    widget:bind_message_writer(writer)
+                    widget:show({ focus_prompt = false })
+
+                    writer:write_tool_call_block({
+                        tool_call_id = "toggle-execute",
+                        status = "completed",
+                        kind = "execute",
+                        argument = "rg -n queue lua/agentic",
+                        body = {
+                            "lua/agentic/ui/queue_list.lua:45:Queued messages",
+                            "lua/agentic/session_manager.lua:643:Queue: 3",
+                            "lua/agentic/ui/window_decoration.lua:35:Queue",
+                        },
+                    })
+
+                    vim.cmd("stopinsert")
+                    vim.api.nvim_set_current_win(widget.win_nrs.chat)
+                    vim.api.nvim_win_set_cursor(widget.win_nrs.chat, { 3, 0 })
+                    local mapping =
+                        vim.fn.maparg("<CR>", "n", false, true)
+                    mapping.callback()
+
+                    local lines =
+                        vim.api.nvim_buf_get_lines(widget.buf_nrs.chat, 0, -1, false)
+
+                    assert.is_true(
+                        vim.tbl_contains(
+                            lines,
+                            "  lua/agentic/ui/window_decoration.lua:35:Queue"
+                        )
+                    )
+                    assert.is_true(
+                        vim.tbl_contains(lines, "  <CR> collapse")
+                    )
+
+                    writer:destroy()
                 end
             )
 
@@ -381,6 +459,41 @@ describe("agentic.ui.ChatWidget", function()
                         vim.api.nvim_win_get_cursor(widget.win_nrs.chat)[1]
                     )
                     assert.is_false(widget:should_follow_chat_output())
+                end
+            )
+
+            it(
+                "submit keeps the prompt in insert mode when chat focus is disabled",
+                function()
+                    local on_submit_spy = spy.new(function() end)
+
+                    widget.on_submit_input = on_submit_spy --[[@as function]]
+                    widget:show({ focus_prompt = false })
+                    vim.api.nvim_set_current_win(widget.win_nrs.input)
+                    vim.api.nvim_buf_set_lines(
+                        widget.buf_nrs.input,
+                        0,
+                        -1,
+                        false,
+                        { "test prompt" }
+                    )
+
+                    vim.cmd("startinsert")
+                    widget:_submit_input()
+
+                    local ok = vim.wait(200, function()
+                        return vim.fn.mode() == "i"
+                    end)
+
+                    assert.spy(on_submit_spy).was.called(1)
+                    assert.equal(
+                        widget.win_nrs.input,
+                        vim.api.nvim_get_current_win()
+                    )
+                    assert.is_true(ok)
+                    assert.equal("i", vim.fn.mode())
+
+                    vim.cmd("stopinsert")
                 end
             )
 
@@ -663,6 +776,24 @@ describe("agentic.ui.ChatWidget", function()
                     vim.api.nvim_win_get_height(widget.win_nrs.input)
                 assert.equal(Config.windows.input.height, input_height)
             end)
+
+            it("queue opens between chat and input when populated", function()
+                fill_buffer(widget, "queue", { "1. queued prompt" })
+
+                widget:show()
+
+                local chat_pos =
+                    vim.api.nvim_win_get_position(widget.win_nrs.chat)
+                local queue_pos =
+                    vim.api.nvim_win_get_position(widget.win_nrs.queue)
+                local input_pos =
+                    vim.api.nvim_win_get_position(widget.win_nrs.input)
+
+                assert.is_true(queue_pos[1] > chat_pos[1])
+                assert.is_true(input_pos[1] > queue_pos[1])
+                assert.equal(chat_pos[2], queue_pos[2])
+                assert.equal(queue_pos[2], input_pos[2])
+            end)
         end)
     end
 
@@ -718,6 +849,22 @@ describe("agentic.ui.ChatWidget", function()
             local expected = WidgetLayout.calculate_stack_width(total_width)
 
             assert.equal(expected, input_width)
+        end)
+
+        it("queue occupies the top of the right stack when populated", function()
+            fill_buffer(widget, "queue", { "1. queued prompt" })
+
+            widget:show()
+
+            local chat_pos = vim.api.nvim_win_get_position(widget.win_nrs.chat)
+            local queue_pos =
+                vim.api.nvim_win_get_position(widget.win_nrs.queue)
+            local input_pos =
+                vim.api.nvim_win_get_position(widget.win_nrs.input)
+
+            assert.is_true(queue_pos[2] > chat_pos[2])
+            assert.equal(queue_pos[2], input_pos[2])
+            assert.is_true(input_pos[1] > queue_pos[1])
         end)
     end)
 

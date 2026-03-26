@@ -8,6 +8,7 @@ local Logger = require("agentic.utils.logger")
 --- @field mode? agentic.acp.ConfigOption
 --- @field model? agentic.acp.ConfigOption
 --- @field thought_level? agentic.acp.ConfigOption
+--- @field approval_preset? agentic.acp.ConfigOption
 --- @field legacy_agent_modes agentic.acp.AgentModes
 --- @field legacy_agent_models agentic.acp.AgentModels
 --- @field _options agentic.acp.ConfigOption[]
@@ -41,10 +42,60 @@ local function has_select_options(option)
     return option ~= nil and option.options ~= nil and #option.options > 0
 end
 
+--- @param option agentic.acp.ConfigOption|nil
+--- @return string
+local function get_option_display_name(option)
+    return option and option.name or "unknown"
+end
+
+--- @param text string|nil
+--- @return string
+local function normalize_option_label(text)
+    return vim.trim((text or ""):lower())
+end
+
+--- @param option agentic.acp.ConfigOption|nil
+--- @return boolean
+local function is_approval_preset_option(option)
+    if not option then
+        return false
+    end
+
+    local category = normalize_option_label(option.category)
+    if category == "approval_preset" or category == "approval preset" then
+        return true
+    end
+
+    local name = normalize_option_label(option.name)
+    local description = normalize_option_label(option.description)
+    local id = normalize_option_label(option.id)
+
+    local function matches_approval_label(text)
+        if text == "" then
+            return false
+        end
+
+        if text == "approval preset" then
+            return true
+        end
+
+        return text:find("approval", 1, true) ~= nil
+            and (
+                text:find("preset", 1, true) ~= nil
+                or text:find("mode", 1, true) ~= nil
+                or text:find("access", 1, true) ~= nil
+            )
+    end
+
+    return matches_approval_label(name)
+        or matches_approval_label(description)
+        or matches_approval_label(id)
+end
+
 --- @param option agentic.acp.ConfigOption
 --- @return string
 local function get_selector_prompt(option)
-    return string.format("Select %s (applies live):", option.name)
+    return string.format("Select %s (applies live):", get_option_display_name(option))
 end
 
 --- @param option agentic.acp.ConfigOption
@@ -83,6 +134,7 @@ function AgentConfigOptions:new(
         mode = nil,
         model = nil,
         thought_level = nil,
+        approval_preset = nil,
         legacy_agent_modes = AgentModes:new(),
         legacy_agent_models = AgentModels:new(),
         _options = {},
@@ -90,8 +142,7 @@ function AgentConfigOptions:new(
         _set_mode_callback = set_mode_callback,
         _set_model_callback = set_model_callback,
         _set_config_option_callback = set_config_option_callback
-            or function()
-            end,
+            or function() end,
     }, self)
 
     for _, bufnr in pairs(buffers) do
@@ -121,6 +172,15 @@ function AgentConfigOptions:new(
             end,
             { desc = "Agentic: Select Reasoning Effort" }
         )
+
+        BufHelpers.multi_keymap_set(
+            Config.keymaps.widget.switch_approval_preset,
+            bufnr,
+            function()
+                self:show_approval_preset_selector()
+            end,
+            { desc = "Agentic: Select Approval Preset" }
+        )
     end
 
     return self
@@ -130,6 +190,7 @@ function AgentConfigOptions:clear()
     self.mode = nil
     self.model = nil
     self.thought_level = nil
+    self.approval_preset = nil
     self._options = {}
     self._options_by_id = {}
     self.legacy_agent_modes:clear()
@@ -154,6 +215,8 @@ function AgentConfigOptions:set_options(configOptions)
             self.model = option
         elseif option.category == "thought_level" then
             self.thought_level = option
+        elseif is_approval_preset_option(option) then
+            self.approval_preset = option
         end
     end
 end
@@ -224,6 +287,13 @@ function AgentConfigOptions:get_config_value_name(config_id, value)
     return config_value and config_value.name or nil
 end
 
+--- @param config_id string
+--- @return string|nil
+function AgentConfigOptions:get_config_option_name(config_id)
+    local option = self:get_config_option(config_id)
+    return option and get_option_display_name(option) or nil
+end
+
 --- @return string|nil
 function AgentConfigOptions:get_header_context()
     local parts = {}
@@ -233,7 +303,7 @@ function AgentConfigOptions:get_header_context()
             if has_select_options(option) then
                 append_summary_part(
                     parts,
-                    option.name,
+                    get_option_display_name(option),
                     get_current_value_name(option)
                 )
             end
@@ -397,6 +467,42 @@ function AgentConfigOptions:show_thought_level_selector()
 end
 
 --- @return boolean shown
+function AgentConfigOptions:show_approval_preset_selector()
+    if not has_select_options(self.approval_preset) then
+        for _, option in ipairs(self._options) do
+            if has_select_options(option) and is_approval_preset_option(option) then
+                self.approval_preset = option
+                break
+            end
+        end
+    end
+
+    local shown = self:_show_selector(
+        self.approval_preset,
+        get_selector_prompt(self.approval_preset or {
+            name = "Approval Preset",
+        }),
+        function(value)
+            if not self.approval_preset then
+                return
+            end
+
+            self._set_config_option_callback(self.approval_preset.id, value)
+        end
+    )
+
+    if not shown then
+        Logger.notify(
+            "This provider does not support approval preset switching",
+            vim.log.levels.WARN,
+            { title = "Agentic" }
+        )
+    end
+
+    return shown
+end
+
+--- @return boolean shown
 function AgentConfigOptions:show_config_selector()
     local items = self:_build_steering_items()
     if #items == 0 then
@@ -428,7 +534,7 @@ function AgentConfigOptions:show_config_selector()
             end
 
             return Chooser.format_named_item(
-                item.option.name,
+                get_option_display_name(item.option),
                 get_current_value_name(item.option),
                 false
             )
@@ -522,10 +628,7 @@ function AgentConfigOptions:_show_selector(target, prompt, handle_change)
             )
         end,
     }, function(selected_option)
-        if
-            selected_option
-            and selected_option.value ~= target.currentValue
-        then
+        if selected_option and selected_option.value ~= target.currentValue then
             handle_change(selected_option.value)
         end
     end)

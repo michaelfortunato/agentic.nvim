@@ -146,7 +146,6 @@ describe("ChatHistory", function()
             assert.equal("user", history.messages[1].type)
             assert.equal("agent", history.messages[2].type)
         end)
-
     end)
 
     describe("save and load", function()

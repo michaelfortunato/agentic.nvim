@@ -237,6 +237,65 @@ describe("WidgetLayout", function()
         end)
     end)
 
+    describe("resize_dynamic_window", function()
+        it("grows dynamic window height as buffer lines increase", function()
+            Config.windows.position = "right"
+
+            local chat_buf = vim.api.nvim_create_buf(false, true)
+            local queue_buf = vim.api.nvim_create_buf(false, true)
+
+            vim.api.nvim_buf_set_lines(queue_buf, 0, -1, false, { "one" })
+
+            local chat_winid = vim.api.nvim_open_win(chat_buf, false, {
+                split = "right",
+                win = -1,
+                width = 40,
+            })
+            local queue_winid = vim.api.nvim_open_win(queue_buf, false, {
+                split = "below",
+                win = chat_winid,
+                height = 2,
+            })
+
+            local buf_nrs = { queue = queue_buf }
+            local win_nrs = { queue = queue_winid }
+
+            assert.is_true(
+                WidgetLayout.resize_dynamic_window(
+                    buf_nrs,
+                    win_nrs,
+                    "queue",
+                    8
+                )
+            )
+            local one_line_height = vim.api.nvim_win_get_height(queue_winid)
+
+            vim.api.nvim_buf_set_lines(
+                queue_buf,
+                0,
+                -1,
+                false,
+                { "one", "two", "three" }
+            )
+
+            assert.is_true(
+                WidgetLayout.resize_dynamic_window(
+                    buf_nrs,
+                    win_nrs,
+                    "queue",
+                    8
+                )
+            )
+
+            assert.is_true(vim.api.nvim_win_get_height(queue_winid) > one_line_height)
+
+            pcall(vim.api.nvim_win_close, queue_winid, true)
+            pcall(vim.api.nvim_win_close, chat_winid, true)
+            pcall(vim.api.nvim_buf_delete, queue_buf, { force = true })
+            pcall(vim.api.nvim_buf_delete, chat_buf, { force = true })
+        end)
+    end)
+
     describe("open", function()
         it("should not error with invalid tabpage", function()
             assert.has_no_errors(function()
@@ -274,6 +333,7 @@ describe("WidgetLayout", function()
                 input = vim.api.nvim_create_buf(false, true),
                 code = vim.api.nvim_create_buf(false, true),
                 files = vim.api.nvim_create_buf(false, true),
+                queue = vim.api.nvim_create_buf(false, true),
                 diagnostics = vim.api.nvim_create_buf(false, true),
                 todos = vim.api.nvim_create_buf(false, true),
             }

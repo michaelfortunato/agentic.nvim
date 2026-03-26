@@ -191,6 +191,39 @@ local function open_or_resize_dynamic_window(
     WindowDecoration.render_header(bufnr, window_name)
 end
 
+--- @param buf_nrs agentic.ui.ChatWidget.BufNrs
+--- @param win_nrs agentic.ui.ChatWidget.WinNrs
+--- @param window_name agentic.ui.ChatWidget.PanelNames
+--- @param max_height integer
+--- @return boolean resized
+function WidgetLayout.resize_dynamic_window(
+    buf_nrs,
+    win_nrs,
+    window_name,
+    max_height
+)
+    local bufnr = buf_nrs[window_name]
+    local winid = win_nrs[window_name]
+
+    if
+        not bufnr
+        or not vim.api.nvim_buf_is_valid(bufnr)
+        or not winid
+        or not vim.api.nvim_win_is_valid(winid)
+        or BufHelpers.is_buffer_empty(bufnr)
+    then
+        return false
+    end
+
+    local height = calculate_dynamic_height(bufnr, max_height)
+
+    vim.api.nvim_win_set_config(winid, {
+        height = height,
+    })
+    WindowDecoration.render_header(bufnr, window_name)
+    return vim.api.nvim_win_get_height(winid) == height
+end
+
 --- @param params agentic.ui.WidgetLayout.Params
 --- @param position agentic.UserConfig.Windows.Position
 local function show_layout(params, position)
@@ -222,15 +255,31 @@ local function show_layout(params, position)
         winfixwidth = not is_bottom,
     })
 
-    -- Input window: right splits below chat with height, bottom splits right
-    -- of chat with computed stack width
+    local chat_width = vim.api.nvim_win_get_width(win_nrs.chat)
+    local stack_width = WidgetLayout.calculate_stack_width(chat_width)
+
+    open_or_resize_dynamic_window(buf_nrs, win_nrs, "queue", {
+        win = win_nrs.chat,
+        split = is_bottom and "right" or "below",
+        width = is_bottom and stack_width or nil,
+    }, Config.windows.queue.max_height)
+
+    -- Input window: right/left layouts keep it below chat or queue.
+    -- Bottom layout keeps it in the right stack, below queue when present.
     --- @type vim.api.keyset.win_config
-    local input_opts = { win = win_nrs.chat, fixed = true }
+    local input_opts = { fixed = true }
     if is_bottom then
-        local chat_width = vim.api.nvim_win_get_width(win_nrs.chat)
-        input_opts.split = "right"
-        input_opts.width = WidgetLayout.calculate_stack_width(chat_width)
+        if win_nrs.queue and vim.api.nvim_win_is_valid(win_nrs.queue) then
+            input_opts.win = win_nrs.queue
+            input_opts.split = "below"
+            input_opts.height = Config.windows.input.height
+        else
+            input_opts.win = win_nrs.chat
+            input_opts.split = "right"
+            input_opts.width = stack_width
+        end
     else
+        input_opts.win = win_nrs.queue or win_nrs.chat
         input_opts.split = "below"
         input_opts.height = Config.windows.input.height
     end

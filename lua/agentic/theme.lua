@@ -1,6 +1,6 @@
 local FileSystem = require("agentic.utils.file_system")
 
---- @alias agentic.Theme.SpinnerState "generating" | "thinking" | "searching" | "busy"
+--- @alias agentic.Theme.SpinnerState "generating" | "thinking" | "searching" | "busy" | "waiting"
 
 --- @class agentic.Theme
 local Theme = {}
@@ -21,26 +21,16 @@ Theme.HL_GROUPS = {
     STATUS_LINE = "AgenticStatusLine",
     REVIEW_BANNER = "AgenticReviewBanner",
     REVIEW_BANNER_ACCENT = "AgenticReviewBannerAccent",
+    ACTIVITY_TEXT = "AgenticActivityText",
+    CARD_TITLE = "AgenticCardTitle",
+    CARD_BODY = "AgenticCardBody",
+    CARD_DETAIL = "AgenticCardDetail",
 
     SPINNER_GENERATING = "AgenticSpinnerGenerating",
     SPINNER_THINKING = "AgenticSpinnerThinking",
     SPINNER_SEARCHING = "AgenticSpinnerSearching",
     SPINNER_BUSY = "AgenticSpinnerBusy",
-}
-
-local COLORS = {
-    diff_delete_word_bg = "#9a3c3c",
-    diff_add_word_bg = "#155729",
-    status_pending_bg = "#5f4d8f",
-    status_completed_bg = "#2d5a3d",
-    status_failed_bg = "#7a2d2d",
-
-    title_bg = "#2787b0",
-    title_fg = "#000000",
-
-    spinner_generating_fg = "#61afef",
-    spinner_thinking_fg = "#c678dd",
-    spinner_searching_fg = "#e5c07b",
+    SPINNER_WAITING = "AgenticSpinnerWaiting",
 }
 
 --- A lang map of extension to language identifier for markdown code fences
@@ -70,42 +60,116 @@ local spinner_hl = {
     thinking = Theme.HL_GROUPS.SPINNER_THINKING,
     searching = Theme.HL_GROUPS.SPINNER_SEARCHING,
     busy = Theme.HL_GROUPS.SPINNER_BUSY,
+    waiting = Theme.HL_GROUPS.SPINNER_WAITING,
 }
+
+--- @param group string|nil
+--- @return boolean
+local function highlight_exists(group)
+    if not group or group == "" then
+        return false
+    end
+
+    if vim.fn.hlexists(group) ~= 1 then
+        return false
+    end
+
+    local ok, hl = pcall(vim.api.nvim_get_hl, 0, { name = group, link = false })
+    return ok and vim.tbl_count(hl) > 0
+end
+
+--- @param candidates string[]|string
+--- @param fallback string|nil
+--- @return string|nil
+local function resolve_group(candidates, fallback)
+    if type(candidates) == "string" then
+        candidates = { candidates }
+    end
+
+    for _, group in ipairs(candidates or {}) do
+        if highlight_exists(group) then
+            return group
+        end
+    end
+
+    if fallback and highlight_exists(fallback) then
+        return fallback
+    end
+
+    return fallback
+end
+
+--- @param candidates string[]|string
+--- @param fallback string|nil
+--- @return table
+local function build_link(candidates, fallback)
+    return {
+        link = resolve_group(candidates, fallback),
+    }
+end
+
+--- @param candidates string[]|string
+--- @param overrides table|nil
+--- @param fallback_link string|nil
+--- @return table
+local function build_derived_highlight(candidates, overrides, fallback_link)
+    local base_group = resolve_group(candidates, fallback_link)
+    if not base_group then
+        return overrides or {}
+    end
+
+    local ok, base = pcall(vim.api.nvim_get_hl, 0, {
+        name = base_group,
+        link = false,
+    })
+
+    if not ok or vim.tbl_count(base) == 0 then
+        return build_link(base_group, fallback_link)
+    end
+
+    base.link = nil
+    return vim.tbl_extend("force", base, overrides or {})
+end
 
 function Theme.setup()
     -- stylua: ignore start
     local highlights = {
         -- Diff highlights
-        { Theme.HL_GROUPS.DIFF_DELETE, { link = "DiffDelete" } },
-        { Theme.HL_GROUPS.DIFF_ADD, { link = "DiffAdd" } },
-        { Theme.HL_GROUPS.DIFF_DELETE_WORD, { bg = COLORS.diff_delete_word_bg, bold = true } },
-        { Theme.HL_GROUPS.DIFF_ADD_WORD, { bg = COLORS.diff_add_word_bg, bold = true } },
+        { Theme.HL_GROUPS.DIFF_DELETE, build_link({ "DiffDelete", "Removed" }, "DiffDelete") },
+        { Theme.HL_GROUPS.DIFF_ADD, build_link({ "DiffAdd", "Added" }, "DiffAdd") },
+        { Theme.HL_GROUPS.DIFF_DELETE_WORD, build_derived_highlight({ "DiffDelete", "DiffText", "Removed", "Comment" }, { underline = true }, "Comment") },
+        { Theme.HL_GROUPS.DIFF_ADD_WORD, build_derived_highlight({ "DiffAdd", "DiffText", "Added", "Comment" }, { underline = true }, "Comment") },
 
         -- Status highlights
-        { Theme.HL_GROUPS.STATUS_PENDING, { bg = COLORS.status_pending_bg } },
-        { Theme.HL_GROUPS.STATUS_COMPLETED, { bg = COLORS.status_completed_bg } },
-        { Theme.HL_GROUPS.STATUS_FAILED, { bg = COLORS.status_failed_bg } },
-        { Theme.HL_GROUPS.CODE_BLOCK_FENCE, { link = "Directory" } },
+        { Theme.HL_GROUPS.STATUS_PENDING, build_link({ "DiagnosticWarn", "Changed", "WarningMsg", "Type" }, "Comment") },
+        { Theme.HL_GROUPS.STATUS_COMPLETED, build_link({ "DiagnosticOk", "Added", "DiffAdd", "MoreMsg" }, "Comment") },
+        { Theme.HL_GROUPS.STATUS_FAILED, build_link({ "DiagnosticError", "Removed", "DiffDelete", "ErrorMsg" }, "Comment") },
+        { Theme.HL_GROUPS.CODE_BLOCK_FENCE, build_link({ "Comment", "Directory" }, "Comment") },
 
         -- Title highlight
-        { Theme.HL_GROUPS.WIN_BAR_TITLE, { bg = COLORS.title_bg, fg = COLORS.title_fg, bold = true } },
-        { Theme.HL_GROUPS.WIN_BAR_CONTEXT, { link = "Comment" } },
-        { Theme.HL_GROUPS.WIN_BAR_HINT, { link = "Comment" } },
-        { Theme.HL_GROUPS.WIN_SEPARATOR, { link = "WinSeparator" } },
-        { Theme.HL_GROUPS.STATUS_LINE, { link = "StatusLine" } },
-        { Theme.HL_GROUPS.REVIEW_BANNER, { link = "Comment" } },
-        { Theme.HL_GROUPS.REVIEW_BANNER_ACCENT, { link = "Directory" } },
+        { Theme.HL_GROUPS.WIN_BAR_TITLE, build_link({ "Title", "Directory" }, "Title") },
+        { Theme.HL_GROUPS.WIN_BAR_CONTEXT, build_link("Comment", "Comment") },
+        { Theme.HL_GROUPS.WIN_BAR_HINT, build_link("Comment", "Comment") },
+        { Theme.HL_GROUPS.WIN_SEPARATOR, build_link({ "WinSeparator", "VertSplit" }, "WinSeparator") },
+        { Theme.HL_GROUPS.STATUS_LINE, build_link("StatusLine", "StatusLine") },
+        { Theme.HL_GROUPS.REVIEW_BANNER, build_link({ "Comment", "Folded" }, "Comment") },
+        { Theme.HL_GROUPS.REVIEW_BANNER_ACCENT, build_link({ "Title", "Directory" }, "Title") },
+        { Theme.HL_GROUPS.ACTIVITY_TEXT, build_link({ "Comment", "Folded" }, "Comment") },
+        { Theme.HL_GROUPS.CARD_TITLE, build_derived_highlight({ "Normal", "Title" }, { bold = true }, "Normal") },
+        { Theme.HL_GROUPS.CARD_BODY, build_link({ "Normal", "NormalFloat" }, "Normal") },
+        { Theme.HL_GROUPS.CARD_DETAIL, build_link({ "Comment", "Folded" }, "Comment") },
 
         -- Spinner highlights
-        { Theme.HL_GROUPS.SPINNER_GENERATING, { fg = COLORS.spinner_generating_fg, bold = true } },
-        { Theme.HL_GROUPS.SPINNER_THINKING, { fg = COLORS.spinner_thinking_fg, bold = true } },
-        { Theme.HL_GROUPS.SPINNER_SEARCHING, { fg = COLORS.spinner_searching_fg, bold = true } },
-        { Theme.HL_GROUPS.SPINNER_BUSY, { link = "Comment" } },
+        { Theme.HL_GROUPS.SPINNER_GENERATING, build_link({ "DiagnosticInfo", "Identifier", "Function" }, "Comment") },
+        { Theme.HL_GROUPS.SPINNER_THINKING, build_link({ "DiagnosticHint", "Type", "Special" }, "Comment") },
+        { Theme.HL_GROUPS.SPINNER_SEARCHING, build_link({ "Directory", "Constant", "Statement" }, "Comment") },
+        { Theme.HL_GROUPS.SPINNER_BUSY, build_link("Comment", "Comment") },
+        { Theme.HL_GROUPS.SPINNER_WAITING, build_link({ "DiagnosticWarn", "Changed", "WarningMsg" }, "Comment") },
     }
     -- stylua: ignore end
 
     for _, hl in ipairs(highlights) do
-        Theme._create_hl_if_not_exists(hl[1], hl[2])
+        Theme._set_hl(hl[1], hl[2])
     end
 end
 
@@ -133,16 +197,15 @@ function Theme.get_spinner_hl_group(state)
     return spinner_hl[state] or Theme.HL_GROUPS.SPINNER_GENERATING
 end
 
+--- @return string hl_group
+function Theme.get_activity_text_hl_group()
+    return Theme.HL_GROUPS.ACTIVITY_TEXT
+end
+
 --- @private
 --- @param group string
 --- @param opts table
-function Theme._create_hl_if_not_exists(group, opts)
-    local hl = vim.api.nvim_get_hl(0, { name = group })
-    -- Check if highlight actually exists by checking for specific keys or count
-    -- An empty table {} would have next() == nil, but we want to check if it's truly defined
-    if vim.tbl_count(hl) > 0 then
-        return
-    end
+function Theme._set_hl(group, opts)
     vim.api.nvim_set_hl(0, group, opts)
 end
 

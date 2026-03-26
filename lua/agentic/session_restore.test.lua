@@ -343,4 +343,43 @@ describe("SessionRestore", function()
             assert.spy(vim_ui_select_stub).was.called(1)
         end)
     end)
+
+    describe("replay_messages", function()
+        it("replays user and agent messages as separate transcript blocks", function()
+            local writer = {
+                begin_turn = spy.new(function() end),
+                write_message = spy.new(function() end),
+                write_message_chunk = spy.new(function() end),
+                write_tool_call_block = spy.new(function() end),
+            }
+
+            SessionRestore.replay_messages(writer, {
+                {
+                    type = "user",
+                    text = "hi",
+                    timestamp = 1711410099,
+                    provider_name = "Codex ACP",
+                },
+                {
+                    type = "agent",
+                    text = "hello",
+                    provider_name = "Codex ACP",
+                },
+            })
+
+            assert.spy(writer.begin_turn).was.called(1)
+
+            local user_message = writer.write_message.calls[1][2]
+            local user_lines =
+                vim.split(user_message.content.text, "\n", { plain = true })
+            assert.truthy(vim.startswith(user_lines[1], "User · "))
+            assert.equal("hi", user_lines[2])
+            assert.equal(2, #user_lines)
+
+            local agent_message = writer.write_message.calls[2][2]
+            assert.equal("hello", agent_message.content.text)
+            assert.is_true(agent_message.is_agent_reply)
+            assert.equal("Codex ACP", agent_message.provider_name)
+        end)
+    end)
 end)
