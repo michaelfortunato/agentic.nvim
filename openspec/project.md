@@ -249,7 +249,7 @@ early, and documents expected behavior.
   - `tests/unit/` - Legacy/shared unit tests (prefer co-located tests)
 - **Running tests**:
   - `make test` - Run all tests
-  - `make test-file FILE=lua/agentic/acp/agent_modes.test.lua` - Run specific
+  - `make test-file FILE=lua/agentic/session/interaction_model.test.lua` - Run specific
     file
 
 **CRITICAL: Test Cleanup**

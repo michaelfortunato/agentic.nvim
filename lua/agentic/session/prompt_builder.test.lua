@@ -35,6 +35,8 @@ describe("agentic.session.PromptBuilder", function()
             },
             start_line = 10,
             end_line = 11,
+            start_col = 7,
+            end_col = 12,
             file_path = "/tmp/example.lua",
             file_type = "lua",
         }
@@ -59,6 +61,10 @@ describe("agentic.session.PromptBuilder", function()
             submission.prompt[4].text:match("Line 10: local value = 1")
         )
         assert.truthy(submission.prompt[4].text:match("Line 11: return value"))
+        assert.truthy(
+            submission.prompt[4].text:match("<col_start>7</col_start>")
+        )
+        assert.truthy(submission.prompt[4].text:match("<col_end>12</col_end>"))
     end)
 
     it(

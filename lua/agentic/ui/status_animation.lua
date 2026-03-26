@@ -18,7 +18,7 @@ local NS_ANIMATION = vim.api.nvim_create_namespace("agentic_animation")
 --- @type table<agentic.Theme.SpinnerState, number>
 local TIMING = {
     generating = 320,
-    thinking = 520,
+    thinking = 340,
     searching = 380,
     busy = 200,
     waiting = 650,

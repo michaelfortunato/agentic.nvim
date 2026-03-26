@@ -33,9 +33,9 @@ local KNOWN_ACP_KINDS = {
 --- @field callbacks table<number, fun(result: table|nil, err: agentic.acp.ACPError|nil)>
 --- @field transport? agentic.acp.ACPTransportInstance
 --- @field subscribers table<string, agentic.acp.ClientHandlers>
+--- @field _ready_callbacks fun(client: agentic.acp.ACPClient)[]
 
 --- @class agentic.acp.ACPClient : agentic.acp.ACPClientData
---- @field _on_ready fun(client: agentic.acp.ACPClient)
 local ACPClient = {}
 ACPClient.__index = ACPClient
 
@@ -76,14 +76,38 @@ function ACPClient:new(config, on_ready)
         transport = nil,
         state = "disconnected",
         reconnect_count = 0,
+        _ready_callbacks = {},
     }
 
     local client = setmetatable(instance, self) --[[@as agentic.acp.ACPClient]]
-    client._on_ready = on_ready
+    client:on_ready(on_ready)
 
     client:_setup_transport()
     client:_connect()
     return client
+end
+
+--- @param callback fun(client: agentic.acp.ACPClient)|nil
+function ACPClient:on_ready(callback)
+    if type(callback) ~= "function" then
+        return
+    end
+
+    if self.state == "ready" then
+        callback(self)
+        return
+    end
+
+    self._ready_callbacks[#self._ready_callbacks + 1] = callback
+end
+
+function ACPClient:_notify_ready()
+    local callbacks = self._ready_callbacks
+    self._ready_callbacks = {}
+
+    for _, callback in ipairs(callbacks) do
+        callback(self)
+    end
 end
 
 --- @param session_id string
@@ -585,20 +609,18 @@ function ACPClient:_connect()
         else
             Logger.debug("No authentication method found or specified")
             self:_set_state("ready")
-            self._on_ready(self)
+            self:_notify_ready()
         end
     end)
 end
 
---- TODO: Authentication is NOT implemented properly yet by the ACP providers, revisit this later
----
 --- @param method_id string
 function ACPClient:_authenticate(method_id)
     self:_send_request("authenticate", {
         methodId = method_id,
     }, function()
         self:_set_state("ready")
-        self._on_ready(self)
+        self:_notify_ready()
     end)
 end
 

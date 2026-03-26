@@ -19,6 +19,7 @@ describe("agentic.ui.MessageWriter", function()
 
     --- @type agentic.UserConfig.AutoScroll|nil
     local original_auto_scroll
+    local original_debug
 
     local function make_fake_timer()
         local timer = {
@@ -62,6 +63,7 @@ describe("agentic.ui.MessageWriter", function()
 
     before_each(function()
         original_auto_scroll = Config.auto_scroll
+        original_debug = Config.debug
         MessageWriter = require("agentic.ui.message_writer")
 
         fake_timer = make_fake_timer()
@@ -88,6 +90,7 @@ describe("agentic.ui.MessageWriter", function()
 
     after_each(function()
         Config.auto_scroll = original_auto_scroll --- @diagnostic disable-line: assign-type-mismatch
+        Config.debug = original_debug
         if writer then
             writer:destroy()
         end
@@ -128,6 +131,28 @@ describe("agentic.ui.MessageWriter", function()
         }
     end
 
+    --- @param text string
+    --- @return agentic.session.InteractionTextContentNode
+    local function make_text_content_node(text)
+        local trimmed = vim.trim(text)
+        local lines = vim.split(trimmed, "\n", { plain = true })
+        local open_tag = #lines >= 2
+                and vim.trim(lines[1]):match("^<([%a_][%w_%-]*)>$")
+            or nil
+        local close_tag = #lines >= 2
+                and vim.trim(lines[#lines]):match("^</([%a_][%w_%-]*)>$")
+            or nil
+        local xml_root_tag = open_tag == close_tag and open_tag or nil
+
+        return {
+            type = "text_content",
+            text = text,
+            text_structure = xml_root_tag and "xml_wrapped" or "plain",
+            xml_root_tag = xml_root_tag,
+            content = { type = "text", text = text },
+        }
+    end
+
     --- @param opts? table
     --- @return agentic.session.InteractionTurn
     local function make_turn(opts)
@@ -138,28 +163,6 @@ describe("agentic.ui.MessageWriter", function()
             request_content = request_text ~= ""
                     and { { type = "text", text = request_text } }
                 or {}
-        end
-
-        --- @param text string
-        --- @return agentic.session.InteractionTextContentNode
-        local function make_text_content_node(text)
-            local trimmed = vim.trim(text)
-            local lines = vim.split(trimmed, "\n", { plain = true })
-            local open_tag = #lines >= 2
-                    and vim.trim(lines[1]):match("^<([%a_][%w_%-]*)>$")
-                or nil
-            local close_tag = #lines >= 2
-                    and vim.trim(lines[#lines]):match("^</([%a_][%w_%-]*)>$")
-                or nil
-            local xml_root_tag = open_tag == close_tag and open_tag or nil
-
-            return {
-                type = "text_content",
-                text = text,
-                text_structure = xml_root_tag and "xml_wrapped" or "plain",
-                xml_root_tag = xml_root_tag,
-                content = { type = "text", text = text },
-            }
         end
 
         local request_content_nodes = vim.tbl_map(function(content)
@@ -246,12 +249,7 @@ describe("agentic.ui.MessageWriter", function()
                 type = "request_text",
                 text = request_text,
                 content_index = 1,
-                content_node = {
-                    type = "text_content",
-                    text = request_text,
-                    text_structure = "plain",
-                    content = { type = "text", text = request_text },
-                },
+                content_node = make_text_content_node(request_text),
             }
         end
 
@@ -283,9 +281,7 @@ describe("agentic.ui.MessageWriter", function()
             provider_name = provider_name or "Codex ACP",
             content = { { type = "text", text = text } },
             content_nodes = {
-                make_turn({
-                    request_text = text,
-                }).request.content_nodes[1],
+                make_text_content_node(text),
             },
         }
     end
@@ -302,9 +298,7 @@ describe("agentic.ui.MessageWriter", function()
         end, chunks)
 
         local content_nodes = vim.tbl_map(function(chunk)
-            return make_turn({
-                request_text = chunk,
-            }).request.content_nodes[1]
+            return make_text_content_node(chunk)
         end, chunks)
 
         return {
@@ -326,9 +320,7 @@ describe("agentic.ui.MessageWriter", function()
             provider_name = provider_name or "Codex ACP",
             content = { { type = "text", text = text } },
             content_nodes = {
-                make_turn({
-                    request_text = text,
-                }).request.content_nodes[1],
+                make_text_content_node(text),
             },
         }
     end
@@ -348,9 +340,7 @@ describe("agentic.ui.MessageWriter", function()
             content_nodes = {
                 {
                     type = "content_output",
-                    content_node = make_turn({
-                        request_text = body_text,
-                    }).request.content_nodes[1],
+                    content_node = make_text_content_node(body_text),
                 },
             }
         end
@@ -392,7 +382,14 @@ describe("agentic.ui.MessageWriter", function()
         it(
             "returns true when the visible window end is within threshold of buffer end",
             function()
-                setup_buffer(20, 1)
+                local threshold = Config.auto_scroll
+                        and Config.auto_scroll.threshold
+                    or 0
+                local visible_lines = vim.api.nvim_win_call(winid, function()
+                    return vim.fn.line("w$")
+                end)
+
+                setup_buffer(visible_lines + threshold, 1)
                 assert.is_true(writer:_check_auto_scroll(bufnr))
             end
         )
@@ -400,7 +397,14 @@ describe("agentic.ui.MessageWriter", function()
         it(
             "returns false when the window viewport is far from buffer end",
             function()
-                setup_buffer(100, 1)
+                local threshold = Config.auto_scroll
+                        and Config.auto_scroll.threshold
+                    or 0
+                local visible_lines = vim.api.nvim_win_call(winid, function()
+                    return vim.fn.line("w$")
+                end)
+
+                setup_buffer(visible_lines + threshold + 10, 1)
                 assert.is_false(writer:_check_auto_scroll(bufnr))
             end
         )
@@ -638,6 +642,61 @@ describe("agentic.ui.MessageWriter", function()
                     "  This is strong.",
                     "  The main point is clarity.",
                 }, lines)
+            end
+        )
+
+        it(
+            "marks merged agent chunk joins when debug mode is enabled",
+            function()
+                Config.debug = true
+
+                render_session({
+                    make_turn({
+                        request_text = "hi",
+                        request_timestamp = os.time({
+                            year = 2026,
+                            month = 3,
+                            day = 25,
+                            hour = 23,
+                            min = 41,
+                            sec = 39,
+                        }),
+                        nodes = {
+                            make_chunked_message_node({
+                                "This",
+                                " is",
+                                " strong.",
+                                "\nThe",
+                                " main",
+                                " point is clarity.",
+                            }),
+                        },
+                    }),
+                })
+
+                local ns =
+                    vim.api.nvim_get_namespaces().agentic_chunk_boundaries
+                local extmarks = vim.api.nvim_buf_get_extmarks(
+                    bufnr,
+                    ns,
+                    0,
+                    -1,
+                    { details = true }
+                )
+
+                assert.equal(5, #extmarks)
+                assert.is_true(vim.iter(extmarks):any(function(mark)
+                    return mark[2] == 4
+                        and mark[4]
+                        and mark[4].hl_group
+                            == Theme.HL_GROUPS.CHUNK_BOUNDARY
+                end))
+                assert.is_true(vim.iter(extmarks):any(function(mark)
+                    return mark[2] == 5
+                        and mark[4]
+                        and mark[4].hl_group
+                            == Theme.HL_GROUPS.CHUNK_BOUNDARY
+                end))
             end
         )
 
@@ -1068,25 +1127,15 @@ describe("agentic.ui.MessageWriter", function()
                                 content_nodes = {
                                     {
                                         type = "content_output",
-                                        content_node = {
-                                            type = "text_content",
-                                            text = "match",
-                                            content = {
-                                                type = "text",
-                                                text = "match",
-                                            },
-                                        },
+                                        content_node = make_text_content_node(
+                                            "match"
+                                        ),
                                     },
                                     {
                                         type = "content_output",
-                                        content_node = {
-                                            type = "text_content",
-                                            text = " found\nsecond result",
-                                            content = {
-                                                type = "text",
-                                                text = " found\nsecond result",
-                                            },
-                                        },
+                                        content_node = make_text_content_node(
+                                            " found\nsecond result"
+                                        ),
                                     },
                                 },
                             }),
@@ -1455,7 +1504,7 @@ describe("agentic.ui.MessageWriter", function()
                     vim.fn.index(lines, "    1 hunk · 6 modified lines")
                 local hint_index = vim.fn.index(
                     lines,
-                    "    Review in buffer: ]c next, [c prev · <CR> expand"
+                    "    Review in buffer: ]c next, [c prev, m yes, n no · <CR> expand"
                 )
 
                 assert.is_true(title_index >= 0)
@@ -1739,6 +1788,48 @@ describe("agentic.ui.MessageWriter", function()
                 vim.tbl_contains(expanded_lines, "    <CR> collapse")
             )
         end)
+
+        it(
+            "truncates collapsed execute titles with a right-side ellipsis",
+            function()
+                vim.api.nvim_win_set_width(winid, 44)
+
+                render_session({
+                    make_turn({
+                        nodes = {
+                            make_tool_node({
+                                tool_call_id = "truncate-execute",
+                                kind = "execute",
+                                title = "git diff -- lua/agentic/ui/chat_widget.lua && printf '\\n__ CURRENT_CHAT_WIDGET __\\n' && sed -n '1,260p' lua/agentic/ui/chat_widget.lua",
+                                body_lines = {
+                                    "first line",
+                                    "second line",
+                                },
+                            }),
+                        },
+                    }),
+                })
+
+                local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+                local title_line = nil
+                for _, line in ipairs(lines) do
+                    if vim.startswith(line, "  ▸ Run git diff") then
+                        title_line = line
+                        break
+                    end
+                end
+
+                assert.is_not_nil(title_line)
+                assert.equal("...", title_line:sub(-3))
+                assert.is_true(
+                    vim.fn.strdisplaywidth(title_line)
+                        <= vim.api.nvim_win_get_width(winid) - 1
+                )
+                assert.is_false(
+                    title_line:find("sed %-n '1,260p'", 1, false) ~= nil
+                )
+            end
+        )
 
         it("toggles read previews from collapsed to expanded", function()
             render_session({

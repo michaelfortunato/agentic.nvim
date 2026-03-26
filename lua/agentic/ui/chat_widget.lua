@@ -598,42 +598,12 @@ function ChatWidget:_create_new_buf(opts)
     return bufnr
 end
 
---- @param keymaps  agentic.UserConfig.KeymapValue
---- @param mode string
-local function find_keymap(keymaps, mode)
-    if type(keymaps) == "string" then
-        return keymaps
-    end
-
-    if type(keymaps) ~= "table" then
-        return nil
-    end
-
-    for _, keymap in ipairs(keymaps) do
-        if type(keymap) == "string" and mode == "n" then
-            return keymap
-        elseif type(keymap) == "table" then
-            if keymap.mode == mode then
-                return keymap[1]
-            end
-
-            if type(keymap.mode) == "table" then
-                ---@diagnostic disable-next-line: param-type-mismatch
-                for _, m in ipairs(keymap.mode) do
-                    if m == mode then
-                        return keymap[1]
-                    end
-                end
-            end
-        end
-    end
-end
-
 --- @param mode string
 --- @return string|nil
 local function build_input_suffix(mode)
     local parts = { KEYMAP_HELP_SUFFIX }
-    local submit_key = find_keymap(Config.keymaps.prompt.submit, mode)
+    local submit_key =
+        BufHelpers.find_keymap(Config.keymaps.prompt.submit, mode)
 
     if submit_key ~= nil then
         parts[#parts + 1] = string.format("%s: submit", submit_key)

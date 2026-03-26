@@ -33,24 +33,24 @@ without diagnostics.
 ### Requirement: Agent-Initiated Mode Switch Handling
 
 The system SHALL handle `current_mode_update` notifications in
-`SessionManager:_on_session_update` by updating internal mode state
-and re-rendering the chat header. The system SHALL NOT send
-`session/set_mode` back to the agent in response to this
+`SessionManager:_on_session_update` by updating session state and
+re-rendering pinned session context. The system SHALL NOT send a
+follow-up mode-change request back to the agent in response to this
 notification.
 
 #### Scenario: Agent switches from plan to code mode
 
 - **WHEN** the agent sends `current_mode_update` with
   `currentModeId = "code"` while current mode is `"plan"`
-- **THEN** `AgentModes.current_mode_id` SHALL be `"code"`
-- **AND** the chat header SHALL re-render with the new mode
-- **AND** no `session/set_mode` request SHALL be sent to the agent
+- **THEN** `session.current_mode_id` SHALL be `"code"`
+- **AND** pinned session context SHALL re-render with the new mode
+- **AND** no follow-up mode-change request SHALL be sent to the agent
 
 #### Scenario: Agent switches to a mode with known name
 
 - **WHEN** the agent sends `current_mode_update` with a
-  `currentModeId` that exists in `AgentModes._modes`
-- **THEN** the chat header SHALL display the mode's `name` property
+  `currentModeId` that exists in the provider's current mode config option
+- **THEN** pinned session context SHALL display the matching mode `name`
 
 ### Requirement: User Notification on Agent Mode Change
 
@@ -63,4 +63,3 @@ identifier.
 - **WHEN** the agent sends a `current_mode_update` notification
 - **THEN** `Logger.notify` SHALL be called with a message containing
   the new mode ID at `vim.log.levels.INFO`
-

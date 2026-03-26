@@ -1,4 +1,4 @@
---- @diagnostic disable: invisible
+--- @diagnostic disable: invisible, need-check-nil, undefined-field, assign-type-mismatch
 local assert = require("tests.helpers.assert")
 local spy = require("tests.helpers.spy")
 
@@ -54,6 +54,14 @@ describe("agentic.ui.PermissionManager", function()
     --- @param tool_call_id string
     --- @param kind agentic.acp.ToolKind|nil
     local function add_tool_call(tool_call_id, kind)
+        session_state:dispatch(SessionEvents.append_interaction_request({
+            kind = "user",
+            text = "approve this",
+            timestamp = 1,
+            content = {
+                { type = "text", text = "approve this" },
+            },
+        }))
         session_state:dispatch(
             SessionEvents.upsert_interaction_tool_call("Codex ACP", {
                 tool_call_id = tool_call_id,
@@ -125,14 +133,14 @@ describe("agentic.ui.PermissionManager", function()
     end)
 
     it("uses the diff review handler instead of opening the chooser", function()
-        local callback = spy.new(function() end) --[[@as function]]
+        local callback = spy.new(function() end)
         local review_handler = spy.new(function()
             return true
         end)
 
         add_tool_call("tc-review-1", "edit")
         pm:set_diff_review_handler(review_handler --[[@as function]])
-        pm:add_request(make_request("tc-review-1"), callback)
+        pm:add_request(make_request("tc-review-1"), callback --[[@as function]])
 
         assert.spy(review_handler).was.called(1)
         assert.spy(chooser_show_stub).was.called(0)
@@ -146,10 +154,10 @@ describe("agentic.ui.PermissionManager", function()
     end)
 
     it("completes the request when a choice is selected", function()
-        local callback = spy.new(function() end) --[[@as function]]
+        local callback = spy.new(function() end)
 
         add_tool_call("tc-2", "edit")
-        pm:add_request(make_request("tc-2"), callback)
+        pm:add_request(make_request("tc-2"), callback --[[@as function]])
 
         shown_callback(shown_items[1])
 
@@ -161,10 +169,10 @@ describe("agentic.ui.PermissionManager", function()
     end)
 
     it("dismisses the request when the chooser is cancelled", function()
-        local callback = spy.new(function() end) --[[@as function]]
+        local callback = spy.new(function() end)
 
         add_tool_call("tc-3", "edit")
-        pm:add_request(make_request("tc-3"), callback)
+        pm:add_request(make_request("tc-3"), callback --[[@as function]])
 
         shown_callback(nil)
 
@@ -176,7 +184,7 @@ describe("agentic.ui.PermissionManager", function()
     end)
 
     it("maps escape to the default reject option", function()
-        local callback = spy.new(function() end) --[[@as function]]
+        local callback = spy.new(function() end)
 
         add_tool_call("tc-escape-1", "edit")
         pm:add_request(
@@ -192,7 +200,7 @@ describe("agentic.ui.PermissionManager", function()
                     kind = "reject_once",
                 },
             }),
-            callback
+            callback --[[@as function]]
         )
 
         shown_callback(shown_opts.escape_choice)
@@ -206,12 +214,12 @@ describe("agentic.ui.PermissionManager", function()
     it(
         "ignores duplicate permission requests for the same tool call",
         function()
-            local callback = spy.new(function() end) --[[@as function]]
+            local callback = spy.new(function() end)
             local request = make_request("tc-dup-1")
 
             add_tool_call("tc-dup-1", "edit")
-            pm:add_request(request, callback)
-            pm:add_request(request, callback)
+            pm:add_request(request, callback --[[@as function]])
+            pm:add_request(request, callback --[[@as function]])
 
             assert.is_not_nil(pm.current_request)
             assert.equal("tc-dup-1", pm.current_request.toolCallId)
@@ -221,14 +229,20 @@ describe("agentic.ui.PermissionManager", function()
     )
 
     it("clear() cancels current and queued requests", function()
-        local callback_1 = spy.new(function() end) --[[@as function]]
-        local callback_2 = spy.new(function() end) --[[@as function]]
+        local callback_1 = spy.new(function() end)
+        local callback_2 = spy.new(function() end)
 
         add_tool_call("tc-clear-1", "edit")
         add_tool_call("tc-clear-2", "write")
 
-        pm:add_request(make_request("tc-clear-1"), callback_1)
-        pm:add_request(make_request("tc-clear-2"), callback_2)
+        pm:add_request(
+            make_request("tc-clear-1"),
+            callback_1 --[[@as function]]
+        )
+        pm:add_request(
+            make_request("tc-clear-2"),
+            callback_2 --[[@as function]]
+        )
 
         assert.equal("tc-clear-1", pm.current_request.toolCallId)
         assert.equal(1, #pm.queue)

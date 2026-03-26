@@ -169,4 +169,23 @@ describe("agentic.acp.ACPClient", function()
         assert.is_nil(message.file_path)
         assert.is_nil(message.body)
     end)
+
+    it("queues ready callbacks until the client reaches ready state", function()
+        local callback_spy = spy.new(function() end)
+        local client = setmetatable({
+            state = "initializing",
+            _ready_callbacks = {},
+        }, { __index = ACPClient })
+
+        client:on_ready(function(client_instance)
+            callback_spy(client_instance)
+        end)
+
+        assert.spy(callback_spy).was.called(0)
+
+        client:_notify_ready()
+
+        assert.spy(callback_spy).was.called(1)
+        assert.equal(client, callback_spy.calls[1][1])
+    end)
 end)

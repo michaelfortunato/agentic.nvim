@@ -7,8 +7,9 @@ local PromptBuilder = {}
 local ENVIRONMENT_INFO_URI = "agentic://environment_info"
 
 local SELECTION_WARNING = table.concat({
-    "IMPORTANT: Focus and respect the line numbers provided in the <line_start> and <line_end> tags for each <selected_code> tag.",
+    "IMPORTANT: Focus and respect the line bounds in <line_start>/<line_end> and the optional visual bounds in <col_start>/<col_end> for each <selected_code> tag.",
     "The selection shows ONLY the specified line range, not the entire file!",
+    "When <col_start> and <col_end> are present, only that visual sub-range inside the selected lines is the direct inline target.",
     "The file may contain duplicated content of the selected snippet.",
     "When using edit tools, on the referenced files, MAKE SURE your changes target the correct lines by including sufficient surrounding context to make the match unique.",
     "After you make edits to the referenced files, go back and read the file to verify your changes were applied correctly.",
@@ -107,24 +108,40 @@ local function append_selections(prompt, selections)
                     string.format("Line %d: %s", line_num, line)
             end
 
+            local selection_lines = {
+                "<selected_code>",
+                string.format(
+                    "<path>%s</path>",
+                    FileSystem.to_absolute_path(selection.file_path)
+                ),
+                string.format(
+                    "<line_start>%s</line_start>",
+                    selection.start_line
+                ),
+                string.format("<line_end>%s</line_end>", selection.end_line),
+            }
+
+            if selection.start_col ~= nil then
+                selection_lines[#selection_lines + 1] = string.format(
+                    "<col_start>%s</col_start>",
+                    selection.start_col
+                )
+            end
+
+            if selection.end_col ~= nil then
+                selection_lines[#selection_lines + 1] =
+                    string.format("<col_end>%s</col_end>", selection.end_col)
+            end
+
+            selection_lines[#selection_lines + 1] = "<snippet>"
+            selection_lines[#selection_lines + 1] =
+                table.concat(numbered_lines, "\n")
+            selection_lines[#selection_lines + 1] = "</snippet>"
+            selection_lines[#selection_lines + 1] = "</selected_code>"
+
             table.insert(prompt, {
                 type = "text",
-                text = string.format(
-                    table.concat({
-                        "<selected_code>",
-                        "<path>%s</path>",
-                        "<line_start>%s</line_start>",
-                        "<line_end>%s</line_end>",
-                        "<snippet>",
-                        "%s",
-                        "</snippet>",
-                        "</selected_code>",
-                    }, "\n"),
-                    FileSystem.to_absolute_path(selection.file_path),
-                    selection.start_line,
-                    selection.end_line,
-                    table.concat(numbered_lines, "\n")
-                ),
+                text = table.concat(selection_lines, "\n"),
             })
         end
     end

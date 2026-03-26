@@ -105,7 +105,7 @@ The system SHALL restore persisted ACP turns into runtime session state.
 
 - **WHEN** restoration completes
 - **THEN** `AgenticChat` renders from the interaction tree
-- **AND** no flat message replay path is used
+- **AND** the interaction tree is the only runtime transcript model
 
 ### Requirement: First-Submit Resend
 

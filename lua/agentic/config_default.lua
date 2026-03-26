@@ -52,7 +52,15 @@
 --- @field widget table<string, agentic.UserConfig.KeymapValue>
 --- @field prompt table<string, agentic.UserConfig.KeymapValue>
 --- @field inline table<string, agentic.UserConfig.KeymapValue>
---- @field diff_preview table<string, string>
+--- @field diff_preview agentic.UserConfig.DiffPreviewKeymaps
+
+--- @class agentic.UserConfig.DiffPreviewKeymaps
+--- @field next_hunk string
+--- @field prev_hunk string
+--- @field accept string
+--- @field reject string
+--- @field accept_all string
+--- @field reject_all string
 
 --- Window options passed to nvim_set_option_value
 --- Overrides default options (wrap, linebreak, winfixbuf, winfixheight)
@@ -378,6 +386,10 @@ local ConfigDefault = {
         diff_preview = {
             next_hunk = "]c",
             prev_hunk = "[c",
+            accept = "m",
+            reject = "n",
+            accept_all = "M",
+            reject_all = "N",
         },
     },
 

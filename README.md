@@ -648,6 +648,10 @@ binding explicitly if you want one:
       diff_preview = {
         next_hunk = "]c",
         prev_hunk = "[c",
+        accept = "m",
+        reject = "n",
+        accept_all = "M",
+        reject_all = "N",
       },
     },
   },
@@ -730,7 +734,9 @@ before you accept or reject them. You can configure the diff preview layout:
 
 **Navigation:**
 
-Use `]c` and `[c` to navigate between diff hunks (configurable).
+Use `]c` and `[c` to navigate between diff hunks, `m` and `n` to accept or reject the nearest hunk, and `M` and `N` to accept or reject the whole diff by default.
+
+All six review keys are configurable under `keymaps.diff_preview`.
 
 **Note:** Changing the layout requires restarting Neovim.
 
@@ -922,6 +928,7 @@ colorscheme.
 
 ```lua
 vim.api.nvim_set_hl(0, "AgenticInlineFade", { blend = 45 })
+vim.api.nvim_set_hl(0, "AgenticChunkBoundary", { underline = true })
 ```
 
 ### Available Highlight Groups
@@ -937,6 +944,7 @@ vim.api.nvim_set_hl(0, "AgenticInlineFade", { blend = 45 })
 | `AgenticStatusFailed`    | Failed tool call status indicator        | `bg=#7a2d2d`                        |
 | `AgenticCodeBlockFence`  | The left border decoration on tool calls | Links to `Directory`                |
 | `AgenticTitle`           | Window titles in sidebar                 | `bg=#2787b0, fg=#000000, bold=true` |
+| `AgenticChunkBoundary`   | Debug-only merged chunk edge marker      | Links to `DiagnosticHint` + underline |
 | `AgenticInlineFade`      | Fade layer applied to inline extmark UI  | `blend=35`                          |
 
 If any of these highlight exists, Agentic will use it instead of creating new

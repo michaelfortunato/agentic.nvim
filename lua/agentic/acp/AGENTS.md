@@ -22,9 +22,17 @@ NOTE: Install instructions are in the README.md
 All providers use a **single generic `ACPClient`** (`acp_client.lua`). There are
 no per-provider adapter files.
 
-The client parses standard ACP protocol fields only. Provider-specific parse
-quirks are not treated as alternate render sources.
+The client parses standard ACP protocol fields only. Provider-specific metadata
+is not treated as an alternate render source.
 itself.
+
+Exception: we still allow narrow provider-specific normalization above the
+transport/parser layer when a common ACP provider exposes the same user-facing
+concept under a different config shape. Example: `codex-acp` exposes approval
+presets through the ACP `mode` config option, so higher-level config handling
+may alias that to Agentic's approval preset concept. Keep these exceptions small
+and explicit, and prefer them in config/session handling instead of in
+`ACPClient` message parsing.
 
 **Adding a new provider** only requires a config entry in `config_default.lua`
 under `acp_providers` — no adapter code needed unless the provider deviates from
@@ -78,7 +86,7 @@ InteractionModel  -- synthesizes turn/request/response tree from state
   v
 MessageWriter     -- renders AgenticChat from InteractionSession
 PermissionManager -- queues permission prompts, manages keymaps
-PersistedSession       -- accumulates messages for persistence
+PersistedSession  -- stores persisted session turns for save/restore
 ```
 
 ## Session update routing
@@ -152,6 +160,8 @@ Same as Phase 2, but status = "completed" | "failed"
 - unknown `kind` values still log a warning so users report them as issues
 
 Do not add provider-specific fallback parsing in `__build_tool_call_message`.
+If a provider needs a UX-level alias for a common concept, normalize it after
+parsing in session/config code instead of changing ACP field parsing.
 
 ## Permission flow (interleaved with tool calls)
 

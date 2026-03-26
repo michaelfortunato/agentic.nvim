@@ -33,12 +33,13 @@ local PROGRESS_PERCENT = {
 --- @field source_winid integer
 
 --- @class agentic.ui.InlineChat.ActiveRequest
+--- @field submission_id? integer
 --- @field source_bufnr integer
 --- @field source_winid integer
 --- @field selection agentic.Selection
 --- @field prompt string
+--- @field config_context? string
 --- @field range_extmark_id integer
---- @field overlay_extmark_id? integer
 --- @field thread_turn_index integer
 --- @field phase "busy"|"thinking"|"generating"|"tool"|"waiting"|"completed"|"failed"
 --- @field status_text string
@@ -46,11 +47,11 @@ local PROGRESS_PERCENT = {
 --- @field message_text string
 --- @field tool_label? string
 --- @field progress_id? integer
---- @field close_timer? uv.uv_timer_t
 
 --- @class agentic.ui.InlineChat.ThreadTurn
 --- @field selection agentic.Selection
 --- @field prompt string
+--- @field config_context? string
 --- @field phase "busy"|"thinking"|"generating"|"tool"|"waiting"|"completed"|"failed"
 --- @field status_text string
 --- @field thought_text string
@@ -67,6 +68,13 @@ local PROGRESS_PERCENT = {
 --- @field updated_at integer
 
 --- @alias agentic.ui.InlineChat.ThreadStore table<string, agentic.ui.InlineChat.ThreadState>
+
+--- @class agentic.ui.InlineChat.ThreadRuntime
+--- @field source_bufnr integer
+--- @field source_winid integer
+--- @field range_extmark_id integer
+--- @field overlay_extmark_id? integer
+--- @field close_timer? uv.uv_timer_t
 
 --- @class agentic.ui.InlineChat.NewOpts
 --- @field tab_page_id integer
@@ -87,6 +95,8 @@ local PROGRESS_PERCENT = {
 --- @field _get_config_context fun(): string|nil
 --- @field _prompt? agentic.ui.InlineChat.PromptState
 --- @field _active_request? agentic.ui.InlineChat.ActiveRequest
+--- @field _queued_requests table<integer, agentic.ui.InlineChat.ActiveRequest>
+--- @field _thread_runtimes table<string, agentic.ui.InlineChat.ThreadRuntime>
 local InlineChat = {}
 InlineChat.__index = InlineChat
 InlineChat.NS_INLINE = NS_INLINE
@@ -115,46 +125,15 @@ local function phase_to_spinner_state(mode)
     return "generating"
 end
 
+--- @param phase string|nil
+--- @return boolean
+local function is_terminal_phase(phase)
+    return phase == "completed" or phase == "failed"
+end
+
 --- @return boolean
 local function supports_progress_messages()
     return vim.fn.has("nvim-0.12") == 1
-end
-
---- @param keymaps agentic.UserConfig.KeymapValue
---- @param mode string
---- @return string|nil
-local function find_keymap(keymaps, mode)
-    if type(keymaps) == "string" then
-        return mode == "n" and keymaps or nil
-    end
-
-    if type(keymaps) ~= "table" then
-        return nil
-    end
-
-    for _, keymap in ipairs(keymaps) do
-        if type(keymap) == "string" and mode == "n" then
-            return keymap
-        end
-
-        if type(keymap) == "table" then
-            if keymap.mode == mode then
-                return keymap[1]
-            end
-
-            if type(keymap.mode) == "table" then
-                local modes = keymap.mode
-                --- @cast modes string[]
-                for _, candidate_mode in ipairs(modes) do
-                    if candidate_mode == mode then
-                        return keymap[1]
-                    end
-                end
-            end
-        end
-    end
-
-    return nil
 end
 
 --- @param text string|nil
@@ -187,6 +166,55 @@ end
 --- @return string
 local function thread_store_key(extmark_id)
     return tostring(extmark_id)
+end
+
+--- @param bufnr integer
+--- @param extmark_id integer
+--- @return string
+local function thread_runtime_key(bufnr, extmark_id)
+    return string.format("%d:%d", bufnr, extmark_id)
+end
+
+--- @param row integer
+--- @param col integer
+--- @param other_row integer
+--- @param other_col integer
+--- @return boolean
+local function position_lte(row, col, other_row, other_col)
+    if row ~= other_row then
+        return row < other_row
+    end
+
+    return col <= other_col
+end
+
+--- @param first {start_row: integer, start_col: integer, end_row: integer, end_col: integer}
+--- @param second {start_row: integer, start_col: integer, end_row: integer, end_col: integer}
+--- @return boolean
+local function ranges_overlap(first, second)
+    if
+        position_lte(
+            first.end_row,
+            first.end_col,
+            second.start_row,
+            second.start_col
+        )
+    then
+        return false
+    end
+
+    if
+        position_lte(
+            second.end_row,
+            second.end_col,
+            first.start_row,
+            first.start_col
+        )
+    then
+        return false
+    end
+
+    return true
 end
 
 --- @param bufnr integer
@@ -277,9 +305,11 @@ local function build_selection_snapshot(selection, range)
     if range then
         snapshot.start_line = range.start_row + 1
         snapshot.end_line = range.end_row + 1
-        snapshot.start_col = range.start_col + 1
-        if range.end_col >= 0 then
-            snapshot.end_col = range.end_col
+        if selection.start_col ~= nil or selection.end_col ~= nil then
+            snapshot.start_col = range.start_col + 1
+            if range.end_col >= 0 then
+                snapshot.end_col = range.end_col
+            end
         end
     end
 
@@ -296,6 +326,7 @@ local function create_thread_turn(request, selection)
     local turn = {
         selection = build_selection_snapshot(selection),
         prompt = request.prompt,
+        config_context = request.config_context,
         phase = request.phase,
         status_text = request.status_text,
         thought_text = request.thought_text,
@@ -347,12 +378,38 @@ local function format_range(selection)
         file_name = "[No Name]"
     end
 
+    if selection.start_col ~= nil and selection.end_col ~= nil then
+        return string.format(
+            "%s:%d:%d-%d:%d",
+            file_name,
+            selection.start_line,
+            selection.start_col,
+            selection.end_line,
+            selection.end_col
+        )
+    end
+
     return string.format(
         "%s:%d-%d",
         file_name,
         selection.start_line,
         selection.end_line
     )
+end
+
+--- @param position integer
+--- @param waiting_for_session boolean
+--- @return string
+local function build_queue_status(position, waiting_for_session)
+    if waiting_for_session then
+        return "Waiting for session"
+    end
+
+    if position <= 1 then
+        return "Queued next"
+    end
+
+    return string.format("Queued #%d", position)
 end
 
 --- @param tool_call table
@@ -414,6 +471,8 @@ function InlineChat:new(opts)
         end,
         _prompt = nil,
         _active_request = nil,
+        _queued_requests = {},
+        _thread_runtimes = {},
     }, self)
 
     return instance
@@ -422,6 +481,7 @@ end
 --- @return boolean
 function InlineChat:is_active()
     return self._active_request ~= nil
+        and not is_terminal_phase(self._active_request.phase)
 end
 
 --- @return boolean
@@ -433,19 +493,7 @@ end
 --- @param selection agentic.Selection
 --- @return boolean opened
 function InlineChat:open(selection)
-    if
-        self._active_request ~= nil
-        and self._active_request.phase ~= "completed"
-        and self._active_request.phase ~= "failed"
-    then
-        Logger.notify(
-            "An inline request is already running in this tab.",
-            vim.log.levels.WARN
-        )
-        return false
-    end
-
-    self:clear()
+    self:_close_prompt(true)
 
     local source_winid = vim.api.nvim_get_current_win()
     local source_bufnr = vim.api.nvim_get_current_buf()
@@ -505,6 +553,44 @@ function InlineChat:open(selection)
     self:_bind_prompt_keymaps()
     vim.cmd("startinsert")
     return true
+end
+
+--- @param request {submission_id?: integer|nil, prompt: string, selection: agentic.Selection, source_bufnr: integer, source_winid: integer, phase?: "busy"|"thinking"|"generating"|"tool"|"waiting"|"completed"|"failed", status_text?: string}
+--- @return agentic.ui.InlineChat.ActiveRequest
+--- @return string
+function InlineChat:_build_request_state(request)
+    local range_extmark_id =
+        self:_ensure_thread_extmark(request.source_bufnr, request.selection)
+    local runtime_id, runtime = self:_ensure_thread_runtime(
+        request.source_bufnr,
+        request.source_winid,
+        range_extmark_id
+    )
+    self:_stop_thread_close_timer(runtime)
+
+    local store = ensure_thread_store(request.source_bufnr)
+    local thread = store[thread_store_key(range_extmark_id)]
+    local thread_turn_index = thread and (#thread.turns + 1) or 1
+
+    --- @type agentic.ui.InlineChat.ActiveRequest
+    local request_state = {
+        submission_id = request.submission_id,
+        source_bufnr = request.source_bufnr,
+        source_winid = request.source_winid,
+        selection = vim.deepcopy(request.selection),
+        prompt = request.prompt,
+        config_context = self._get_config_context(),
+        range_extmark_id = range_extmark_id,
+        thread_turn_index = thread_turn_index,
+        phase = request.phase or "busy",
+        status_text = request.status_text or "Starting inline request",
+        thought_text = "",
+        message_text = "",
+        tool_label = nil,
+        progress_id = nil,
+    }
+
+    return request_state, runtime_id
 end
 
 function InlineChat:_bind_prompt_keymaps()
@@ -603,7 +689,7 @@ function InlineChat:_submit_prompt()
     })
 
     if accepted then
-        self:_close_prompt(false)
+        self:_close_prompt(true)
     end
 end
 
@@ -636,7 +722,8 @@ end
 --- @return string
 function InlineChat:_build_prompt_footer()
     local parts = {}
-    local submit_key = find_keymap(Config.keymaps.prompt.submit, "i") or "<CR>"
+    local submit_key = BufHelpers.find_keymap(Config.keymaps.prompt.submit, "i")
+        or "<CR>"
 
     if submit_key then
         parts[#parts + 1] = submit_key .. " submit"
@@ -645,6 +732,134 @@ function InlineChat:_build_prompt_footer()
     parts[#parts + 1] = "? keymaps"
 
     return table.concat(parts, "  ")
+end
+
+--- @param bufnr integer
+--- @param source_winid integer
+--- @param range_extmark_id integer
+--- @return string runtime_id
+--- @return agentic.ui.InlineChat.ThreadRuntime runtime
+function InlineChat:_ensure_thread_runtime(
+    bufnr,
+    source_winid,
+    range_extmark_id
+)
+    local runtime_id = thread_runtime_key(bufnr, range_extmark_id)
+    local runtime = self._thread_runtimes[runtime_id]
+
+    if runtime == nil then
+        --- @type agentic.ui.InlineChat.ThreadRuntime
+        local new_runtime = {
+            source_bufnr = bufnr,
+            source_winid = source_winid,
+            range_extmark_id = range_extmark_id,
+            overlay_extmark_id = nil,
+            close_timer = nil,
+        }
+        runtime = new_runtime
+        self._thread_runtimes[runtime_id] = runtime
+    else
+        runtime.source_bufnr = bufnr
+        runtime.source_winid = source_winid
+        runtime.range_extmark_id = range_extmark_id
+    end
+
+    return runtime_id, runtime
+end
+
+--- @param request agentic.ui.InlineChat.ActiveRequest
+--- @return string
+function InlineChat:_get_request_runtime_key(request)
+    return thread_runtime_key(request.source_bufnr, request.range_extmark_id)
+end
+
+--- @param runtime agentic.ui.InlineChat.ThreadRuntime
+function InlineChat:_stop_thread_close_timer(runtime)
+    if not runtime.close_timer then
+        return
+    end
+
+    pcall(function()
+        runtime.close_timer:stop()
+    end)
+    pcall(function()
+        runtime.close_timer:close()
+    end)
+    runtime.close_timer = nil
+end
+
+--- @param request agentic.ui.InlineChat.ActiveRequest|nil
+function InlineChat:_dismiss_progress(request)
+    if
+        not request
+        or not request.progress_id
+        or not Config.inline.progress
+        or not supports_progress_messages()
+    then
+        return
+    end
+
+    pcall(
+        vim.api.nvim_echo,
+        { { "dismissed", Theme.HL_GROUPS.ACTIVITY_TEXT } },
+        true,
+        {
+            id = request.progress_id,
+            kind = "progress",
+            status = "success",
+            percent = 100,
+            title = "Agentic Inline",
+        }
+    )
+    request.progress_id = nil
+end
+
+--- @param runtime_id string
+function InlineChat:_clear_thread_overlay(runtime_id)
+    local runtime = self._thread_runtimes[runtime_id]
+    if not runtime or not runtime.overlay_extmark_id then
+        return
+    end
+
+    if vim.api.nvim_buf_is_valid(runtime.source_bufnr) then
+        pcall(
+            vim.api.nvim_buf_del_extmark,
+            runtime.source_bufnr,
+            NS_INLINE,
+            runtime.overlay_extmark_id
+        )
+    end
+
+    runtime.overlay_extmark_id = nil
+end
+
+--- @param runtime_id string
+function InlineChat:_clear_thread_runtime(runtime_id)
+    local runtime = self._thread_runtimes[runtime_id]
+    if not runtime then
+        return
+    end
+
+    self:_stop_thread_close_timer(runtime)
+    self:_clear_thread_overlay(runtime_id)
+
+    local active_request = self._active_request
+    if
+        active_request
+        and is_terminal_phase(active_request.phase)
+        and self:_get_request_runtime_key(active_request) == runtime_id
+    then
+        self:_dismiss_progress(active_request)
+        self._active_request = nil
+    end
+
+    for submission_id, queued_request in pairs(self._queued_requests) do
+        if self:_get_request_runtime_key(queued_request) == runtime_id then
+            self._queued_requests[submission_id] = nil
+        end
+    end
+
+    self._thread_runtimes[runtime_id] = nil
 end
 
 --- @param bufnr integer
@@ -780,6 +995,7 @@ function InlineChat:_sync_thread_history(bufnr, request)
     else
         turn.selection = build_selection_snapshot(selection)
         turn.prompt = request.prompt
+        turn.config_context = request.config_context
         turn.phase = request.phase
         turn.status_text = request.status_text
         turn.thought_text = request.thought_text
@@ -799,36 +1015,277 @@ function InlineChat:_get_tracked_selection(request)
     return build_selection_snapshot(request.selection, range)
 end
 
---- @param request {prompt: string, selection: agentic.Selection, source_bufnr: integer, source_winid: integer, phase?: "busy"|"thinking"|"generating"|"tool"|"waiting"|"completed"|"failed", status_text?: string}
-function InlineChat:begin_request(request)
-    self:_stop_close_timer()
+--- @param bufnr integer
+--- @param range_extmark_id integer
+--- @param removed_turn_index integer
+function InlineChat:_shift_thread_turn_indices(
+    bufnr,
+    range_extmark_id,
+    removed_turn_index
+)
+    local active_request = self._active_request
+    if
+        active_request
+        and active_request.source_bufnr == bufnr
+        and active_request.range_extmark_id == range_extmark_id
+        and active_request.thread_turn_index > removed_turn_index
+    then
+        active_request.thread_turn_index = active_request.thread_turn_index - 1
+    end
 
-    local range_extmark_id =
-        self:_ensure_thread_extmark(request.source_bufnr, request.selection)
-    local store = ensure_thread_store(request.source_bufnr)
+    for _, queued_request in pairs(self._queued_requests) do
+        if
+            queued_request.source_bufnr == bufnr
+            and queued_request.range_extmark_id == range_extmark_id
+            and queued_request.thread_turn_index > removed_turn_index
+        then
+            queued_request.thread_turn_index = queued_request.thread_turn_index
+                - 1
+        end
+    end
+end
+
+--- @param bufnr integer
+--- @param range_extmark_id integer
+function InlineChat:_drop_thread(bufnr, range_extmark_id)
+    if not vim.api.nvim_buf_is_valid(bufnr) then
+        return
+    end
+
+    local store = ensure_thread_store(bufnr)
+    store[thread_store_key(range_extmark_id)] = nil
+    vim.b[bufnr][THREAD_STORE_KEY] = store
+
+    pcall(
+        vim.api.nvim_buf_del_extmark,
+        bufnr,
+        NS_INLINE_THREADS,
+        range_extmark_id
+    )
+
+    self:_clear_thread_runtime(thread_runtime_key(bufnr, range_extmark_id))
+end
+
+--- @param bufnr integer
+--- @param range_extmark_id integer
+--- @param thread_turn_index integer
+function InlineChat:_remove_thread_turn(
+    bufnr,
+    range_extmark_id,
+    thread_turn_index
+)
+    if not vim.api.nvim_buf_is_valid(bufnr) then
+        return
+    end
+
+    local store = ensure_thread_store(bufnr)
     local thread = store[thread_store_key(range_extmark_id)]
-    local thread_turn_index = thread and (#thread.turns + 1) or 1
+    if not thread then
+        return
+    end
 
-    self._active_request = {
-        source_bufnr = request.source_bufnr,
-        source_winid = request.source_winid,
-        selection = vim.deepcopy(request.selection),
-        prompt = request.prompt,
-        range_extmark_id = range_extmark_id,
-        overlay_extmark_id = nil,
-        thread_turn_index = thread_turn_index,
-        phase = request.phase or "busy",
-        status_text = request.status_text or "Starting inline request",
-        thought_text = "",
-        message_text = "",
-        tool_label = nil,
-        progress_id = nil,
-        close_timer = nil,
-    }
+    if thread_turn_index < 1 or thread_turn_index > #thread.turns then
+        return
+    end
+
+    table.remove(thread.turns, thread_turn_index)
+    self:_shift_thread_turn_indices(bufnr, range_extmark_id, thread_turn_index)
+
+    if #thread.turns == 0 then
+        self:_drop_thread(bufnr, range_extmark_id)
+        return
+    end
+
+    thread.updated_at = current_timestamp()
+    store[thread_store_key(range_extmark_id)] = thread
+    vim.b[bufnr][THREAD_STORE_KEY] = store
+    self:_render_thread(thread_runtime_key(bufnr, range_extmark_id))
+end
+
+--- @param request {submission_id: integer, prompt: string, selection: agentic.Selection, source_bufnr: integer, source_winid: integer}
+function InlineChat:queue_request(request)
+    local queued_request = self._queued_requests[request.submission_id]
+    local runtime_id = nil
+
+    if queued_request == nil then
+        queued_request, runtime_id = self:_build_request_state({
+            submission_id = request.submission_id,
+            prompt = request.prompt,
+            selection = request.selection,
+            source_bufnr = request.source_bufnr,
+            source_winid = request.source_winid,
+            phase = "busy",
+            status_text = "Queued next",
+        })
+        self._queued_requests[request.submission_id] = queued_request
+    else
+        queued_request.source_bufnr = request.source_bufnr
+        queued_request.source_winid = request.source_winid
+        queued_request.selection = vim.deepcopy(request.selection)
+        queued_request.prompt = request.prompt
+        queued_request.config_context = self._get_config_context()
+    end
+
+    queued_request.phase = "busy"
+    queued_request.status_text = "Queued next"
+    self:_sync_thread_history(queued_request.source_bufnr, queued_request)
+    self:_render_thread(
+        runtime_id or self:_get_request_runtime_key(queued_request)
+    )
+end
+
+--- @param queue_items agentic.SessionManager.QueuedSubmission[]
+--- @param opts {waiting_for_session?: boolean|nil, interrupt_submission?: agentic.SessionManager.QueuedSubmission|nil}|nil
+function InlineChat:sync_queued_requests(queue_items, opts)
+    opts = opts or {}
+
+    local queue_positions = {}
+    local next_position = 1
+    local interrupt_submission = opts.interrupt_submission
+
+    if
+        interrupt_submission
+        and interrupt_submission.id ~= nil
+        and interrupt_submission.inline_request ~= nil
+    then
+        queue_positions[interrupt_submission.id] = next_position
+        next_position = next_position + 1
+    end
+
+    for _, submission in ipairs(queue_items or {}) do
+        if submission.inline_request ~= nil then
+            queue_positions[submission.id] = next_position
+            next_position = next_position + 1
+        end
+    end
+
+    for submission_id, queued_request in pairs(self._queued_requests) do
+        local position = queue_positions[submission_id]
+        if position ~= nil then
+            queued_request.phase = opts.waiting_for_session and "waiting"
+                or "busy"
+            queued_request.status_text =
+                build_queue_status(position, opts.waiting_for_session == true)
+            queued_request.config_context = self._get_config_context()
+            self:_sync_thread_history(
+                queued_request.source_bufnr,
+                queued_request
+            )
+            self:_render_thread(self:_get_request_runtime_key(queued_request))
+        end
+    end
+end
+
+--- @param source_bufnr integer
+--- @param selection agentic.Selection
+--- @return integer|nil
+function InlineChat:find_overlapping_queued_submission(source_bufnr, selection)
+    local start_row, start_col, end_row, end_col =
+        selection_to_extmark_range(source_bufnr, selection)
+    local target_range = normalize_range(source_bufnr, {
+        start_row = start_row,
+        start_col = start_col,
+        end_row = end_row,
+        end_col = end_col,
+    })
+    if target_range == nil then
+        return nil
+    end
+
+    for submission_id, queued_request in pairs(self._queued_requests) do
+        if queued_request.source_bufnr == source_bufnr then
+            local queued_range = self:_get_thread_range(
+                queued_request.source_bufnr,
+                queued_request.range_extmark_id
+            )
+
+            if queued_range == nil then
+                local queued_start_row, queued_start_col, queued_end_row, queued_end_col =
+                    selection_to_extmark_range(
+                        queued_request.source_bufnr,
+                        queued_request.selection
+                    )
+                queued_range = normalize_range(queued_request.source_bufnr, {
+                    start_row = queued_start_row,
+                    start_col = queued_start_col,
+                    end_row = queued_end_row,
+                    end_col = queued_end_col,
+                })
+            end
+
+            if queued_range and ranges_overlap(target_range, queued_range) then
+                return submission_id
+            end
+        end
+    end
+
+    return nil
+end
+
+--- @param submission_id integer
+--- @return boolean
+function InlineChat:remove_queued_submission(submission_id)
+    local queued_request = self._queued_requests[submission_id]
+    if queued_request == nil then
+        return false
+    end
+
+    self._queued_requests[submission_id] = nil
+    self:_remove_thread_turn(
+        queued_request.source_bufnr,
+        queued_request.range_extmark_id,
+        queued_request.thread_turn_index
+    )
+    return true
+end
+
+--- @param request {submission_id?: integer|nil, prompt: string, selection: agentic.Selection, source_bufnr: integer, source_winid: integer, phase?: "busy"|"thinking"|"generating"|"tool"|"waiting"|"completed"|"failed", status_text?: string}
+function InlineChat:begin_request(request)
+    local previous_request = self._active_request
+    if previous_request and is_terminal_phase(previous_request.phase) then
+        self:_dismiss_progress(previous_request)
+    end
+
+    local queued_request = request.submission_id ~= nil
+            and self._queued_requests[request.submission_id]
+        or nil
+    local runtime_id = nil
+
+    if queued_request ~= nil then
+        self._queued_requests[request.submission_id] = nil
+        queued_request.source_bufnr = request.source_bufnr
+        queued_request.source_winid = request.source_winid
+        queued_request.selection = vim.deepcopy(request.selection)
+        queued_request.prompt = request.prompt
+        queued_request.config_context = self._get_config_context()
+        queued_request.phase = request.phase or "busy"
+        queued_request.status_text = request.status_text
+            or "Starting inline request"
+        queued_request.tool_label = nil
+        runtime_id = self:_get_request_runtime_key(queued_request)
+
+        local _, runtime = self:_ensure_thread_runtime(
+            queued_request.source_bufnr,
+            queued_request.source_winid,
+            queued_request.range_extmark_id
+        )
+        self:_stop_thread_close_timer(runtime)
+        self._active_request = queued_request
+    else
+        self._active_request, runtime_id = self:_build_request_state({
+            submission_id = request.submission_id,
+            prompt = request.prompt,
+            selection = request.selection,
+            source_bufnr = request.source_bufnr,
+            source_winid = request.source_winid,
+            phase = request.phase,
+            status_text = request.status_text,
+        })
+    end
 
     self:_sync_thread_history(request.source_bufnr, self._active_request)
-    self:_render_active_request()
-    self:_update_progress()
+    self:_render_thread(runtime_id)
+    self:_update_progress(self._active_request)
 end
 
 function InlineChat:refresh()
@@ -837,14 +1294,21 @@ function InlineChat:refresh()
             self._active_request.source_bufnr,
             self._active_request
         )
-        self:_render_active_request()
+    end
+
+    for _, queued_request in pairs(self._queued_requests) do
+        self:_sync_thread_history(queued_request.source_bufnr, queued_request)
+    end
+
+    for runtime_id, _ in pairs(self._thread_runtimes) do
+        self:_render_thread(runtime_id)
     end
 end
 
 --- @param update agentic.acp.SessionUpdateMessage
 function InlineChat:handle_session_update(update)
     local request = self._active_request
-    if not request then
+    if not request or is_terminal_phase(request.phase) then
         return
     end
 
@@ -873,14 +1337,14 @@ function InlineChat:handle_session_update(update)
     end
 
     self:_sync_thread_history(request.source_bufnr, request)
-    self:_render_active_request()
-    self:_update_progress()
+    self:_render_thread(self:_get_request_runtime_key(request))
+    self:_update_progress(request)
 end
 
 --- @param tool_call table
 function InlineChat:handle_tool_call(tool_call)
     local request = self._active_request
-    if not request then
+    if not request or is_terminal_phase(request.phase) then
         return
     end
 
@@ -888,14 +1352,14 @@ function InlineChat:handle_tool_call(tool_call)
     request.tool_label = build_tool_label(tool_call)
     request.status_text = "Running " .. request.tool_label
     self:_sync_thread_history(request.source_bufnr, request)
-    self:_render_active_request()
-    self:_update_progress()
+    self:_render_thread(self:_get_request_runtime_key(request))
+    self:_update_progress(request)
 end
 
 --- @param tool_call table
 function InlineChat:handle_tool_call_update(tool_call)
     local request = self._active_request
-    if not request then
+    if not request or is_terminal_phase(request.phase) then
         return
     end
 
@@ -913,28 +1377,28 @@ function InlineChat:handle_tool_call_update(tool_call)
     end
 
     self:_sync_thread_history(request.source_bufnr, request)
-    self:_render_active_request()
-    self:_update_progress()
+    self:_render_thread(self:_get_request_runtime_key(request))
+    self:_update_progress(request)
 end
 
 function InlineChat:handle_permission_request()
     local request = self._active_request
-    if not request then
+    if not request or is_terminal_phase(request.phase) then
         return
     end
 
     request.phase = "waiting"
     request.status_text = "Waiting for approval"
     self:_sync_thread_history(request.source_bufnr, request)
-    self:_render_active_request()
-    self:_update_progress()
+    self:_render_thread(self:_get_request_runtime_key(request))
+    self:_update_progress(request)
 end
 
 --- @param response agentic.acp.PromptResponse|nil
 --- @param err table|nil
 function InlineChat:complete(response, err)
     local request = self._active_request
-    if not request then
+    if not request or is_terminal_phase(request.phase) then
         return
     end
 
@@ -952,41 +1416,32 @@ function InlineChat:complete(response, err)
     end
 
     self:_sync_thread_history(request.source_bufnr, request)
-    self:_render_active_request()
-    self:_update_progress(true)
-    self:_schedule_close()
+    self:_render_thread(self:_get_request_runtime_key(request))
+    self:_update_progress(request, true)
+    self:_schedule_close(request)
 end
 
-function InlineChat:_schedule_close()
-    self:_stop_close_timer()
-
+--- @param request agentic.ui.InlineChat.ActiveRequest
+function InlineChat:_schedule_close(request)
     local delay = Config.inline.result_ttl_ms
     if delay == nil or delay <= 0 then
         return
     end
 
-    self._active_request.close_timer = vim.defer_fn(function()
-        self:clear()
+    local runtime_id, runtime = self:_ensure_thread_runtime(
+        request.source_bufnr,
+        request.source_winid,
+        request.range_extmark_id
+    )
+    self:_stop_thread_close_timer(runtime)
+    runtime.close_timer = vim.defer_fn(function()
+        self:_clear_thread_runtime(runtime_id)
     end, delay)
 end
 
-function InlineChat:_stop_close_timer()
-    local request = self._active_request
-    if not request or not request.close_timer then
-        return
-    end
-
-    pcall(function()
-        request.close_timer:stop()
-    end)
-    pcall(function()
-        request.close_timer:close()
-    end)
-    request.close_timer = nil
-end
-
-function InlineChat:_update_progress(is_terminal)
-    local request = self._active_request
+--- @param request agentic.ui.InlineChat.ActiveRequest|nil
+--- @param is_terminal boolean|nil
+function InlineChat:_update_progress(request, is_terminal)
     if
         not request
         or not Config.inline.progress
@@ -1024,17 +1479,53 @@ function InlineChat:_update_progress(is_terminal)
     end
 end
 
-function InlineChat:_render_active_request()
-    local request = self._active_request
-    if not request or not vim.api.nvim_buf_is_valid(request.source_bufnr) then
+--- @param runtime agentic.ui.InlineChat.ThreadRuntime
+--- @return integer
+function InlineChat:_get_max_width(runtime)
+    if
+        runtime.source_winid and vim.api.nvim_win_is_valid(runtime.source_winid)
+    then
+        return math.max(
+            24,
+            vim.api.nvim_win_get_width(runtime.source_winid) - 4
+        )
+    end
+
+    local fallback_winid = vim.fn.bufwinid(runtime.source_bufnr)
+    if fallback_winid ~= -1 and vim.api.nvim_win_is_valid(fallback_winid) then
+        runtime.source_winid = fallback_winid
+        return math.max(24, vim.api.nvim_win_get_width(fallback_winid) - 4)
+    end
+
+    return 72
+end
+
+--- @param runtime_id string
+function InlineChat:_render_thread(runtime_id)
+    local runtime = self._thread_runtimes[runtime_id]
+    if not runtime or not vim.api.nvim_buf_is_valid(runtime.source_bufnr) then
         return
     end
 
-    local selection = self:_get_tracked_selection(request)
+    local store = ensure_thread_store(runtime.source_bufnr)
+    local thread = store[thread_store_key(runtime.range_extmark_id)]
+    local turn = thread and thread.turns[#thread.turns] or nil
+
+    if not turn then
+        self:_clear_thread_overlay(runtime_id)
+        return
+    end
+
     local range =
-        self:_get_thread_range(request.source_bufnr, request.range_extmark_id)
+        self:_get_thread_range(runtime.source_bufnr, runtime.range_extmark_id)
+    if not range or range.invalid then
+        self:_clear_thread_overlay(runtime_id)
+        return
+    end
+
+    local selection = build_selection_snapshot(turn.selection, range)
     local line_count =
-        math.max(1, vim.api.nvim_buf_line_count(request.source_bufnr))
+        math.max(1, vim.api.nvim_buf_line_count(runtime.source_bufnr))
     local anchor_line = math.max(
         0,
         math.min(
@@ -1042,37 +1533,31 @@ function InlineChat:_render_active_request()
             range and range.end_row or (selection.end_line - 1)
         )
     )
-    local max_width = 72
-    if
-        request.source_winid and vim.api.nvim_win_is_valid(request.source_winid)
-    then
-        max_width =
-            math.max(24, vim.api.nvim_win_get_width(request.source_winid) - 4)
-    end
+    local max_width = self:_get_max_width(runtime)
 
-    local lines = self:_build_virtual_lines(request, selection, max_width)
+    local lines = self:_build_virtual_lines(turn, selection, max_width)
 
-    request.overlay_extmark_id = vim.api.nvim_buf_set_extmark(
-        request.source_bufnr,
+    runtime.overlay_extmark_id = vim.api.nvim_buf_set_extmark(
+        runtime.source_bufnr,
         NS_INLINE,
         anchor_line,
         0,
         {
-            id = request.overlay_extmark_id,
+            id = runtime.overlay_extmark_id,
             virt_lines = lines,
             virt_lines_above = false,
         }
     )
 end
 
---- @param request agentic.ui.InlineChat.ActiveRequest
+--- @param entry agentic.ui.InlineChat.ActiveRequest|agentic.ui.InlineChat.ThreadTurn
 --- @param selection agentic.Selection
 --- @param max_width integer
 --- @return table[]
-function InlineChat:_build_virtual_lines(request, selection, max_width)
-    local config_context = self._get_config_context()
+function InlineChat:_build_virtual_lines(entry, selection, max_width)
+    local config_context = entry.config_context
     local status_hl =
-        Theme.get_spinner_hl_group(phase_to_spinner_state(request.phase))
+        Theme.get_spinner_hl_group(phase_to_spinner_state(entry.phase))
 
     --- @type table[]
     local lines = {
@@ -1085,12 +1570,12 @@ function InlineChat:_build_virtual_lines(request, selection, max_width)
                 format_range(selection) .. " ",
                 Theme.HL_GROUPS.REVIEW_BANNER
             ),
-            faded_segment(request.status_text, status_hl),
+            faded_segment(entry.status_text, status_hl),
         },
         {
             faded_segment("Prompt: ", Theme.HL_GROUPS.CARD_TITLE),
             faded_segment(
-                truncate_text(request.prompt, max_width),
+                truncate_text(entry.prompt, max_width),
                 Theme.HL_GROUPS.CARD_BODY
             ),
         },
@@ -1106,11 +1591,11 @@ function InlineChat:_build_virtual_lines(request, selection, max_width)
         }
     end
 
-    if request.tool_label and request.tool_label ~= "" then
+    if entry.tool_label and entry.tool_label ~= "" then
         lines[#lines + 1] = {
             faded_segment("Tool: ", Theme.HL_GROUPS.CARD_TITLE),
             faded_segment(
-                truncate_text(request.tool_label, max_width),
+                truncate_text(entry.tool_label, max_width),
                 Theme.HL_GROUPS.CARD_BODY
             ),
         }
@@ -1118,7 +1603,7 @@ function InlineChat:_build_virtual_lines(request, selection, max_width)
 
     if Config.inline.show_thoughts then
         local thought_lines = tail_lines(
-            split_lines(request.thought_text),
+            split_lines(entry.thought_text),
             Config.inline.max_thought_lines
         )
 
@@ -1138,7 +1623,7 @@ function InlineChat:_build_virtual_lines(request, selection, max_width)
         end
     end
 
-    local response_lines = tail_lines(split_lines(request.message_text), 4)
+    local response_lines = tail_lines(split_lines(entry.message_text), 4)
     if #response_lines > 0 then
         lines[#lines + 1] = {
             faded_segment("Response:", Theme.HL_GROUPS.CARD_TITLE),
@@ -1158,44 +1643,17 @@ function InlineChat:_build_virtual_lines(request, selection, max_width)
 end
 
 function InlineChat:clear()
-    local request = self._active_request
     self:_close_prompt(true)
-    self:_stop_close_timer()
 
-    if
-        request
-        and request.progress_id
-        and Config.inline.progress
-        and supports_progress_messages()
-    then
-        pcall(
-            vim.api.nvim_echo,
-            { { "dismissed", Theme.HL_GROUPS.ACTIVITY_TEXT } },
-            true,
-            {
-                id = request.progress_id,
-                kind = "progress",
-                status = "success",
-                percent = 100,
-                title = "Agentic Inline",
-            }
-        )
-    end
+    self:_dismiss_progress(self._active_request)
 
-    if
-        request
-        and request.overlay_extmark_id
-        and vim.api.nvim_buf_is_valid(request.source_bufnr)
-    then
-        pcall(
-            vim.api.nvim_buf_del_extmark,
-            request.source_bufnr,
-            NS_INLINE,
-            request.overlay_extmark_id
-        )
+    local runtime_ids = vim.tbl_keys(self._thread_runtimes)
+    for _, runtime_id in ipairs(runtime_ids) do
+        self:_clear_thread_runtime(runtime_id)
     end
 
     self._active_request = nil
+    self._queued_requests = {}
 end
 
 function InlineChat:destroy()

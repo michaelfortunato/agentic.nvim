@@ -333,7 +333,7 @@ To keep this repo maintainable, the ACP model should be split into three layers:
 
 1. Canonical wire types
 - schema-faithful LuaCATS mirroring ACP exactly
-- no provider quirks
+- no provider-specific parse shortcuts
 - no UI-specific fields
 
 2. ACP interaction layer
@@ -370,9 +370,9 @@ Invariant:
 ## Bottom Line
 
 The ACP Lua layer should be treated as a formal ACP-first type system plus a
-separate UI projection layer. The implementation should not rely on provider
-quirk adapters or legacy compatibility branches.
+separate UI projection layer. The implementation should not rely on
+provider-specific parse adapters or stale side paths.
 
 The core invariant to enforce from here forward is:
 
-`canonical ACP wire types must stay schema-accurate, and every provider quirk or UI convenience must be modeled as a separate layer.`
+`canonical ACP wire types must stay schema-accurate, and every provider-specific extension or UI convenience must be modeled as a separate layer.`

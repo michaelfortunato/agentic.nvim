@@ -45,31 +45,36 @@ describe("agentic.session.SessionState", function()
         assert.equal("hello", persisted.turns[1].request.text)
     end)
 
-    it(
-        "appends agent chunks onto the last persisted response message",
-        function()
-            local store = SessionState:new()
+    it("appends agent chunks onto the current turn response message", function()
+        local store = SessionState:new()
 
-            store:dispatch(
-                SessionEvents.append_interaction_response(
-                    "message",
-                    "codex-acp",
-                    { type = "text", text = "hello" }
-                )
+        store:dispatch(SessionEvents.append_interaction_request({
+            kind = "user",
+            text = "hello",
+            timestamp = 1,
+            content = {
+                { type = "text", text = "hello" },
+            },
+        }))
+        store:dispatch(
+            SessionEvents.append_interaction_response(
+                "message",
+                "codex-acp",
+                { type = "text", text = "hello" }
             )
-            store:dispatch(
-                SessionEvents.append_interaction_response(
-                    "message",
-                    "codex-acp",
-                    { type = "text", text = " world" }
-                )
+        )
+        store:dispatch(
+            SessionEvents.append_interaction_response(
+                "message",
+                "codex-acp",
+                { type = "text", text = " world" }
             )
+        )
 
-            local turns = store:get_persisted_session_data().turns
-            assert.equal(1, #turns)
-            assert.equal("hello world", turns[1].response.nodes[1].text)
-        end
-    )
+        local turns = store:get_persisted_session_data().turns
+        assert.equal(1, #turns)
+        assert.equal("hello world", turns[1].response.nodes[1].text)
+    end)
 
     it(
         "loads persisted session data while preserving runtime session metadata when requested",
@@ -154,6 +159,14 @@ describe("agentic.session.SessionState", function()
     it("tracks tool lifecycle and active review state", function()
         local store = SessionState:new()
 
+        store:dispatch(SessionEvents.append_interaction_request({
+            kind = "user",
+            text = "edit this",
+            timestamp = 1,
+            content = {
+                { type = "text", text = "edit this" },
+            },
+        }))
         store:dispatch(SessionEvents.upsert_interaction_tool_call("Codex ACP", {
             tool_call_id = "tc-3",
             kind = "edit",

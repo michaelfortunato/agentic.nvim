@@ -63,6 +63,31 @@ describe("agentic.acp.AgentConfigOptions", function()
         },
     }
 
+    local codex_approval_mode_option = {
+        id = "mode",
+        category = "mode",
+        currentValue = "read-only",
+        description = "Approval access level",
+        name = "Approval Preset",
+        options = {
+            {
+                value = "read-only",
+                name = "Read Only",
+                description = "No writes",
+            },
+            {
+                value = "auto",
+                name = "Default",
+                description = "Standard access",
+            },
+            {
+                value = "full-access",
+                name = "Full Access",
+                description = "Unrestricted access",
+            },
+        },
+    }
+
     local grouped_model_option = {
         id = "model-grouped",
         category = "model",
@@ -104,7 +129,6 @@ describe("agentic.acp.AgentConfigOptions", function()
         test_bufnr = vim.api.nvim_create_buf(false, true)
         config_options = AgentConfigOptions:new(
             { chat = test_bufnr },
-            function() end,
             function() end
         )
     end)
@@ -131,6 +155,25 @@ describe("agentic.acp.AgentConfigOptions", function()
         assert.equal("model-1", config_options.model.id)
         assert.equal("thought-1", config_options.thought_level.id)
         assert.equal("approval-1", config_options.approval_preset.id)
+        assert.equal("mode-1", config_options:get_mode_option().id)
+        assert.equal("model-1", config_options:get_model_option().id)
+        assert.equal("thought-1", config_options:get_thought_level_option().id)
+        assert.equal(
+            "approval-1",
+            config_options:get_approval_preset_option().id
+        )
+    end)
+
+    it("aliases codex approval mode to approval preset", function()
+        config_options:set_options(
+            { codex_approval_mode_option },
+            { command = "codex-acp", name = "Codex ACP" }
+        )
+
+        assert.equal("mode", config_options.mode.id)
+        assert.equal("mode", config_options.approval_preset.id)
+        assert.equal("mode", config_options:get_mode_option().id)
+        assert.equal("mode", config_options:get_approval_preset_option().id)
     end)
 
     it(
@@ -145,6 +188,20 @@ describe("agentic.acp.AgentConfigOptions", function()
             config_options:set_options({ aliased })
 
             assert.is_nil(config_options.approval_preset)
+            assert.is_nil(config_options:get_approval_preset_option())
+        end
+    )
+
+    it(
+        "does not alias approval preset mode options for non-codex providers",
+        function()
+            config_options:set_options(
+                { codex_approval_mode_option },
+                { command = "claude-agent-acp", name = "Claude ACP" }
+            )
+
+            assert.is_nil(config_options.approval_preset)
+            assert.is_nil(config_options:get_approval_preset_option())
         end
     )
 
@@ -164,7 +221,10 @@ describe("agentic.acp.AgentConfigOptions", function()
     it("returns mode and model names from config options", function()
         config_options:set_options({ mode_option, model_option })
 
-        assert.equal("Plan", config_options:get_mode_name("plan"))
+        assert.equal(
+            "Plan",
+            config_options:get_config_value_name("mode-1", "plan")
+        )
         assert.equal(
             "GPT-5.5",
             config_options:get_config_value_name("model-1", "gpt-5.5")
@@ -178,30 +238,34 @@ describe("agentic.acp.AgentConfigOptions", function()
 
         config_options:set_current_mode("plan")
 
-        assert.equal("plan", config_options.mode.currentValue)
+        assert.equal("plan", config_options:get_mode_option().currentValue)
     end)
 
     it("warns when configured default_mode is not available", function()
         local Logger = require("agentic.utils.logger")
         local notify_stub = spy.stub(Logger, "notify")
-        local handler = spy.new(function() end)
+        local generic_change = spy.new(function() end)
+        local fresh =
+            AgentConfigOptions:new({ chat = test_bufnr }, generic_change)
 
-        config_options:set_options({ mode_option })
-        config_options:set_initial_mode("missing-mode", handler)
+        fresh:set_options({ mode_option })
+        fresh:set_initial_mode("missing-mode")
 
-        assert.spy(handler).was.called(0)
+        assert.spy(generic_change).was.called(0)
         assert.stub(notify_stub).was.called(1)
 
         notify_stub:revert()
     end)
 
     it("switches to a configured default mode when available", function()
-        local handler = spy.new(function() end)
+        local generic_change = spy.new(function() end)
+        local fresh =
+            AgentConfigOptions:new({ chat = test_bufnr }, generic_change)
 
-        config_options:set_options({ mode_option })
-        config_options:set_initial_mode("plan", handler)
+        fresh:set_options({ mode_option })
+        fresh:set_initial_mode("plan")
 
-        assert.spy(handler).was.called_with("plan")
+        assert.spy(generic_change).was.called_with("mode-1", "plan")
     end)
 
     describe("selectors", function()
@@ -217,36 +281,37 @@ describe("agentic.acp.AgentConfigOptions", function()
         end)
 
         it("shows model selector and routes selected model value", function()
-            local handler = spy.new(function() end)
-            config_options:set_options({ model_option })
+            local generic_change = spy.new(function() end)
+            local fresh =
+                AgentConfigOptions:new({ chat = test_bufnr }, generic_change)
+            fresh:set_options({ model_option })
 
             chooser_show_stub:invokes(function(items, _opts, on_choice)
                 on_choice(items[2])
             end)
 
-            assert.is_true(config_options:show_model_selector(handler))
-            assert.spy(handler).was.called_with("gpt-5.5")
+            assert.is_true(fresh:show_model_selector())
+            assert.spy(generic_change).was.called_with("model-1", "gpt-5.5")
         end)
 
         it("shows mode selector and routes selected mode value", function()
-            local handler = spy.new(function() end)
-            config_options:set_options({ mode_option })
+            local generic_change = spy.new(function() end)
+            local fresh =
+                AgentConfigOptions:new({ chat = test_bufnr }, generic_change)
+            fresh:set_options({ mode_option })
 
             chooser_show_stub:invokes(function(items, _opts, on_choice)
                 on_choice(items[2])
             end)
 
-            assert.is_true(config_options:show_mode_selector(handler))
-            assert.spy(handler).was.called_with("plan")
+            assert.is_true(fresh:show_mode_selector())
+            assert.spy(generic_change).was.called_with("mode-1", "plan")
         end)
 
         it("flattens grouped select options from the ACP schema", function()
-            local handler = spy.new(function() end)
-            local fresh = AgentConfigOptions:new(
-                { chat = test_bufnr },
-                function() end,
-                function() end
-            )
+            local generic_change = spy.new(function() end)
+            local fresh =
+                AgentConfigOptions:new({ chat = test_bufnr }, generic_change)
 
             fresh:set_options({ grouped_model_option })
 
@@ -255,8 +320,10 @@ describe("agentic.acp.AgentConfigOptions", function()
                 on_choice(items[2])
             end)
 
-            assert.is_true(fresh:show_model_selector(handler))
-            assert.spy(handler).was.called_with("gpt-5.4")
+            assert.is_true(fresh:show_model_selector())
+            assert
+                .spy(generic_change).was
+                .called_with("model-grouped", "gpt-5.4")
         end)
 
         it(
@@ -265,8 +332,6 @@ describe("agentic.acp.AgentConfigOptions", function()
                 local generic_change = spy.new(function() end)
                 local fresh = AgentConfigOptions:new(
                     { chat = test_bufnr },
-                    function() end,
-                    function() end,
                     generic_change
                 )
 
@@ -286,8 +351,6 @@ describe("agentic.acp.AgentConfigOptions", function()
                 local generic_change = spy.new(function() end)
                 local fresh = AgentConfigOptions:new(
                     { chat = test_bufnr },
-                    function() end,
-                    function() end,
                     generic_change
                 )
 
@@ -303,14 +366,32 @@ describe("agentic.acp.AgentConfigOptions", function()
             end
         )
 
+        it(
+            "shows approval preset selector for codex mode-backed permissions",
+            function()
+                local generic_change = spy.new(function() end)
+                local fresh = AgentConfigOptions:new(
+                    { chat = test_bufnr },
+                    generic_change
+                )
+
+                fresh:set_options(
+                    { codex_approval_mode_option },
+                    { command = "codex-acp", name = "Codex ACP" }
+                )
+                chooser_show_stub:invokes(function(items, _opts, on_choice)
+                    on_choice(items[2])
+                end)
+
+                assert.is_true(fresh:show_approval_preset_selector())
+                assert.spy(generic_change).was.called_with("mode", "auto")
+            end
+        )
+
         it("shows session config selector in provider order", function()
             local generic_change = spy.new(function() end)
-            local fresh = AgentConfigOptions:new(
-                { chat = test_bufnr },
-                function() end,
-                function() end,
-                generic_change
-            )
+            local fresh =
+                AgentConfigOptions:new({ chat = test_bufnr }, generic_change)
             local render = {}
             local select_call = 0
 
@@ -352,6 +433,10 @@ describe("agentic.acp.AgentConfigOptions", function()
         assert.is_nil(config_options.model)
         assert.is_nil(config_options.thought_level)
         assert.is_nil(config_options.approval_preset)
+        assert.is_nil(config_options:get_mode_option())
+        assert.is_nil(config_options:get_model_option())
+        assert.is_nil(config_options:get_thought_level_option())
+        assert.is_nil(config_options:get_approval_preset_option())
         assert.same({}, config_options._options)
     end)
 end)

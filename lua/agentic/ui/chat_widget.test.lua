@@ -221,6 +221,7 @@ describe("agentic.ui.ChatWidget", function()
                                     text = "",
                                     content = {},
                                     content_nodes = {},
+                                    nodes = {},
                                 },
                                 response = {
                                     provider_name = "Codex ACP",
@@ -241,6 +242,7 @@ describe("agentic.ui.ChatWidget", function()
                                                             "lua/agentic/session_manager.lua:643:Queue: 3",
                                                             "lua/agentic/ui/window_decoration.lua:35:Queue",
                                                         }, "\n"),
+                                                        text_structure = "plain",
                                                         content = {
                                                             type = "text",
                                                             text = table.concat(

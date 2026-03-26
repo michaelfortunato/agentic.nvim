@@ -140,7 +140,7 @@ Even after recent cleanup, the chat transcript is still too close to protocol da
 ### 4. Provider behavior is under-modeled
 
 The code knows ACP messages, but it does not yet act like a client with provider-specific
-capabilities, quirks, and preferred UX paths.
+capabilities, declared extensions, and preferred UX paths.
 
 ### 5. Layout is still opportunistic in places
 
@@ -186,7 +186,7 @@ Responsibilities:
 - ACP transport and lifecycle
 - raw protocol message handling
 - provider capability discovery
-- provider quirks and compatibility flags
+- provider-declared capabilities and provider profile policy
 
 Existing files:
 
@@ -642,7 +642,7 @@ If only one major refactor is allowed, do item 1-4 first.
 - transcript-level duplicated diff detail when review exists
 - focus restore/startinsert choreography in review flow
 - UI decisions hidden inside low-level render helpers
-- provider quirks encoded as scattered conditionals
+- provider policy encoded as scattered conditionals instead of one capability/profile layer
 - any selector path still relying on stock `vim.ui.select` for premium UX
 
 Cutting code is a feature here.

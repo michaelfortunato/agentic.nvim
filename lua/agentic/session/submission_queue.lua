@@ -29,6 +29,11 @@ function SubmissionQueue:list()
     return self._items
 end
 
+--- @return agentic.SessionManager.QueuedSubmission|nil
+function SubmissionQueue:get_interrupt_submission()
+    return self._interrupt_submission
+end
+
 --- @param submission agentic.SessionManager.QueuedSubmission
 --- @return integer
 function SubmissionQueue:enqueue(submission)
@@ -53,6 +58,15 @@ end
 --- @param submission_id integer
 --- @return agentic.SessionManager.QueuedSubmission|nil
 function SubmissionQueue:remove(submission_id)
+    if
+        self._interrupt_submission
+        and self._interrupt_submission.id == submission_id
+    then
+        local interrupt_submission = self._interrupt_submission
+        self._interrupt_submission = nil
+        return interrupt_submission
+    end
+
     local submission_index = self:find_index(submission_id)
     if not submission_index then
         return nil

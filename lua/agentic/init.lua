@@ -413,7 +413,7 @@ function Agentic.setup(opts)
     vim.api.nvim_create_autocmd("BufEnter", {
         group = cleanup_group,
         callback = function(ev)
-            if not Config.inline.enabled then
+            if not Config.inline or not Config.inline.enabled then
                 return
             end
 

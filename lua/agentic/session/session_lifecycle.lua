@@ -7,35 +7,6 @@ local SlashCommands = require("agentic.acp.slash_commands")
 local SessionLifecycle = {}
 
 --- @param session agentic.SessionManager
---- @param method_name string
---- @param ... any
-local function call_session_method(session, method_name, ...)
-    local method = session[method_name]
-    if type(method) == "function" then
-        return method(session, ...)
-    end
-end
-
---- @param session agentic.SessionManager
---- @param field_name string
---- @param value any
-local function set_session_field(session, field_name, value)
-    rawset(session, field_name, value)
-end
-
---- @param session agentic.SessionManager
-local function clear_chat_activity(session)
-    if rawget(session, "_clear_chat_activity") ~= nil then
-        call_session_method(session, "_clear_chat_activity")
-        return
-    end
-
-    if session.status_animation and session.status_animation.stop then
-        session.status_animation:stop()
-    end
-end
-
---- @param session agentic.SessionManager
 --- @return agentic.acp.ClientHandlers
 local function build_handlers(session)
     return {
@@ -57,28 +28,27 @@ local function build_handlers(session)
         end,
 
         on_session_update = function(update)
-            call_session_method(session, "_on_session_update", update)
+            if type(session._on_session_update) == "function" then
+                session:_on_session_update(update)
+            end
         end,
 
         on_tool_call = function(tool_call)
-            call_session_method(session, "_on_tool_call", tool_call)
+            if type(session._on_tool_call) == "function" then
+                session:_on_tool_call(tool_call)
+            end
         end,
 
         on_tool_call_update = function(tool_call_update)
-            call_session_method(
-                session,
-                "_on_tool_call_update",
-                tool_call_update
-            )
+            if type(session._on_tool_call_update) == "function" then
+                session:_on_tool_call_update(tool_call_update)
+            end
         end,
 
         on_request_permission = function(request, callback)
-            call_session_method(
-                session,
-                "_handle_permission_request",
-                request,
-                callback
-            )
+            if type(session._handle_permission_request) == "function" then
+                session:_handle_permission_request(request, callback)
+            end
         end,
     }
 end
@@ -97,17 +67,25 @@ function SessionLifecycle.cancel(session)
     end
 
     session.session_id = nil
-    set_session_field(session, "_agent_phase", nil)
-    set_session_field(session, "_session_starting", false)
-    call_session_method(session, "_clear_inline_chat")
-    clear_chat_activity(session)
+    session._agent_phase = nil
+    session._session_starting = false
+    if type(session._clear_inline_chat) == "function" then
+        session:_clear_inline_chat()
+    end
+    if type(session._clear_chat_activity) == "function" then
+        session:_clear_chat_activity()
+    elseif session.status_animation and session.status_animation.stop then
+        session.status_animation:stop()
+    end
     session.permission_manager:clear()
     SlashCommands.setCommands(session.widget.buf_nrs.input, {})
 
     session.session_state:replace_persisted_session_data()
-    set_session_field(session, "_restored_turns_to_send", nil)
+    session._restored_turns_to_send = nil
     local was_visible = session.submission_queue:clear()
-    call_session_method(session, "_sync_queue_panel", was_visible)
+    if type(session._sync_queue_panel) == "function" then
+        session:_sync_queue_panel(was_visible)
+    end
 end
 
 --- @param session agentic.SessionManager
@@ -120,14 +98,18 @@ function SessionLifecycle.start(session, opts)
         SessionLifecycle.cancel(session)
     end
 
-    set_session_field(session, "_session_starting", true)
-    call_session_method(session, "_refresh_chat_activity")
+    session._session_starting = true
+    if type(session._refresh_chat_activity) == "function" then
+        session:_refresh_chat_activity()
+    end
 
     session.agent:create_session(
         build_handlers(session),
         function(response, err)
-            set_session_field(session, "_session_starting", false)
-            call_session_method(session, "_refresh_chat_activity")
+            session._session_starting = false
+            if type(session._refresh_chat_activity) == "function" then
+                session:_refresh_chat_activity()
+            end
 
             if err or not response then
                 session.session_id = nil
@@ -155,24 +137,21 @@ function SessionLifecycle.start(session, opts)
 
             if response.configOptions then
                 Logger.debug("Provider announce configOptions")
-                call_session_method(
-                    session,
-                    "_handle_new_config_options",
-                    response.configOptions
-                )
+                if type(session._handle_new_config_options) == "function" then
+                    session:_handle_new_config_options(response.configOptions)
+                end
             else
-                call_session_method(session, "_render_window_headers")
+                if type(session._render_window_headers) == "function" then
+                    session:_render_window_headers()
+                end
             end
 
             session.config_options:set_initial_mode(
-                session.agent.provider_config.default_mode,
-                function(mode)
-                    call_session_method(session, "_handle_mode_change", mode)
-                end
+                session.agent.provider_config.default_mode
             )
 
             if not restore_mode then
-                set_session_field(session, "_is_first_message", true)
+                session._is_first_message = true
             end
 
             vim.schedule(function()
@@ -218,13 +197,14 @@ function SessionLifecycle.switch_provider(session)
                                 }
                             )
                         )
-                        call_session_method(session, "_render_window_headers")
-                        set_session_field(
-                            session,
-                            "_restored_turns_to_send",
+                        if
+                            type(session._render_window_headers) == "function"
+                        then
+                            session:_render_window_headers()
+                        end
+                        session._restored_turns_to_send =
                             vim.deepcopy(persisted_session.turns or {})
-                        )
-                        set_session_field(session, "_is_first_message", true)
+                        session._is_first_message = true
                     end,
                 })
             end)
@@ -239,10 +219,16 @@ function SessionLifecycle.switch_provider(session)
         old_agent:cancel_session(old_session_id)
     end
     session.session_id = nil
-    set_session_field(session, "_agent_phase", nil)
-    set_session_field(session, "_session_starting", false)
-    call_session_method(session, "_clear_inline_chat")
-    clear_chat_activity(session)
+    session._agent_phase = nil
+    session._session_starting = false
+    if type(session._clear_inline_chat) == "function" then
+        session:_clear_inline_chat()
+    end
+    if type(session._clear_chat_activity) == "function" then
+        session:_clear_chat_activity()
+    elseif session.status_animation and session.status_animation.stop then
+        session.status_animation:stop()
+    end
     session.permission_manager:clear()
     session.todo_list:clear()
     session.agent = new_agent
@@ -254,13 +240,10 @@ end
 function SessionLifecycle.restore_session_data(session, persisted_session, opts)
     opts = opts or {}
 
-    set_session_field(session, "_restoring", true)
-    set_session_field(
-        session,
-        "_restored_turns_to_send",
+    session._restoring = true
+    session._restored_turns_to_send =
         vim.deepcopy(persisted_session.turns or {})
-    )
-    set_session_field(session, "_is_first_message", false)
+    session._is_first_message = false
 
     if opts.reuse_session then
         session.session_state:dispatch(
@@ -275,15 +258,15 @@ function SessionLifecycle.restore_session_data(session, persisted_session, opts)
     end
 
     if opts.reuse_session and session.session_id then
-        set_session_field(session, "_restoring", false)
-        set_session_field(session, "_restored_turns_to_send", nil)
+        session._restoring = false
+        session._restored_turns_to_send = nil
         return
     end
 
     session:new_session({
         restore_mode = true,
         on_created = function()
-            set_session_field(session, "_restoring", false)
+            session._restoring = false
         end,
     })
 end

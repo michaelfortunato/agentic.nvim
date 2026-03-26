@@ -11,8 +11,7 @@ local Logger = require("agentic.utils.logger")
 --- @field approval_preset? agentic.acp.ConfigOption
 --- @field _options agentic.acp.ConfigOption[]
 --- @field _options_by_id table<string, agentic.acp.ConfigOption>
---- @field _set_mode_callback fun(mode_id: string)
---- @field _set_model_callback fun(model_id: string)
+--- @field _provider_config agentic.acp.ACPProviderConfig|nil
 --- @field _set_config_option_callback fun(config_id: string, value: string)
 local AgentConfigOptions = {}
 AgentConfigOptions.__index = AgentConfigOptions
@@ -101,15 +100,40 @@ local function normalize_option_label(text)
     return vim.trim((text or ""):lower())
 end
 
---- @param option agentic.acp.ConfigOption|nil
+--- @param provider_config agentic.acp.ACPProviderConfig|nil
 --- @return boolean
-local function is_approval_preset_option(option)
+local function is_codex_provider(provider_config)
+    if not provider_config then
+        return false
+    end
+
+    local command = provider_config.command
+    local command_name = type(command) == "string" and vim.fs.basename(command)
+        or ""
+    if normalize_option_label(command_name) == "codex-acp" then
+        return true
+    end
+
+    local provider_name = normalize_option_label(provider_config.name)
+    return provider_name == "codex acp" or provider_name == "codex"
+end
+
+--- @param option agentic.acp.ConfigOption|nil
+--- @param provider_config agentic.acp.ACPProviderConfig|nil
+--- @return boolean
+local function is_approval_preset_option(option, provider_config)
     if not option then
         return false
     end
 
     local category = normalize_option_label(option.category)
-    return category == "approval_preset" or category == "approval preset"
+    if category == "approval_preset" or category == "approval preset" then
+        return true
+    end
+
+    return is_codex_provider(provider_config)
+        and category == "mode"
+        and normalize_option_label(option.name) == "approval preset"
 end
 
 --- @param parts string[]
@@ -122,16 +146,9 @@ local function append_summary_part(parts, label, value)
 end
 
 --- @param buffers agentic.ui.ChatWidget.BufNrs
---- @param set_mode_callback fun(mode_id: string)
---- @param set_model_callback fun(model_id: string)
 --- @param set_config_option_callback? fun(config_id: string, value: string)
 --- @return agentic.acp.AgentConfigOptions
-function AgentConfigOptions:new(
-    buffers,
-    set_mode_callback,
-    set_model_callback,
-    set_config_option_callback
-)
+function AgentConfigOptions:new(buffers, set_config_option_callback)
     self = setmetatable({
         mode = nil,
         model = nil,
@@ -139,8 +156,7 @@ function AgentConfigOptions:new(
         approval_preset = nil,
         _options = {},
         _options_by_id = {},
-        _set_mode_callback = set_mode_callback,
-        _set_model_callback = set_model_callback,
+        _provider_config = nil,
         _set_config_option_callback = set_config_option_callback
             or function() end,
     }, self)
@@ -193,11 +209,14 @@ function AgentConfigOptions:clear()
     self.approval_preset = nil
     self._options = {}
     self._options_by_id = {}
+    self._provider_config = nil
 end
 
 --- @param config_options agentic.acp.ConfigOption[]|nil
-function AgentConfigOptions:set_options(config_options)
+--- @param provider_config agentic.acp.ACPProviderConfig|nil
+function AgentConfigOptions:set_options(config_options, provider_config)
     self:clear()
+    self._provider_config = provider_config
 
     if not config_options then
         return
@@ -213,27 +232,31 @@ function AgentConfigOptions:set_options(config_options)
             self.model = option
         elseif option.category == "thought_level" then
             self.thought_level = option
-        elseif is_approval_preset_option(option) then
+        end
+
+        if is_approval_preset_option(option, self._provider_config) then
             self.approval_preset = option
         end
     end
 end
 
 --- @param target_mode string|nil
---- @param handle_mode_change fun(mode: string): any
-function AgentConfigOptions:set_initial_mode(target_mode, handle_mode_change)
+function AgentConfigOptions:set_initial_mode(target_mode)
     if not target_mode or target_mode == "" then
         Logger.debug("not setting initial mode", target_mode)
         return
     end
 
-    local mode = self:get_mode(target_mode)
-    if mode and self.mode and target_mode ~= self.mode.currentValue then
-        handle_mode_change(target_mode)
+    local mode_option = self:get_mode_option()
+    local mode = get_option_value(mode_option, target_mode)
+    if mode and mode_option then
+        if target_mode ~= mode_option.currentValue then
+            self._set_config_option_callback(mode_option.id, target_mode)
+        end
         return
     end
 
-    local current = self.mode and self.mode.currentValue or "unknown"
+    local current = mode_option and mode_option.currentValue or "unknown"
     Logger.notify(
         string.format(
             "Configured default_mode ‘%s’ not available. Using provider’s default ‘%s’",
@@ -288,44 +311,52 @@ function AgentConfigOptions:get_header_context()
     return table.concat(parts, " | ")
 end
 
---- @param mode_value string
---- @return agentic.acp.ConfigOption.Option|nil
-function AgentConfigOptions:get_mode(mode_value)
-    return get_option_value(self.mode, mode_value)
+--- @return agentic.acp.ConfigOption|nil
+function AgentConfigOptions:get_mode_option()
+    return self.mode
+end
+
+--- @return agentic.acp.ConfigOption|nil
+function AgentConfigOptions:get_model_option()
+    return self.model
+end
+
+--- @return agentic.acp.ConfigOption|nil
+function AgentConfigOptions:get_thought_level_option()
+    return self.thought_level
+end
+
+--- @return agentic.acp.ConfigOption|nil
+function AgentConfigOptions:get_approval_preset_option()
+    return self.approval_preset
 end
 
 --- @param mode_value string
---- @return string|nil
-function AgentConfigOptions:get_mode_name(mode_value)
-    local mode = self:get_mode(mode_value)
-    return mode and mode.name or nil
+--- @return agentic.acp.ConfigOption.Option|nil
+function AgentConfigOptions:get_mode(mode_value)
+    return get_option_value(self:get_mode_option(), mode_value)
 end
 
 --- @param mode_id string|nil
 function AgentConfigOptions:set_current_mode(mode_id)
-    if not mode_id or not self.mode then
+    local mode_option = self:get_mode_option()
+    if not mode_id or not mode_option then
         return
     end
 
-    self.mode.currentValue = mode_id
+    mode_option.currentValue = mode_id
 end
 
---- @param model_value string
---- @return agentic.acp.ConfigOption.Option|nil
-function AgentConfigOptions:get_model(model_value)
-    return get_option_value(self.model, model_value)
-end
-
---- @param handle_mode_change? fun(mode: string): any
 --- @return boolean shown
-function AgentConfigOptions:show_mode_selector(handle_mode_change)
-    handle_mode_change = handle_mode_change or self._set_mode_callback
-
+function AgentConfigOptions:show_mode_selector()
+    local mode_option = self:get_mode_option()
     local shown = self:_show_selector(
-        self.mode,
-        get_selector_prompt(self.mode or { name = "Agent Mode" }),
+        mode_option,
+        get_selector_prompt(mode_option or { name = "Agent Mode" }),
         function(value)
-            handle_mode_change(value)
+            if mode_option then
+                self._set_config_option_callback(mode_option.id, value)
+            end
         end
     )
 
@@ -340,16 +371,16 @@ function AgentConfigOptions:show_mode_selector(handle_mode_change)
     return shown
 end
 
---- @param handle_model_change? fun(model_id: string): any
 --- @return boolean shown
-function AgentConfigOptions:show_model_selector(handle_model_change)
-    handle_model_change = handle_model_change or self._set_model_callback
-
+function AgentConfigOptions:show_model_selector()
+    local model_option = self:get_model_option()
     local shown = self:_show_selector(
-        self.model,
-        get_selector_prompt(self.model or { name = "Model" }),
+        model_option,
+        get_selector_prompt(model_option or { name = "Model" }),
         function(value)
-            handle_model_change(value)
+            if model_option then
+                self._set_config_option_callback(model_option.id, value)
+            end
         end
     )
 
@@ -366,12 +397,15 @@ end
 
 --- @return boolean shown
 function AgentConfigOptions:show_thought_level_selector()
+    local thought_level_option = self:get_thought_level_option()
     local shown = self:_show_selector(
-        self.thought_level,
-        get_selector_prompt(self.thought_level or { name = "Reasoning Effort" }),
+        thought_level_option,
+        get_selector_prompt(
+            thought_level_option or { name = "Reasoning Effort" }
+        ),
         function(value)
-            if self.thought_level then
-                self._set_config_option_callback(self.thought_level.id, value)
+            if thought_level_option then
+                self._set_config_option_callback(thought_level_option.id, value)
             end
         end
     )
@@ -389,14 +423,18 @@ end
 
 --- @return boolean shown
 function AgentConfigOptions:show_approval_preset_selector()
+    local approval_preset_option = self:get_approval_preset_option()
     local shown = self:_show_selector(
-        self.approval_preset,
+        approval_preset_option,
         get_selector_prompt(
-            self.approval_preset or { name = "Approval Preset" }
+            approval_preset_option or { name = "Approval Preset" }
         ),
         function(value)
-            if self.approval_preset then
-                self._set_config_option_callback(self.approval_preset.id, value)
+            if approval_preset_option then
+                self._set_config_option_callback(
+                    approval_preset_option.id,
+                    value
+                )
             end
         end
     )
@@ -453,16 +491,6 @@ end
 
 --- @param option agentic.acp.ConfigOption
 function AgentConfigOptions:_show_config_option_selector(option)
-    if option.category == "mode" then
-        self:show_mode_selector()
-        return
-    end
-
-    if option.category == "model" then
-        self:show_model_selector()
-        return
-    end
-
     self:_show_selector(option, get_selector_prompt(option), function(value)
         self._set_config_option_callback(option.id, value)
     end)

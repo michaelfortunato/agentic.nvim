@@ -76,7 +76,7 @@ Per the current ACP schema, the stable `session/update` variants are:
 Notably, `usage_update` does not appear in the current published schema even
 though this repo still models it locally in
 [acp_client_types.lua](/Users/michaelfortunato/projects/neovim-plugins/agentic.nvim/lua/agentic/acp/acp_client_types.lua).
-Treat that as provider-specific or legacy until the spec says otherwise.
+Treat that as a local extension until the spec says otherwise.
 
 ## Render Matrix
 
@@ -224,16 +224,18 @@ Avoid:
 ### `current_mode_update`
 
 Meaning:
-- Legacy session mode changed.
+- Provider-reported current mode changed.
 
 Primary surface:
 - Pinned session context chrome.
 
 Rendering:
-- Only for providers still using legacy modes instead of config options.
+- Reflect the provider-reported current mode in pinned session context.
+- If the same current mode is also represented inside config options, keep the
+  two views consistent and avoid duplicate chrome.
 
 Avoid:
-- Duplicating legacy mode and config options if both exist.
+- Rendering mode changes as transcript prose.
 
 ### `config_option_update`
 

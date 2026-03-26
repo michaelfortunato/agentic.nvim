@@ -166,7 +166,6 @@ describe("agentic.ui.TodoList", function()
                 split = "below",
                 height = height,
             })
-            assert.equal(height, vim.api.nvim_win_get_height(winid))
             return winid
         end
 
@@ -258,8 +257,11 @@ describe("agentic.ui.TodoList", function()
 
         it("does not scroll when window is taller than content", function()
             -- Simulates real-world scenario: window has padding (height > entries)
-            -- e.g., 8 entries in a window of height 10 (due to dynamic height + padding)
+            -- Use the actual window height because split requests are not always
+            -- honored exactly in the full suite.
             open_todo_window(10)
+            ---@cast winid integer
+            local actual_height = vim.api.nvim_win_get_height(winid)
             local todo_list = TodoList:new(
                 bufnr,
                 on_change_spy --[[@as function]],
@@ -267,7 +269,7 @@ describe("agentic.ui.TodoList", function()
             )
 
             local entries = {}
-            for i = 1, 6 do
+            for i = 1, math.max(0, actual_height - 2) do
                 table.insert(entries, entry("Done " .. i, "completed"))
             end
             table.insert(entries, entry("Task A", "in_progress"))
@@ -275,7 +277,7 @@ describe("agentic.ui.TodoList", function()
 
             todo_list:render(entries)
 
-            -- total=8 <= win_height=10, all content fits, no scroll
+            assert.is_true(#entries <= actual_height)
             assert.equal(1, get_topline())
         end)
 

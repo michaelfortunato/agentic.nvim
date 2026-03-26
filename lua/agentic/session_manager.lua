@@ -9,6 +9,7 @@ local SessionSelectors = require("agentic.session.session_selectors")
 local SessionState = require("agentic.session.session_state")
 local SubmissionQueue = require("agentic.session.submission_queue")
 local SlashCommands = require("agentic.acp.slash_commands")
+local PermissionOption = require("agentic.utils.permission_option")
 
 --- Tool call kinds that mutate files on disk.
 --- When these complete, buffers must be reloaded via checktime.
@@ -112,6 +113,7 @@ end
 --- @field _agent_phase? agentic.Theme.SpinnerState
 --- @field _session_starting boolean
 --- @field _session_state_subscription? integer
+--- @field _pending_session_callbacks fun()[]
 local SessionManager = {}
 SessionManager.__index = SessionManager
 
@@ -141,13 +143,14 @@ function SessionManager:new(tab_page_id)
         submission_queue = SubmissionQueue:new(),
         _agent_phase = nil,
         _session_starting = false,
+        _pending_session_callbacks = {},
     }, self)
 
     local agent = AgentInstance.get_instance(Config.provider, function(_client)
         vim.schedule(function()
             -- Skip auto-new_session while a persisted session restore is in flight
             if not self._restoring then
-                self:new_session()
+                self:_ensure_session_started()
             end
         end)
     end)
@@ -182,12 +185,11 @@ function SessionManager:new(tab_page_id)
     )
     self.status_animation = StatusAnimation:new(self.widget.buf_nrs.chat)
     self.permission_manager = PermissionManager:new(self.session_state)
-    self.review_controller =
-        ReviewController:new(
-            self.session_state,
-            self.widget,
-            self.permission_manager
-        )
+    self.review_controller = ReviewController:new(
+        self.session_state,
+        self.widget,
+        self.permission_manager
+    )
     self.permission_manager:set_diff_review_handler(function(current_request)
         return self.review_controller:activate_diff_review(current_request)
     end)
@@ -210,12 +212,6 @@ function SessionManager:new(tab_page_id)
 
     self.config_options = AgentConfigOptions:new(
         self.widget.buf_nrs,
-        function(mode_id)
-            SessionManager._handle_mode_change(self, mode_id)
-        end,
-        function(model_id)
-            SessionManager._handle_model_change(self, model_id)
-        end,
         function(config_id, value)
             SessionManager._handle_config_option_change(self, config_id, value)
         end
@@ -323,6 +319,59 @@ function SessionManager:_setup_prompt_completion(file_picker_module)
         end,
     })
     SlashCommands.setup_completion(self.widget.buf_nrs.input)
+end
+
+function SessionManager:_drain_pending_session_callbacks()
+    if not self.session_id then
+        return
+    end
+
+    local callbacks = self._pending_session_callbacks or {}
+    if #callbacks == 0 then
+        return
+    end
+
+    self._pending_session_callbacks = {}
+
+    for _, callback in ipairs(callbacks) do
+        callback()
+    end
+end
+
+function SessionManager:_ensure_session_started()
+    if self.session_id then
+        self:_drain_pending_session_callbacks()
+        return
+    end
+
+    if self._session_starting then
+        return
+    end
+
+    if not self.agent or self.agent.state ~= "ready" then
+        return
+    end
+
+    self:new_session({
+        restore_mode = true,
+        on_created = function()
+            self:_drain_pending_session_callbacks()
+            self:_drain_queued_submissions()
+        end,
+    })
+end
+
+--- @param callback fun()
+function SessionManager:_with_active_session(callback)
+    if self.session_id then
+        callback()
+        return
+    end
+
+    self._pending_session_callbacks = self._pending_session_callbacks or {}
+    self._pending_session_callbacks[#self._pending_session_callbacks + 1] =
+        callback
+    self:_ensure_session_started()
 end
 
 --- @param input_text string
@@ -515,15 +564,12 @@ function SessionManager:_on_session_update(update)
     elseif update.sessionUpdate == "config_option_update" then
         self:_handle_new_config_options(update.configOptions)
     else
-        -- TODO: Move this to Logger from notify to debug when confidence is high
-        Logger.notify(
-            "Unknown session update type: "
-                .. tostring(
-                    --- @diagnostic disable-next-line: undefined-field -- expected it to be unknown
-                    update.sessionUpdate
-                ),
-            vim.log.levels.WARN,
-            { title = "⚠️ Unknown session update" }
+        Logger.debug(
+            "Unknown session update type: ",
+            tostring(
+                --- @diagnostic disable-next-line: undefined-field -- expected it to be unknown
+                update.sessionUpdate
+            )
         )
     end
 
@@ -602,13 +648,8 @@ function SessionManager:_handle_permission_request(request, callback)
     local tool_call_id = request.toolCall.toolCallId
 
     local wrapped_callback = function(option_id)
-        local permission_state = "dismissed"
-
-        if option_id == "allow_once" or option_id == "allow_always" then
-            permission_state = "approved"
-        elseif option_id == "reject_once" or option_id == "reject_always" then
-            permission_state = "rejected"
-        end
+        local permission_state =
+            PermissionOption.get_state_for_option_id(request.options, option_id)
 
         dispatch_state_events(self, {
             SessionEvents.set_interaction_tool_permission_state(
@@ -636,98 +677,6 @@ function SessionManager:_handle_permission_request(request, callback)
     })
     self.permission_manager:add_request(request, wrapped_callback)
     SessionManager._refresh_chat_activity(self)
-end
-
---- Send the newly selected mode to the agent and handle the response
---- @param mode_id string
-function SessionManager:_handle_mode_change(mode_id)
-    if not self.session_id then
-        return
-    end
-
-    local function callback(result, err)
-        if err then
-            Logger.notify(
-                string.format(
-                    "Failed to change mode to '%s': %s",
-                    mode_id,
-                    err.message
-                ),
-                vim.log.levels.ERROR
-            )
-        else
-            if result and result.configOptions then
-                Logger.debug("received result after setting mode")
-                self:_handle_new_config_options(result.configOptions)
-            else
-                self:_render_window_headers()
-                if self.inline_chat then
-                    self.inline_chat:refresh()
-                end
-            end
-
-            local mode_name = self.config_options:get_mode_name(mode_id)
-                or mode_id
-            Logger.notify(
-                with_live_config_note(
-                    "Mode changed to: " .. mode_name,
-                    self.is_generating
-                ),
-                vim.log.levels.INFO,
-                {
-                    title = "Agentic Mode changed",
-                }
-            )
-        end
-    end
-
-    local config_id = self.config_options.mode and self.config_options.mode.id
-        or "mode"
-    self.agent:set_config_option(self.session_id, config_id, mode_id, callback)
-end
-
---- Send the newly selected model to the agent
---- @param model_id string
-function SessionManager:_handle_model_change(model_id)
-    if not self.session_id then
-        return
-    end
-
-    local callback = function(result, err)
-        if err then
-            Logger.notify(
-                string.format(
-                    "Failed to change model to '%s': %s",
-                    model_id,
-                    err.message
-                ),
-                vim.log.levels.ERROR
-            )
-        else
-            if result and result.configOptions then
-                Logger.debug("received result after setting model")
-                self:_handle_new_config_options(result.configOptions)
-            else
-                self:_render_window_headers()
-                if self.inline_chat then
-                    self.inline_chat:refresh()
-                end
-            end
-
-            Logger.notify(
-                with_live_config_note(
-                    "Model changed to: " .. model_id,
-                    self.is_generating
-                ),
-                vim.log.levels.INFO,
-                { title = "Agentic Model changed" }
-            )
-        end
-    end
-
-    local config_id = self.config_options.model and self.config_options.model.id
-        or "model"
-    self.agent:set_config_option(self.session_id, config_id, model_id, callback)
 end
 
 --- Send a generic config option update to the agent
@@ -855,8 +804,20 @@ end
 --- @param submission agentic.SessionManager.QueuedSubmission
 function SessionManager:_enqueue_submission(submission)
     local was_visible = self.submission_queue:count() > 0
-    self.submission_queue:enqueue(submission)
+    local submission_id = self.submission_queue:enqueue(submission)
+
+    if submission.inline_request and self.inline_chat then
+        self.inline_chat:queue_request({
+            submission_id = submission_id,
+            prompt = submission.inline_request.prompt,
+            selection = submission.inline_request.selection,
+            source_bufnr = submission.inline_request.source_bufnr,
+            source_winid = submission.inline_request.source_winid,
+        })
+    end
+
     self:_sync_queue_panel(was_visible)
+    self:_sync_inline_queue_states()
 
     Logger.notify(
         "Queued follow-up. It will be sent when the agent is ready.",
@@ -866,13 +827,14 @@ function SessionManager:_enqueue_submission(submission)
 end
 
 function SessionManager:_drain_queued_submissions()
-    if self.is_generating then
+    if self.is_generating or not self.session_id then
         return
     end
 
     local was_visible = self.submission_queue:count() > 0
     local next_submission = self.submission_queue:pop_next()
     self:_sync_queue_panel(was_visible)
+    self:_sync_inline_queue_states()
 
     if next_submission then
         self:_dispatch_submission(next_submission)
@@ -900,7 +862,12 @@ function SessionManager:_remove_queued_submission(submission_id)
         return
     end
 
+    if removed_submission.inline_request and self.inline_chat then
+        self.inline_chat:remove_queued_submission(removed_submission.id)
+    end
+
     self:_sync_queue_panel(was_visible)
+    self:_sync_inline_queue_states()
 end
 
 --- @param submission_id integer
@@ -911,6 +878,7 @@ function SessionManager:_steer_queued_submission(submission_id)
     end
 
     self:_sync_queue_panel(true)
+    self:_sync_inline_queue_states()
 
     if not self.is_generating then
         self:_drain_queued_submissions()
@@ -927,6 +895,7 @@ function SessionManager:_send_queued_submission_now(submission_id)
             return
         end
 
+        self:_sync_inline_queue_states()
         self.agent:stop_generation(self.session_id)
         return
     end
@@ -938,7 +907,19 @@ function SessionManager:_send_queued_submission_now(submission_id)
         return
     end
 
+    self:_sync_inline_queue_states()
     self:_dispatch_submission(submission)
+end
+
+function SessionManager:_sync_inline_queue_states()
+    if not self.inline_chat or not self.submission_queue then
+        return
+    end
+
+    self.inline_chat:sync_queued_requests(self.submission_queue:list(), {
+        waiting_for_session = self.session_id == nil,
+        interrupt_submission = self.submission_queue:get_interrupt_submission(),
+    })
 end
 
 --- @param was_visible boolean|nil
@@ -1009,11 +990,18 @@ function SessionManager:_handle_input_submit(input_text)
         return
     end
 
-    if SessionManager._attach_mentioned_files then
-        SessionManager._attach_mentioned_files(self, input_text)
+    if not self.session_id then
+        self:_with_active_session(function()
+            self:_handle_input_submit(input_text)
+        end)
+        return
     end
 
-    local submission = SessionManager._prepare_submission(self, input_text, {
+    if self._attach_mentioned_files then
+        self:_attach_mentioned_files(input_text)
+    end
+
+    local submission = self:_prepare_submission(input_text, {
         code_selection = self.code_selection,
         file_list = self.file_list,
         diagnostics_list = self.diagnostics_list,
@@ -1030,6 +1018,18 @@ end
 
 --- @param submission agentic.SessionManager.QueuedSubmission
 function SessionManager:_dispatch_submission(submission)
+    if submission.inline_request and self.inline_chat then
+        self.inline_chat:begin_request({
+            submission_id = submission.id,
+            prompt = submission.inline_request.prompt,
+            selection = submission.inline_request.selection,
+            source_bufnr = submission.inline_request.source_bufnr,
+            source_winid = submission.inline_request.source_winid,
+            phase = "thinking",
+            status_text = "Preparing inline request",
+        })
+    end
+
     self.session_state:dispatch(
         SessionEvents.append_interaction_request(submission.request)
     )
@@ -1151,14 +1151,6 @@ function SessionManager:open_inline_chat(selection)
         return
     end
 
-    if self.is_generating then
-        Logger.notify(
-            "Stop the current response before starting a new inline request.",
-            vim.log.levels.WARN
-        )
-        return
-    end
-
     local inline_selection = selection
         or self.code_selection.get_selected_text()
     if not inline_selection then
@@ -1180,52 +1172,44 @@ function SessionManager:open_inline_chat(selection)
         return
     end
 
+    local source_bufnr = vim.api.nvim_get_current_buf()
+    local overlapping_submission_id = self.inline_chat
+            and self.inline_chat:find_overlapping_queued_submission(
+                source_bufnr,
+                inline_selection
+            )
+        or nil
+    if overlapping_submission_id ~= nil then
+        self:_remove_queued_submission(overlapping_submission_id)
+        Logger.notify(
+            "Removed queued inline request for this range.",
+            vim.log.levels.INFO
+        )
+        return
+    end
+
     self.inline_chat:open(inline_selection)
 end
 
 --- @param request {prompt: string, selection: agentic.Selection, source_bufnr: integer, source_winid: integer}
 --- @return boolean accepted
 function SessionManager:_submit_inline_request(request)
-    if self.is_generating then
-        Logger.notify(
-            "Stop the current response before starting a new inline request.",
-            vim.log.levels.WARN
-        )
-        return false
-    end
+    local submission = self:_prepare_submission(request.prompt, {
+        selections = { request.selection },
+        inline_instructions = PromptBuilder.build_inline_instructions(),
+    })
+    submission.inline_request = request
 
     if not self.session_id then
-        if self._session_starting then
-            Logger.notify(
-                "Agentic session is still starting. Retry in a moment.",
-                vim.log.levels.INFO
-            )
-            return false
-        end
-
-        self:new_session({
-            on_created = function()
-                self:_submit_inline_request(request)
-            end,
-        })
+        self:_enqueue_submission(submission)
+        self:_ensure_session_started()
         return true
     end
 
-    self.inline_chat:begin_request({
-        prompt = request.prompt,
-        selection = request.selection,
-        source_bufnr = request.source_bufnr,
-        source_winid = request.source_winid,
-        phase = "thinking",
-        status_text = "Preparing inline request",
-    })
-
-    local submission =
-        SessionManager._prepare_submission(self, request.prompt, {
-            selections = { request.selection },
-            inline_instructions = PromptBuilder.build_inline_instructions(),
-        })
-    submission.inline_request = request
+    if self.is_generating then
+        self:_enqueue_submission(submission)
+        return true
+    end
 
     self:_dispatch_submission(submission)
     return true
@@ -1288,7 +1272,10 @@ function SessionManager:_handle_new_config_options(new_config_options)
     self.session_state:dispatch(
         SessionEvents.set_config_options(new_config_options or {})
     )
-    self.config_options:set_options(new_config_options)
+    self.config_options:set_options(
+        new_config_options,
+        self.agent and self.agent.provider_config or nil
+    )
     self:_render_window_headers()
 
     if self.inline_chat then

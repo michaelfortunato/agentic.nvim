@@ -4,7 +4,7 @@
 --- notifications. Agentic's canonical interaction model is derived from the
 --- live session state and its ordered transcript event log.
 ---
---- Persisted session data remains a flat restore/storage format, but the
+--- Persisted session data stores ACP-shaped turns for disk/restore, but the
 --- public interaction model is state-first.
 ---
 --- Session-scoped updates such as `config_option_update`,
@@ -385,7 +385,7 @@ local function content_node_to_content(node)
     return nil
 end
 
---- @param request {kind?: "user"|"review"|nil, text?: string|nil, timestamp?: integer|nil, content?: agentic.acp.Content[]|agentic.acp.Content|nil}
+--- @param request {kind?: "user"|"review"|nil, text?: string|nil, timestamp?: integer|nil, content?: agentic.acp.Content[]|agentic.acp.Content|nil, content_nodes?: agentic.session.InteractionContentNode[]|nil, nodes?: agentic.session.InteractionRequestNode[]|nil}
 --- @return agentic.session.InteractionRequest
 local function make_request(request)
     local content = normalize_content_list(request.content)
@@ -413,43 +413,6 @@ local function make_request(request)
         content_nodes = content_nodes,
         nodes = build_request_nodes(request.text or "", content_nodes),
     }
-end
-
---- @param session agentic.session.InteractionSession
---- @param provider_name string|nil
---- @return agentic.session.InteractionTurn
-local function make_synthetic_turn(session, provider_name)
-    local turn = {
-        index = #session.turns + 1,
-        request = {
-            kind = "user",
-            text = "",
-            timestamp = nil,
-            content = {},
-            content_nodes = {},
-            nodes = {},
-        },
-        response = {
-            provider_name = provider_name,
-            nodes = {},
-        },
-        result = nil,
-    }
-
-    session.turns[#session.turns + 1] = turn
-    return turn
-end
-
---- @param session agentic.session.InteractionSession
---- @param current_turn agentic.session.InteractionTurn|nil
---- @param provider_name string|nil
---- @return agentic.session.InteractionTurn
-local function ensure_turn(session, current_turn, provider_name)
-    if current_turn then
-        return current_turn
-    end
-
-    return make_synthetic_turn(session, provider_name)
 end
 
 --- @param content agentic.acp.Content|agentic.acp.Content[]|nil
@@ -576,13 +539,9 @@ local function build_tool_call_content_nodes(tool_call)
 end
 
 --- @param turns agentic.session.InteractionTurn[]
---- @param provider_name string|nil
 --- @return agentic.session.InteractionTurn|nil
-local function ensure_runtime_turn(turns, provider_name)
-    local session = {
-        turns = turns,
-    }
-    return ensure_turn(session, turns[#turns], provider_name)
+local function current_runtime_turn(turns)
+    return turns[#turns]
 end
 
 --- @param tool_call agentic.ui.MessageWriter.ToolCallBlock
@@ -632,20 +591,6 @@ local function build_interaction_session(opts)
     }
 end
 
---- @param request agentic.session.InteractionRequest|nil
---- @return boolean
-local function request_has_content(request)
-    if not request then
-        return false
-    end
-
-    if request.text and request.text ~= "" then
-        return true
-    end
-
-    return not vim.tbl_isempty(request.content or {})
-end
-
 --- @param opts {session_id?: string|nil, title?: string|nil, timestamp?: integer|nil, current_mode_id?: string|nil, config_options?: agentic.acp.ConfigOption[]|nil, available_commands?: agentic.acp.AvailableCommand[]|nil, turns?: agentic.session.InteractionTurn[]|nil}
 --- @return agentic.session.InteractionSession
 function InteractionModel.from_persisted_session(opts)
@@ -681,7 +626,10 @@ function InteractionModel.append_response_content(
         return
     end
 
-    local turn = ensure_runtime_turn(turns, provider_name)
+    local turn = current_runtime_turn(turns)
+    if not turn then
+        return
+    end
     turn.response.provider_name = provider_name or turn.response.provider_name
 
     local last = turn.response.nodes[#turn.response.nodes]
@@ -708,7 +656,10 @@ end
 --- @param provider_name string|nil
 --- @param entries agentic.acp.PlanEntry[]
 function InteractionModel.upsert_plan(turns, provider_name, entries)
-    local turn = ensure_runtime_turn(turns, provider_name)
+    local turn = current_runtime_turn(turns)
+    if not turn then
+        return
+    end
     turn.response.provider_name = provider_name or turn.response.provider_name
     local last = turn.response.nodes[#turn.response.nodes]
     if last and last.type == "plan" then
@@ -803,7 +754,10 @@ function InteractionModel.upsert_tool_call(turns, provider_name, tool_call)
         end
     end
 
-    local turn = ensure_runtime_turn(turns, provider_name)
+    local turn = current_runtime_turn(turns)
+    if not turn then
+        return
+    end
     turn.response.provider_name = provider_name or turn.response.provider_name
     turn.response.nodes[#turn.response.nodes + 1] = node
 end
@@ -812,7 +766,10 @@ end
 --- @param result {stop_reason?: agentic.acp.StopReason|nil, timestamp?: integer|nil, error_text?: string|nil}
 --- @param provider_name string|nil
 function InteractionModel.set_turn_result(turns, result, provider_name)
-    local turn = ensure_runtime_turn(turns, provider_name)
+    local turn = current_runtime_turn(turns)
+    if not turn then
+        return
+    end
     turn.response.provider_name = provider_name or turn.response.provider_name
     turn.result = {
         stop_reason = result.stop_reason,

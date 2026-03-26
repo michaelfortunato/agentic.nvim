@@ -8,6 +8,7 @@ describe("agentic.Theme", function()
         "DiffDelete",
         "DiagnosticWarn",
         "DiagnosticInfo",
+        "DiagnosticHint",
         "Comment",
         "Directory",
         Theme.HL_GROUPS.DIFF_ADD_WORD,
@@ -16,6 +17,7 @@ describe("agentic.Theme", function()
         Theme.HL_GROUPS.SPINNER_GENERATING,
         Theme.HL_GROUPS.TRANSCRIPT_REQUEST_META,
         Theme.HL_GROUPS.TRANSCRIPT_RESPONSE_META,
+        Theme.HL_GROUPS.CHUNK_BOUNDARY,
         Theme.HL_GROUPS.THOUGHT_TEXT,
         Theme.HL_GROUPS.RESOURCE_LINK,
         Theme.HL_GROUPS.FOLD_HINT,
@@ -123,6 +125,11 @@ describe("agentic.Theme", function()
             vim.api.nvim_set_hl(0, "Comment", { fg = 0x111111, italic = false })
             vim.api.nvim_set_hl(
                 0,
+                "DiagnosticHint",
+                { fg = 0x333333, italic = false }
+            )
+            vim.api.nvim_set_hl(
+                0,
                 "Directory",
                 { fg = 0x222222, italic = false }
             )
@@ -137,6 +144,10 @@ describe("agentic.Theme", function()
                 name = Theme.HL_GROUPS.TRANSCRIPT_RESPONSE_META,
                 link = false,
             })
+            local chunk_boundary = vim.api.nvim_get_hl(
+                0,
+                { name = Theme.HL_GROUPS.CHUNK_BOUNDARY, link = false }
+            )
             local thought = vim.api.nvim_get_hl(
                 0,
                 { name = Theme.HL_GROUPS.THOUGHT_TEXT, link = false }
@@ -152,6 +163,8 @@ describe("agentic.Theme", function()
             assert.equal(0x111111, request_meta.fg)
             assert.is_true(request_meta.italic)
             assert.equal(0x111111, response_meta.fg)
+            assert.equal(0x333333, chunk_boundary.fg)
+            assert.is_true(chunk_boundary.underline)
             assert.equal(0x111111, thought.fg)
             assert.is_true(thought.italic)
             assert.equal(0x222222, resource_link.fg)

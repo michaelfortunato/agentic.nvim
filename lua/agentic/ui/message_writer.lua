@@ -12,6 +12,8 @@ local NS_DIFF_HIGHLIGHTS =
 local NS_THOUGHT = vim.api.nvim_create_namespace("agentic_thought_chunks")
 local NS_TRANSCRIPT_META =
     vim.api.nvim_create_namespace("agentic_transcript_meta")
+local NS_CHUNK_BOUNDARIES =
+    vim.api.nvim_create_namespace("agentic_chunk_boundaries")
 
 --- @class agentic.ui.MessageWriter.HighlightRange
 --- @field type "comment"|"old"|"new"|"new_modification"|"span" Type of highlight to apply
@@ -23,10 +25,14 @@ local NS_TRANSCRIPT_META =
 --- @field end_col? integer
 --- @field hl_group? string
 
+--- @class agentic.ui.MessageWriter.ChunkBoundary
+--- @field line_index integer Line index relative to returned lines (0-based)
+--- @field col integer Byte column within the rendered line
+
 --- @class agentic.ui.MessageWriter.ToolCallDiff
 --- @field new string[]
 --- @field old string[]
---- @field all? boolean TODO: check if it's still necessary to replace all occurrences or the agents send multiple requests
+--- @field all? boolean
 
 --- @class agentic.ui.MessageWriter.ToolCallBlock
 --- @field tool_call_id string
@@ -649,15 +655,46 @@ local function sanitize_single_line(text)
 end
 
 --- @param text string|nil
---- @param max_length integer
+--- @param max_length integer|nil
 --- @return string
 local function truncate_single_line(text, max_length)
     local sanitized = sanitize_single_line(text)
-    if #sanitized <= max_length then
+    if not max_length or max_length <= 0 then
         return sanitized
     end
 
-    return sanitized:sub(1, math.max(max_length - 3, 0)) .. "..."
+    if vim.fn.strdisplaywidth(sanitized) <= max_length then
+        return sanitized
+    end
+
+    local ellipsis = "..."
+    local limit = math.max(1, max_length - vim.fn.strdisplaywidth(ellipsis))
+    local truncated = sanitized
+
+    while truncated ~= "" and vim.fn.strdisplaywidth(truncated) > limit do
+        truncated =
+            vim.fn.strcharpart(truncated, 0, vim.fn.strchars(truncated) - 1)
+    end
+
+    if truncated == "" then
+        return ellipsis
+    end
+
+    return truncated .. ellipsis
+end
+
+--- @param render_width integer|nil
+--- @param level integer
+--- @param prefix string|nil
+--- @return integer|nil
+local function get_available_line_width(render_width, level, prefix)
+    if not render_width or render_width <= 0 then
+        return nil
+    end
+
+    local reserved =
+        vim.fn.strdisplaywidth(indent_prefix(level) .. (prefix or ""))
+    return math.max(1, render_width - reserved)
 end
 
 --- @param uri string|nil
@@ -735,6 +772,75 @@ local function split_content_lines(text)
     return vim.split(text, "\n", { plain = true })
 end
 
+--- @param chunks string[]
+--- @return string[] lines
+--- @return agentic.ui.MessageWriter.ChunkBoundary[] boundaries
+local function merge_text_chunks(chunks)
+    local lines = {}
+
+    --- @type agentic.ui.MessageWriter.ChunkBoundary[]
+    local boundaries = {}
+
+    if not chunks or #chunks == 0 then
+        return lines, boundaries
+    end
+
+    local current_line = {}
+    local current_col = 0
+    local line_index = 0
+    local has_any_chunk = false
+
+    local function append_segment(segment)
+        if segment == "" then
+            return
+        end
+
+        current_line[#current_line + 1] = segment
+        current_col = current_col + #segment
+    end
+
+    local function flush_line()
+        lines[#lines + 1] = table.concat(current_line)
+        current_line = {}
+        current_col = 0
+        line_index = line_index + 1
+    end
+
+    for chunk_index, chunk in ipairs(chunks) do
+        if chunk ~= "" then
+            has_any_chunk = true
+            local start_col = 1
+
+            while true do
+                local newline_col = chunk:find("\n", start_col, true)
+                if not newline_col then
+                    append_segment(chunk:sub(start_col))
+                    break
+                end
+
+                append_segment(chunk:sub(start_col, newline_col - 1))
+                flush_line()
+                start_col = newline_col + 1
+            end
+        end
+
+        if chunk_index < #chunks then
+            boundaries[#boundaries + 1] = {
+                line_index = line_index,
+                col = current_col,
+            }
+        end
+    end
+
+    if not has_any_chunk then
+        return {}, {}
+    end
+
+    lines[#lines + 1] = table.concat(current_line)
+
+    return lines, boundaries
+end
+
 --- @param buffered_text string|nil
 --- @param append_line fun(line: string)
 --- @return string|nil
@@ -808,6 +914,27 @@ apply_block_hierarchy = function(lines, base_level)
     end
 
     return formatted
+end
+
+--- @param chunk_boundaries agentic.ui.MessageWriter.ChunkBoundary[]|nil
+--- @param lines string[]
+--- @param base_level integer|nil
+local function offset_chunk_boundaries(chunk_boundaries, lines, base_level)
+    if not base_level or base_level <= 0 then
+        return
+    end
+
+    local offset = #indent_prefix(base_level)
+    if offset == 0 then
+        return
+    end
+
+    for _, boundary in ipairs(chunk_boundaries or {}) do
+        local line = lines[boundary.line_index + 1]
+        if line and line ~= "" then
+            boundary.col = boundary.col + offset
+        end
+    end
 end
 
 --- @param highlight_ranges agentic.ui.MessageWriter.HighlightRange[]
@@ -1329,23 +1456,39 @@ end
 --- @param lines string[]
 --- @param highlight_ranges agentic.ui.MessageWriter.HighlightRange[]
 --- @param tool_call_block agentic.ui.MessageWriter.ToolCallBlock
-local function append_tool_header(lines, highlight_ranges, tool_call_block)
+--- @param render_width integer|nil
+local function append_tool_header(
+    lines,
+    highlight_ranges,
+    tool_call_block,
+    render_width
+)
     local is_collapsible = tool_call_block.collapsed ~= nil
     local prefix = is_collapsible
             and (tool_call_block.collapsed and "▸ " or "▾ ")
         or ""
+    local title = truncate_single_line(
+        build_tool_title(tool_call_block),
+        get_available_line_width(render_width, HIERARCHY_LEVEL.detail, prefix)
+    )
 
     append_spanned_line(lines, highlight_ranges, {
         { prefix, "Comment" },
-        { build_tool_title(tool_call_block), Theme.HL_GROUPS.CARD_TITLE },
+        { title, Theme.HL_GROUPS.CARD_TITLE },
     })
 end
 
 --- @param lines string[]
 --- @param highlight_ranges agentic.ui.MessageWriter.HighlightRange[]
 --- @param tool_call_block agentic.ui.MessageWriter.ToolCallBlock
-local function append_read_card(lines, highlight_ranges, tool_call_block)
-    append_tool_header(lines, highlight_ranges, tool_call_block)
+--- @param render_width integer|nil
+local function append_read_card(
+    lines,
+    highlight_ranges,
+    tool_call_block,
+    render_width
+)
+    append_tool_header(lines, highlight_ranges, tool_call_block, render_width)
 
     local summaries = build_tool_semantic_summaries(tool_call_block)
     if #summaries == 0 then
@@ -1356,7 +1499,16 @@ local function append_read_card(lines, highlight_ranges, tool_call_block)
         append_highlighted_line(
             lines,
             highlight_ranges,
-            indent_text(summary, HIERARCHY_LEVEL.detail),
+            indent_text(
+                truncate_single_line(
+                    summary,
+                    get_available_line_width(
+                        render_width,
+                        HIERARCHY_LEVEL.nested
+                    )
+                ),
+                HIERARCHY_LEVEL.detail
+            ),
             Theme.HL_GROUPS.CARD_DETAIL
         )
     end
@@ -1384,8 +1536,14 @@ end
 --- @param lines string[]
 --- @param highlight_ranges agentic.ui.MessageWriter.HighlightRange[]
 --- @param tool_call_block agentic.ui.MessageWriter.ToolCallBlock
-local function append_result_card(lines, highlight_ranges, tool_call_block)
-    append_tool_header(lines, highlight_ranges, tool_call_block)
+--- @param render_width integer|nil
+local function append_result_card(
+    lines,
+    highlight_ranges,
+    tool_call_block,
+    render_width
+)
+    append_tool_header(lines, highlight_ranges, tool_call_block, render_width)
 
     local summaries = build_tool_semantic_summaries(tool_call_block)
     if #summaries == 0 then
@@ -1396,7 +1554,16 @@ local function append_result_card(lines, highlight_ranges, tool_call_block)
         append_highlighted_line(
             lines,
             highlight_ranges,
-            indent_text(summary, HIERARCHY_LEVEL.detail),
+            indent_text(
+                truncate_single_line(
+                    summary,
+                    get_available_line_width(
+                        render_width,
+                        HIERARCHY_LEVEL.nested
+                    )
+                ),
+                HIERARCHY_LEVEL.detail
+            ),
             Theme.HL_GROUPS.CARD_DETAIL
         )
     end
@@ -1771,7 +1938,13 @@ end
 --- @param tool_call_block agentic.ui.MessageWriter.ToolCallBlock
 --- @param lines string[]
 --- @param highlight_ranges agentic.ui.MessageWriter.HighlightRange[]
-local function append_diff_card(lines, highlight_ranges, tool_call_block)
+--- @param render_width integer|nil
+local function append_diff_card(
+    lines,
+    highlight_ranges,
+    tool_call_block,
+    render_width
+)
     local diff_path = tool_call_block.file_path or ""
     local stats, samples, sampled_changes
     if tool_call_block.diff or tool_call_block._diff_sources then
@@ -1790,18 +1963,32 @@ local function append_diff_card(lines, highlight_ranges, tool_call_block)
     end
     local additions, deletions = build_diff_totals(stats)
     local is_collapsed = tool_call_block.collapsed ~= false
+    local prefix = is_collapsed and "▸ " or "▾ "
+    local action_text = get_diff_action_label(tool_call_block.kind) .. " "
+    local additions_text = string.format("+%d", additions)
+    local deletions_text = string.format("-%d", deletions)
+    local path_text = truncate_single_line(
+        diff_path ~= "" and format_compact_path(diff_path) or "untitled",
+        get_available_line_width(
+            render_width,
+            HIERARCHY_LEVEL.detail,
+            prefix
+                .. action_text
+                .. " "
+                .. additions_text
+                .. " "
+                .. deletions_text
+        )
+    )
 
     append_spanned_line(lines, highlight_ranges, {
-        { is_collapsed and "▸ " or "▾ ", "Comment" },
-        { get_diff_action_label(tool_call_block.kind) .. " ", "Comment" },
-        {
-            diff_path ~= "" and format_compact_path(diff_path) or "untitled",
-            "Directory",
-        },
+        { prefix, "Comment" },
+        { action_text, "Comment" },
+        { path_text, "Directory" },
         { " ", "Comment" },
-        { string.format("+%d", additions), Theme.HL_GROUPS.DIFF_ADD },
+        { additions_text, Theme.HL_GROUPS.DIFF_ADD },
         { " ", "Comment" },
-        { string.format("-%d", deletions), Theme.HL_GROUPS.DIFF_DELETE },
+        { deletions_text, Theme.HL_GROUPS.DIFF_DELETE },
     })
 
     local summary = build_diff_summary_line(stats)
@@ -1905,9 +2092,10 @@ local function append_diff_card(lines, highlight_ranges, tool_call_block)
 end
 
 --- @param tool_call_block agentic.ui.MessageWriter.ToolCallBlock
+--- @param render_width integer|nil
 --- @return string[] lines Array of lines to render
 --- @return agentic.ui.MessageWriter.HighlightRange[] highlight_ranges Array of highlight range specifications (relative to returned lines)
-function MessageWriter:_prepare_block_lines(tool_call_block)
+function MessageWriter:_prepare_block_lines(tool_call_block, render_width)
     local kind = tool_call_block.kind
 
     local lines = {}
@@ -1916,11 +2104,16 @@ function MessageWriter:_prepare_block_lines(tool_call_block)
     local highlight_ranges = {}
 
     if kind == "read" then
-        append_read_card(lines, highlight_ranges, tool_call_block)
+        append_read_card(lines, highlight_ranges, tool_call_block, render_width)
     elseif tool_call_block.diff then
-        append_diff_card(lines, highlight_ranges, tool_call_block)
+        append_diff_card(lines, highlight_ranges, tool_call_block, render_width)
     else
-        append_result_card(lines, highlight_ranges, tool_call_block)
+        append_result_card(
+            lines,
+            highlight_ranges,
+            tool_call_block,
+            render_width
+        )
     end
 
     if should_render_status_line(tool_call_block.status) then
@@ -2009,6 +2202,51 @@ function MessageWriter:_apply_block_highlights(
 end
 
 --- @param start_row integer
+--- @param boundaries agentic.ui.MessageWriter.ChunkBoundary[]|nil
+function MessageWriter:_apply_chunk_boundary_highlights(start_row, boundaries)
+    if not Config.debug or not boundaries or #boundaries == 0 then
+        return
+    end
+
+    for _, boundary in ipairs(boundaries) do
+        local buffer_line = start_row + boundary.line_index
+        local line = vim.api.nvim_buf_get_lines(
+            self.bufnr,
+            buffer_line,
+            buffer_line + 1,
+            false
+        )[1] or ""
+
+        if line ~= "" then
+            local start_col = boundary.col
+            local end_col = boundary.col + 1
+
+            if boundary.col > 0 then
+                start_col = boundary.col - 1
+                end_col = boundary.col
+            end
+
+            start_col = math.max(0, math.min(start_col, #line - 1))
+            end_col = math.max(start_col + 1, math.min(end_col, #line))
+
+            if end_col > start_col then
+                vim.api.nvim_buf_set_extmark(
+                    self.bufnr,
+                    NS_CHUNK_BOUNDARIES,
+                    buffer_line,
+                    start_col,
+                    {
+                        end_col = end_col,
+                        hl_group = Theme.HL_GROUPS.CHUNK_BOUNDARY,
+                        right_gravity = false,
+                    }
+                )
+            end
+        end
+    end
+end
+
+--- @param start_row integer
 --- @param highlight_ranges agentic.ui.MessageWriter.HighlightRange[]
 function MessageWriter:_apply_diff_highlights(start_row, highlight_ranges)
     if not highlight_ranges or #highlight_ranges == 0 then
@@ -2087,20 +2325,38 @@ end
 
 --- @param lines string[]
 --- @param content_nodes agentic.session.InteractionContentNode[]|nil
---- @param opts {show_embedded_text?: boolean|nil}
+--- @param opts {show_embedded_text?: boolean|nil, chunk_boundaries?: agentic.ui.MessageWriter.ChunkBoundary[]|nil}
 local function append_semantic_content_lines(lines, content_nodes, opts)
     opts = opts or {}
-    local buffered_text = nil
+    local buffered_text_chunks = {}
 
     local function flush_text_content()
-        buffered_text = flush_buffered_text_lines(buffered_text, function(line)
+        local start_line = #lines
+        local merged_lines, chunk_boundaries =
+            merge_text_chunks(buffered_text_chunks)
+
+        for _, line in ipairs(merged_lines) do
             lines[#lines + 1] = line
-        end)
+        end
+
+        if opts.chunk_boundaries then
+            for _, boundary in ipairs(chunk_boundaries) do
+                opts.chunk_boundaries[#opts.chunk_boundaries + 1] = {
+                    line_index = start_line + boundary.line_index,
+                    col = boundary.col,
+                }
+            end
+        end
+
+        buffered_text_chunks = {}
     end
 
     for _, content_node in ipairs(content_nodes or {}) do
         if content_node.type == "text_content" then
-            buffered_text = (buffered_text or "") .. (content_node.text or "")
+            local text = content_node.text or ""
+            if text ~= "" then
+                buffered_text_chunks[#buffered_text_chunks + 1] = text
+            end
         elseif content_node.type == "resource_link_content" then
             flush_text_content()
             local label = get_content_display_name(content_node)
@@ -2176,12 +2432,18 @@ end
 
 --- @param content_nodes agentic.session.InteractionContentNode[]|nil
 --- @return string[]
+--- @return agentic.ui.MessageWriter.ChunkBoundary[]
 local function build_semantic_content_lines(content_nodes)
     local lines = {}
+
+    --- @type agentic.ui.MessageWriter.ChunkBoundary[]
+    local chunk_boundaries = {}
+
     append_semantic_content_lines(lines, content_nodes, {
         show_embedded_text = false,
+        chunk_boundaries = chunk_boundaries,
     })
-    return lines
+    return lines, chunk_boundaries
 end
 
 --- @param request agentic.session.InteractionRequest
@@ -2496,7 +2758,13 @@ end
 --- @param lines string[]
 --- @param highlight_ranges agentic.ui.MessageWriter.HighlightRange[]
 --- @param tracker agentic.ui.MessageWriter.RequestContentBlock
-local function append_request_content_card(lines, highlight_ranges, tracker)
+--- @param render_width integer|nil
+local function append_request_content_card(
+    lines,
+    highlight_ranges,
+    tracker,
+    render_width
+)
     append_spanned_line(lines, highlight_ranges, {
         { tracker.collapsed and "▸ " or "▾ ", "Comment" },
         {
@@ -2511,7 +2779,16 @@ local function append_request_content_card(lines, highlight_ranges, tracker)
         append_highlighted_line(
             lines,
             highlight_ranges,
-            indent_text(summary, HIERARCHY_LEVEL.detail),
+            indent_text(
+                truncate_single_line(
+                    summary,
+                    get_available_line_width(
+                        render_width,
+                        HIERARCHY_LEVEL.nested
+                    )
+                ),
+                HIERARCHY_LEVEL.detail
+            ),
             Theme.HL_GROUPS.CARD_DETAIL
         )
     end
@@ -2539,15 +2816,19 @@ local function append_request_content_card(lines, highlight_ranges, tracker)
 end
 
 --- @param tracker agentic.ui.MessageWriter.RequestContentBlock
+--- @param render_width integer|nil
 --- @return string[]
 --- @return agentic.ui.MessageWriter.HighlightRange[]
-function MessageWriter:_prepare_request_content_block_lines(tracker)
+function MessageWriter:_prepare_request_content_block_lines(
+    tracker,
+    render_width
+)
     local lines = {}
 
     --- @type agentic.ui.MessageWriter.HighlightRange[]
     local highlight_ranges = {}
 
-    append_request_content_card(lines, highlight_ranges, tracker)
+    append_request_content_card(lines, highlight_ranges, tracker, render_width)
     table.insert(lines, "")
 
     offset_highlight_ranges(highlight_ranges, lines, HIERARCHY_LEVEL.detail)
@@ -2801,11 +3082,17 @@ function MessageWriter:render_interaction_session(interaction_session, opts)
     self:reset()
     self._last_interaction_session = vim.deepcopy(interaction_session)
     self._last_render_opts = vim.deepcopy(opts)
+    local winid = vim.fn.bufwinid(self.bufnr)
+    local render_width = nil
+    if winid ~= -1 and vim.api.nvim_win_is_valid(winid) then
+        render_width = math.max(8, vim.api.nvim_win_get_width(winid) - 1)
+    end
 
     local lines = {}
     local meta_blocks = {}
     local thought_blocks = {}
     local fold_blocks = {}
+    local chunk_boundary_blocks = {}
 
     local function append_block(block_lines, block_opts)
         if not block_lines or #block_lines == 0 then
@@ -2844,6 +3131,13 @@ function MessageWriter:render_interaction_session(interaction_session, opts)
                 tracker = block_opts.fold.tracker,
             }
         end
+
+        if block_opts and block_opts.chunk_boundaries then
+            chunk_boundary_blocks[#chunk_boundary_blocks + 1] = {
+                start_row = start_row,
+                boundaries = vim.deepcopy(block_opts.chunk_boundaries),
+            }
+        end
     end
 
     append_block(opts.welcome_lines or {}, { meta = true })
@@ -2873,7 +3167,10 @@ function MessageWriter:render_interaction_session(interaction_session, opts)
                 self._request_content_blocks[item.tracker.block_id] =
                     item.tracker
                 local block_lines, highlight_ranges =
-                    self:_prepare_request_content_block_lines(item.tracker)
+                    self:_prepare_request_content_block_lines(
+                        item.tracker,
+                        render_width
+                    )
                 append_block(block_lines, {
                     join_with_previous = join_with_previous,
                     fold = {
@@ -2912,37 +3209,51 @@ function MessageWriter:render_interaction_session(interaction_session, opts)
             local join_with_previous = joined_to_response_header
             joined_to_response_header = false
             if item.type == "message" then
-                local block_lines =
+                local block_lines, chunk_boundaries =
                     build_semantic_content_lines(item.content_nodes)
                 if #block_lines == 0 then
                     block_lines =
                         vim.split(item.text or "", "\n", { plain = true })
+                    chunk_boundaries = {}
                 end
-                append_block(
-                    apply_block_hierarchy(block_lines, HIERARCHY_LEVEL.detail),
-                    { join_with_previous = join_with_previous }
+                block_lines =
+                    apply_block_hierarchy(block_lines, HIERARCHY_LEVEL.detail)
+                offset_chunk_boundaries(
+                    chunk_boundaries,
+                    block_lines,
+                    HIERARCHY_LEVEL.detail
                 )
+                append_block(block_lines, {
+                    join_with_previous = join_with_previous,
+                    chunk_boundaries = chunk_boundaries,
+                })
             elseif item.type == "thought" then
-                local block_lines =
+                local block_lines, chunk_boundaries =
                     build_semantic_content_lines(item.content_nodes)
                 if #block_lines == 0 then
                     block_lines =
                         vim.split(item.text or "", "\n", { plain = true })
+                    chunk_boundaries = {}
                 end
-                append_block(
-                    apply_block_hierarchy(block_lines, HIERARCHY_LEVEL.detail),
-                    {
-                        thought = true,
-                        join_with_previous = join_with_previous,
-                    }
+                block_lines =
+                    apply_block_hierarchy(block_lines, HIERARCHY_LEVEL.detail)
+                offset_chunk_boundaries(
+                    chunk_boundaries,
+                    block_lines,
+                    HIERARCHY_LEVEL.detail
                 )
+                append_block(block_lines, {
+                    thought = true,
+                    join_with_previous = join_with_previous,
+                    chunk_boundaries = chunk_boundaries,
+                })
             elseif item.type == "plan" then
                 append_block(build_plan_lines(item), {
                     join_with_previous = join_with_previous,
                 })
             elseif item.type == "tool_call" and item.tracker then
                 local block_lines, highlight_ranges =
-                    self:_prepare_block_lines(item.tracker)
+                    self:_prepare_block_lines(item.tracker, render_width)
                 append_block(block_lines, {
                     join_with_previous = join_with_previous,
                     fold = {
@@ -2964,6 +3275,7 @@ function MessageWriter:render_interaction_session(interaction_session, opts)
         vim.api.nvim_buf_clear_namespace(bufnr, NS_DIFF_HIGHLIGHTS, 0, -1)
         vim.api.nvim_buf_clear_namespace(bufnr, NS_THOUGHT, 0, -1)
         vim.api.nvim_buf_clear_namespace(bufnr, NS_TRANSCRIPT_META, 0, -1)
+        vim.api.nvim_buf_clear_namespace(bufnr, NS_CHUNK_BOUNDARIES, 0, -1)
         vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
 
         for _, block in ipairs(meta_blocks) do
@@ -2972,6 +3284,13 @@ function MessageWriter:render_interaction_session(interaction_session, opts)
 
         for _, block in ipairs(thought_blocks) do
             self:_apply_thought_block_highlights(block.start_row, block.end_row)
+        end
+
+        for _, block in ipairs(chunk_boundary_blocks) do
+            self:_apply_chunk_boundary_highlights(
+                block.start_row,
+                block.boundaries
+            )
         end
 
         for _, block in ipairs(fold_blocks) do

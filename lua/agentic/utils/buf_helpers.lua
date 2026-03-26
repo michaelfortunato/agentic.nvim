@@ -98,6 +98,46 @@ function BufHelpers.multi_keymap_set(keymaps, bufnr, callback, opts)
     end
 end
 
+--- Resolves the first configured keymap for a given mode.
+--- Bare string bindings are treated as normal-mode bindings, which matches
+--- multi_keymap_set's default behavior.
+--- @param keymaps agentic.UserConfig.KeymapValue
+--- @param mode string
+--- @return string|nil
+function BufHelpers.find_keymap(keymaps, mode)
+    if type(keymaps) == "string" then
+        return mode == "n" and keymaps or nil
+    end
+
+    if type(keymaps) ~= "table" then
+        return nil
+    end
+
+    for _, keymap in ipairs(keymaps) do
+        if type(keymap) == "string" and mode == "n" then
+            return keymap
+        end
+
+        if type(keymap) == "table" then
+            if keymap.mode == mode then
+                return keymap[1]
+            end
+
+            local keymap_modes = keymap.mode
+            if type(keymap_modes) == "table" then
+                --- @cast keymap_modes string[]
+                for _, candidate_mode in ipairs(keymap_modes) do
+                    if candidate_mode == mode then
+                        return keymap[1]
+                    end
+                end
+            end
+        end
+    end
+
+    return nil
+end
+
 --- @param bufnr integer
 --- @return boolean
 function BufHelpers.is_buffer_empty(bufnr)

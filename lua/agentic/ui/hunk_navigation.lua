@@ -35,6 +35,14 @@ local function get_state(bufnr)
     return buffer_state[bufnr]
 end
 
+--- @param bufnr number
+function M.invalidate_cache(bufnr)
+    local state = buffer_state[bufnr]
+    if state then
+        state.anchors_cache = nil
+    end
+end
+
 --- Get all hunk positions (first deleted line per hunk)
 --- Falls back to virtual line anchor for pure insertions.
 --- Groups consecutive deleted lines (only returns first line of each group).
@@ -286,12 +294,16 @@ end
 --- Restore saved keymaps for buffer
 --- @param bufnr number
 function M.restore_keymaps(bufnr)
+    local state = buffer_state[bufnr]
+    if not state then
+        return
+    end
+
     local keymaps = Config.keymaps.diff_preview
     pcall(vim.api.nvim_buf_del_keymap, bufnr, "n", keymaps.next_hunk)
     pcall(vim.api.nvim_buf_del_keymap, bufnr, "n", keymaps.prev_hunk)
 
-    local state = buffer_state[bufnr]
-    if state and state.saved_keymaps then
+    if state.saved_keymaps then
         for _, saved_map in pairs(state.saved_keymaps) do
             if saved_map and saved_map.lhs then
                 local opts = { buffer = bufnr }

@@ -27,7 +27,7 @@ function AgentInstance.get_instance(provider_name, on_ready)
 
     if client then
         if on_ready then
-            on_ready(client)
+            client:on_ready(on_ready)
         end
         return client
     end

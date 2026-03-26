@@ -245,4 +245,24 @@ describe("agentic.session.InteractionModel", function()
             assert.equal("review", session.available_commands[1].name)
         end
     )
+
+    it("does not invent synthetic turns for response-only updates", function()
+        local turns = {}
+
+        InteractionModel.append_response_content(
+            turns,
+            "message",
+            "Codex ACP",
+            { type = "text", text = "done" }
+        )
+        InteractionModel.upsert_plan(turns, "Codex ACP", {
+            { content = "Step", status = "in_progress" },
+        })
+        InteractionModel.set_turn_result(turns, {
+            stop_reason = "end_turn",
+            timestamp = 20,
+        }, "Codex ACP")
+
+        assert.equal(0, #turns)
+    end)
 end)

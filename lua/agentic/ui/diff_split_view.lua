@@ -269,8 +269,8 @@ function M.show_split_diff(opts)
         opts.diff.all
     )
     if not modified_lines then
-        Logger.notify(
-            "show_split_diff: could not match diff in file, the agent will most likely fail and retry"
+        Logger.debug(
+            "show_split_diff: could not match diff in file, falling back to inline preview"
         )
         return false
     end

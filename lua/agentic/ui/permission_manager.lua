@@ -1,6 +1,7 @@
 local Chooser = require("agentic.ui.chooser")
 local Config = require("agentic.config")
 local Logger = require("agentic.utils.logger")
+local PermissionOption = require("agentic.utils.permission_option")
 local SessionEvents = require("agentic.session.session_events")
 local SessionSelectors = require("agentic.session.session_selectors")
 local SessionState = require("agentic.session.session_state")
@@ -19,9 +20,14 @@ local PERMISSION_KIND_PRIORITY = {
     reject_always = 4,
 }
 
+--- @class agentic.ui.PermissionManager.PermissionRequest
+--- @field toolCallId string
+--- @field request agentic.acp.RequestPermission
+--- @field callback fun(option_id: string|nil)
+
 --- @class agentic.ui.PermissionManager
 --- @field session_state agentic.session.SessionState
---- @field queue table[] Queue of pending requests {toolCallId, request, callback}
+--- @field queue agentic.ui.PermissionManager.PermissionRequest[]
 --- @field current_request? agentic.ui.PermissionManager.PermissionRequest Currently displayed request
 --- @field _chooser_tabpage? integer
 --- @field _diff_review_handler? fun(current_request: agentic.ui.PermissionManager.PermissionRequest): boolean|nil
@@ -44,7 +50,7 @@ function PermissionManager:new(session_state)
     instance:_sync_state()
     instance._state_listener_id = instance.session_state:subscribe(
         function(state)
-            instance:_sync_state(state)
+            PermissionManager._sync_state(instance, state)
         end
     )
 
@@ -55,7 +61,9 @@ end
 function PermissionManager:_sync_state(state)
     state = state or self.session_state:get_state()
     self.queue = SessionSelectors.get_permission_queue(state)
-    self.current_request = SessionSelectors.get_current_permission(state)
+    local current_request = SessionSelectors.get_current_permission(state)
+    --- @cast current_request agentic.ui.PermissionManager.PermissionRequest|nil
+    self.current_request = current_request
 end
 
 --- Add a new permission request to the queue to be processed sequentially
@@ -120,7 +128,8 @@ function PermissionManager:_process_next()
     end
 
     local request = current.request
-    local sorted_options = self._sort_permission_options(request.options)
+    local sorted_options =
+        PermissionManager._sort_permission_options(request.options)
     self:_show_chooser(current.toolCallId, sorted_options)
 end
 
@@ -154,7 +163,8 @@ end
 --- @return agentic.acp.PermissionOption|nil
 function PermissionManager:_find_default_reject_option(options)
     for _, option in ipairs(options) do
-        if option.kind == "reject_once" or option.kind == "reject_always" then
+        local kind = PermissionOption.get_kind(option)
+        if kind == "reject_once" or kind == "reject_always" then
             return option
         end
     end
@@ -199,8 +209,10 @@ function PermissionManager._sort_permission_options(options)
     end
 
     table.sort(sorted, function(a, b)
-        local priority_a = PERMISSION_KIND_PRIORITY[a.kind] or 999
-        local priority_b = PERMISSION_KIND_PRIORITY[b.kind] or 999
+        local priority_a = PERMISSION_KIND_PRIORITY[PermissionOption.get_kind(a)]
+            or 999
+        local priority_b = PERMISSION_KIND_PRIORITY[PermissionOption.get_kind(b)]
+            or 999
         return priority_a < priority_b
     end)
 
