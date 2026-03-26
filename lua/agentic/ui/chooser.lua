@@ -187,7 +187,43 @@ function Chooser.show(items, opts, on_choice)
         finish(items[cursor[1]])
     end
 
-    BufHelpers.keymap_set(bufnr, "n", "<CR>", select_current, {
+    --- @param line_delta integer
+    --- @return fun()
+    local function move_cursor(line_delta)
+        return function()
+            if not vim.api.nvim_win_is_valid(winid) then
+                return
+            end
+
+            local cursor = vim.api.nvim_win_get_cursor(winid)
+            local target_line = math.max(
+                1,
+                math.min(
+                    vim.api.nvim_buf_line_count(bufnr),
+                    cursor[1] + (line_delta * vim.v.count1)
+                )
+            )
+            vim.api.nvim_win_set_cursor(winid, { target_line, cursor[2] })
+        end
+    end
+
+    local move_down = move_cursor(1)
+    local move_up = move_cursor(-1)
+
+    vim.cmd.stopinsert()
+    BufHelpers.keymap_set(bufnr, { "n", "i" }, "j", move_down, {
+        desc = "Agentic chooser: move down",
+    })
+    BufHelpers.keymap_set(bufnr, "n", "<Down>", move_down, {
+        desc = "Agentic chooser: move down",
+    })
+    BufHelpers.keymap_set(bufnr, { "n", "i" }, "k", move_up, {
+        desc = "Agentic chooser: move up",
+    })
+    BufHelpers.keymap_set(bufnr, "n", "<Up>", move_up, {
+        desc = "Agentic chooser: move up",
+    })
+    BufHelpers.keymap_set(bufnr, { "n", "i" }, "<CR>", select_current, {
         desc = "Agentic chooser: confirm",
     })
     BufHelpers.keymap_set(bufnr, "n", "q", function()
