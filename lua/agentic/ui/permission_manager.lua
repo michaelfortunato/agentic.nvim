@@ -24,6 +24,7 @@ local PERMISSION_KIND_PRIORITY = {
 --- @field queue table[] Queue of pending requests {toolCallId, request, callback}
 --- @field current_request? agentic.ui.PermissionManager.PermissionRequest Currently displayed request
 --- @field _chooser_tabpage? integer
+--- @field _diff_review_handler? fun(current_request: agentic.ui.PermissionManager.PermissionRequest): boolean|nil
 --- @field _state_listener_id? integer
 local PermissionManager = {}
 PermissionManager.__index = PermissionManager
@@ -36,6 +37,7 @@ function PermissionManager:new(session_state)
         queue = {},
         current_request = nil,
         _chooser_tabpage = nil,
+        _diff_review_handler = nil,
         _state_listener_id = nil,
     }, self)
 
@@ -108,6 +110,13 @@ function PermissionManager:_process_next()
     local current = self.current_request
     if not current then
         return
+    end
+
+    if self._diff_review_handler then
+        local ok, handled = pcall(self._diff_review_handler, current)
+        if ok and handled == true then
+            return
+        end
     end
 
     local request = current.request
@@ -211,6 +220,16 @@ function PermissionManager:_complete_request(option_id)
 
     self.session_state:dispatch(SessionEvents.complete_current_permission())
     self:_process_next()
+end
+
+--- @param handler fun(current_request: agentic.ui.PermissionManager.PermissionRequest): boolean|nil
+function PermissionManager:set_diff_review_handler(handler)
+    self._diff_review_handler = handler
+end
+
+--- @param option_id string|nil
+function PermissionManager:complete_current_request(option_id)
+    self:_complete_request(option_id)
 end
 
 --- Clear all displayed buttons and keymaps, cancel all pending requests

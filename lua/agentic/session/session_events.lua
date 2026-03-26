@@ -21,64 +21,117 @@ function SessionEvents.set_session_title(title)
     }
 end
 
---- @param history agentic.ui.ChatHistory
---- @param opts {preserve_session_id?: boolean|nil, preserve_timestamp?: boolean|nil}|nil
+--- @param current_mode_id string
 --- @return table
-function SessionEvents.restore_history(history, opts)
+function SessionEvents.set_current_mode(current_mode_id)
+    return {
+        type = "session/set_current_mode",
+        current_mode_id = current_mode_id,
+    }
+end
+
+--- @param config_options agentic.acp.ConfigOption[]
+--- @return table
+function SessionEvents.set_config_options(config_options)
+    return {
+        type = "session/set_config_options",
+        config_options = config_options,
+    }
+end
+
+--- @param available_commands agentic.acp.AvailableCommand[]
+--- @return table
+function SessionEvents.set_available_commands(available_commands)
+    return {
+        type = "session/set_available_commands",
+        available_commands = available_commands,
+    }
+end
+
+--- @param persisted_session agentic.session.PersistedSession|agentic.session.PersistedSession.StorageData
+--- @param opts {preserve_session_id?: boolean|nil, preserve_timestamp?: boolean|nil, preserve_current_mode_id?: boolean|nil}|nil
+--- @return table
+function SessionEvents.load_persisted_session(persisted_session, opts)
     opts = opts or {}
     return {
-        type = "session/restore_history",
-        session_id = history.session_id,
-        title = history.title,
-        timestamp = history.timestamp,
-        messages = history.messages,
+        type = "session/load_persisted_session",
+        session_id = persisted_session.session_id,
+        title = persisted_session.title,
+        timestamp = persisted_session.timestamp,
+        current_mode_id = persisted_session.current_mode_id,
+        config_options = persisted_session.config_options,
+        available_commands = persisted_session.available_commands,
+        turns = persisted_session.turns,
         preserve_session_id = opts.preserve_session_id == true,
         preserve_timestamp = opts.preserve_timestamp == true,
+        preserve_current_mode_id = opts.preserve_current_mode_id == true,
     }
 end
 
---- @param message agentic.ui.ChatHistory.Message
+--- @param request {kind?: "user"|"review"|nil, text?: string|nil, timestamp?: integer|nil, content?: agentic.acp.Content[]|agentic.acp.Content|nil}
 --- @return table
-function SessionEvents.add_transcript_message(message)
+function SessionEvents.append_interaction_request(request)
     return {
-        type = "transcript/add_message",
-        message = message,
+        type = "interaction/append_request",
+        request = request,
     }
 end
 
---- @param message {type: "agent"|"thought", text: string, provider_name: string}
+--- @param provider_name string|nil
+--- @param entries agentic.acp.PlanEntry[]
 --- @return table
-function SessionEvents.append_agent_text(message)
+function SessionEvents.upsert_interaction_plan(provider_name, entries)
     return {
-        type = "transcript/append_agent_text",
-        message = message,
+        type = "interaction/upsert_plan",
+        provider_name = provider_name,
+        entries = entries,
     }
 end
 
+--- @param kind "message"|"thought"
+--- @param provider_name string|nil
+--- @param content agentic.acp.Content|agentic.acp.Content[]
+--- @return table
+function SessionEvents.append_interaction_response(kind, provider_name, content)
+    return {
+        type = "interaction/append_response",
+        kind = kind,
+        provider_name = provider_name,
+        content = content,
+    }
+end
+
+--- @param provider_name string|nil
 --- @param tool_call agentic.ui.MessageWriter.ToolCallBlock
 --- @return table
-function SessionEvents.upsert_transcript_tool_call(tool_call)
+function SessionEvents.upsert_interaction_tool_call(provider_name, tool_call)
     return {
-        type = "transcript/upsert_tool_call",
+        type = "interaction/upsert_tool_call",
+        provider_name = provider_name,
         tool_call = tool_call,
     }
 end
 
---- @param tool_call agentic.ui.MessageWriter.ToolCallBlock
+--- @param result {stop_reason?: agentic.acp.StopReason|nil, timestamp?: integer|nil, error_text?: string|nil}
+--- @param provider_name string|nil
 --- @return table
-function SessionEvents.upsert_tool_call(tool_call)
+function SessionEvents.set_interaction_turn_result(result, provider_name)
     return {
-        type = "tools/upsert",
-        tool_call = tool_call,
+        type = "interaction/set_turn_result",
+        result = result,
+        provider_name = provider_name,
     }
 end
 
 --- @param tool_call_id string
 --- @param permission_state "requested"|"approved"|"rejected"|"dismissed"
 --- @return table
-function SessionEvents.set_tool_permission_state(tool_call_id, permission_state)
+function SessionEvents.set_interaction_tool_permission_state(
+    tool_call_id,
+    permission_state
+)
     return {
-        type = "tools/set_permission_state",
+        type = "interaction/set_tool_permission_state",
         tool_call_id = tool_call_id,
         permission_state = permission_state,
     }

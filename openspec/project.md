@@ -339,34 +339,21 @@ When exploring the codebase, start here:
 ### Generic ACPClient (no per-provider adapters)
 
 All providers use a **single generic `ACPClient`**. Provider
-quirks are handled inline via fallback logic in
-`__build_tool_call_message`.
+output is parsed from formal ACP fields in `__build_tool_call_message`.
 
 **What IS normalized across providers:**
 
 - Permission requests (`session/request_permission`)
 - Message chunks (`agent_message_chunk`, `agent_thought_chunk`)
-- Tool calls and tool call updates (via standard ACP fields +
-  fallbacks)
-
-**Provider quirks handled in ACPClient:**
-
-- `rawInput` fallback (OpenCode): builds diff from
-  `rawInput.new_string`/`rawInput.newString` when `content` is
-  missing
-- `locations` fallback: extracts `file_path` from
-  `locations[0].path` when not in `rawInput`
-- Field name variants: handles both `snake_case` and
-  `camelCase` (`new_string`/`newString`, `file_path`/`filePath`)
+- Tool calls and tool call updates (via standard ACP fields)
 
 **When adding a new provider:**
 
 1. Add config entry in `config_default.lua` under
    `acp_providers`
 2. If the provider follows standard ACP, no code changes needed
-3. If it has quirks, add fallback logic in
-   `__build_tool_call_message` with a comment explaining which
-   provider needs it
+3. If it deviates from ACP, fix the provider or add support only
+   once the deviation is formalized in the protocol
 
 ## Error Handling
 

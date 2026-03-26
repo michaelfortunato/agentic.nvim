@@ -54,13 +54,15 @@ describe("agentic.ui.PermissionManager", function()
     --- @param tool_call_id string
     --- @param kind agentic.acp.ToolKind|nil
     local function add_tool_call(tool_call_id, kind)
-        session_state:dispatch(SessionEvents.upsert_tool_call({
-            tool_call_id = tool_call_id,
-            kind = kind or "edit",
-            status = "pending",
-            file_path = "/tmp/demo.lua",
-            diff = { old = { "a" }, new = { "b" } },
-        }))
+        session_state:dispatch(
+            SessionEvents.upsert_interaction_tool_call("Codex ACP", {
+                tool_call_id = tool_call_id,
+                kind = kind or "edit",
+                status = "pending",
+                file_path = "/tmp/demo.lua",
+                diff = { old = { "a" }, new = { "b" } },
+            })
+        )
     end
 
     before_each(function()
@@ -120,6 +122,27 @@ describe("agentic.ui.PermissionManager", function()
         assert.truthy(
             shown_opts.format_item(shown_items[1]):find("Allow once", 1, true)
         )
+    end)
+
+    it("uses the diff review handler instead of opening the chooser", function()
+        local callback = spy.new(function() end) --[[@as function]]
+        local review_handler = spy.new(function()
+            return true
+        end)
+
+        add_tool_call("tc-review-1", "edit")
+        pm:set_diff_review_handler(review_handler --[[@as function]])
+        pm:add_request(make_request("tc-review-1"), callback)
+
+        assert.spy(review_handler).was.called(1)
+        assert.spy(chooser_show_stub).was.called(0)
+        assert.equal("tc-review-1", pm.current_request.toolCallId)
+
+        pm:complete_current_request("allow-once")
+
+        assert.spy(callback).was.called(1)
+        assert.equal("allow-once", callback.calls[1][1])
+        assert.is_nil(pm.current_request)
     end)
 
     it("completes the request when a choice is selected", function()

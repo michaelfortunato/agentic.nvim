@@ -3,22 +3,172 @@ local AgentInstance = require("agentic.acp.agent_instance")
 local Theme = require("agentic.theme")
 local SessionRegistry = require("agentic.session_registry")
 local SessionRestore = require("agentic.session_restore")
+local CodeSelection = require("agentic.ui.code_selection")
 local Object = require("agentic.utils.object")
 local Logger = require("agentic.utils.logger")
 
 --- @class agentic.Agentic
 local Agentic = {}
 
+--- @class agentic.Agentic.ChatOpts : agentic.ui.ChatWidget.ShowOpts
+--- @field prompt_text? string Pre-fill the chat input buffer after opening
+
+--- @class agentic.Agentic.InlineChatOpts
+--- @field selection? agentic.Selection
+
+--- @class agentic.Agentic.UserCommandArgs
+--- @field args string
+--- @field fargs string[]
+--- @field line1 integer
+--- @field line2 integer
+--- @field range integer
+
+--- @param session agentic.SessionManager
+--- @param opts agentic.Agentic.ChatOpts|nil
+local function show_session_widget(session, opts)
+    opts = opts or {}
+
+    --- @type agentic.Agentic.ChatOpts
+    local show_opts = vim.tbl_extend("force", {}, opts)
+    if show_opts.prompt_text ~= nil and show_opts.focus_prompt == nil then
+        show_opts.focus_prompt = true
+    end
+
+    session.widget:show(show_opts)
+
+    if show_opts.prompt_text ~= nil then
+        session.widget:set_input_text(show_opts.prompt_text)
+        session.widget:focus_input()
+    end
+end
+
+--- @param command_opts agentic.Agentic.UserCommandArgs
+--- @return string|nil
+local function get_command_prompt_text(command_opts)
+    if command_opts.range == 0 then
+        return nil
+    end
+
+    local lines = vim.api.nvim_buf_get_lines(
+        0,
+        command_opts.line1 - 1,
+        command_opts.line2,
+        false
+    )
+    if #lines == 0 then
+        return nil
+    end
+
+    return table.concat(lines, "\n")
+end
+
+--- @param command_opts agentic.Agentic.UserCommandArgs
+--- @return agentic.Selection|nil
+local function get_command_selection(command_opts)
+    if command_opts.range == 0 then
+        return nil
+    end
+
+    return CodeSelection.get_buffer_selection(
+        0,
+        command_opts.line1,
+        command_opts.line2
+    )
+end
+
+--- @param command_opts agentic.Agentic.UserCommandArgs
+--- @return agentic.Agentic.ChatOpts|nil
+local function get_chat_command_opts(command_opts)
+    local prompt_text = get_command_prompt_text(command_opts)
+    if prompt_text == nil then
+        return nil
+    end
+
+    return {
+        auto_add_to_context = false,
+        focus_prompt = true,
+        prompt_text = prompt_text,
+    }
+end
+
+--- @param command_opts agentic.Agentic.UserCommandArgs
+local function handle_chat_command(command_opts)
+    local subcommand = vim.trim(command_opts.args or "")
+
+    if subcommand == "" then
+        Agentic.toggle(get_chat_command_opts(command_opts))
+        return
+    end
+
+    if subcommand == "new" then
+        Agentic.new_session(
+            get_chat_command_opts(command_opts) --[[@as agentic.ui.NewSessionOpts|nil]]
+        )
+        return
+    end
+
+    if subcommand == "restore" then
+        Agentic.restore_session()
+        return
+    end
+
+    Logger.notify(
+        string.format("Unknown AgenticChat subcommand: %s", subcommand),
+        vim.log.levels.ERROR
+    )
+end
+
+--- @param arg_lead string
+--- @return string[]
+local function complete_chat_subcommand(arg_lead)
+    local matches = {}
+    for _, candidate in ipairs({ "new", "restore" }) do
+        if arg_lead == "" or candidate:find("^" .. vim.pesc(arg_lead)) then
+            matches[#matches + 1] = candidate
+        end
+    end
+    return matches
+end
+
+local function register_user_commands()
+    pcall(vim.api.nvim_del_user_command, "AgenticChat")
+    pcall(vim.api.nvim_del_user_command, "AgenticInline")
+
+    vim.api.nvim_create_user_command("AgenticChat", function(command_opts)
+        handle_chat_command(
+            command_opts --[[@as agentic.Agentic.UserCommandArgs]]
+        )
+    end, {
+        nargs = "?",
+        range = true,
+        complete = function(arg_lead)
+            return complete_chat_subcommand(arg_lead)
+        end,
+        desc = "Toggle Agentic chat, start a new chat, or restore a session",
+    })
+
+    vim.api.nvim_create_user_command("AgenticInline", function(command_opts)
+        local selection = get_command_selection(
+            command_opts --[[@as agentic.Agentic.UserCommandArgs]]
+        )
+        Agentic.inline_chat({ selection = selection })
+    end, {
+        nargs = 0,
+        range = true,
+        desc = "Open Agentic inline chat for the current or provided selection",
+    })
+end
+
 --- Opens the chat widget for the current tab page
 --- Safe to call multiple times
---- @param opts agentic.ui.ChatWidget.ShowOpts|nil
+--- @param opts agentic.Agentic.ChatOpts|nil
 function Agentic.open(opts)
     SessionRegistry.get_session_for_tab_page(nil, function(session)
         if not opts or opts.auto_add_to_context ~= false then
             session:add_selection_or_file_to_session()
         end
 
-        session.widget:show(opts)
+        show_session_widget(session, opts)
     end)
 end
 
@@ -32,17 +182,19 @@ end
 
 --- Toggles the chat widget for the current tab page
 --- Safe to call multiple times
---- @param opts agentic.ui.ChatWidget.ShowOpts|nil
+--- @param opts agentic.Agentic.ChatOpts|nil
 function Agentic.toggle(opts)
     SessionRegistry.get_session_for_tab_page(nil, function(session)
-        if session.widget:is_open() then
+        if
+            session.widget:is_open() and (not opts or opts.prompt_text == nil)
+        then
             session.widget:hide()
         else
             if not opts or opts.auto_add_to_context ~= false then
                 session:add_selection_or_file_to_session()
             end
 
-            session.widget:show(opts)
+            show_session_widget(session, opts)
         end
     end)
 end
@@ -104,7 +256,7 @@ function Agentic.add_selection_or_file_to_context(opts)
     end)
 end
 
---- @class agentic.ui.NewSessionOpts : agentic.ui.ChatWidget.ShowOpts
+--- @class agentic.ui.NewSessionOpts : agentic.Agentic.ChatOpts
 --- @field provider? agentic.UserConfig.ProviderName
 
 --- Add diagnostics at the current cursor line to the Chat context
@@ -139,6 +291,14 @@ function Agentic.add_buffer_diagnostics(opts)
     end)
 end
 
+--- Open inline chat for the current visual selection.
+--- @param opts agentic.Agentic.InlineChatOpts|nil
+function Agentic.inline_chat(opts)
+    SessionRegistry.get_session_for_tab_page(nil, function(session)
+        session:open_inline_chat(opts and opts.selection or nil)
+    end)
+end
+
 --- Destroys the current Chat session and starts a new one
 --- @param opts agentic.ui.NewSessionOpts|nil
 function Agentic.new_session(opts)
@@ -151,7 +311,7 @@ function Agentic.new_session(opts)
         if not opts or opts.auto_add_to_context ~= false then
             session:add_selection_or_file_to_session()
         end
-        session.widget:show(opts)
+        show_session_widget(session, opts)
     end
 end
 
@@ -246,6 +406,45 @@ function Agentic.setup(opts)
     vim.treesitter.language.register("markdown", "AgenticChat")
 
     Theme.setup()
+    register_user_commands()
+
+    local BufHelpers = require("agentic.utils.buf_helpers")
+
+    vim.api.nvim_create_autocmd("BufEnter", {
+        group = cleanup_group,
+        callback = function(ev)
+            if not Config.inline.enabled then
+                return
+            end
+
+            if not Config.keymaps.inline or not Config.keymaps.inline.open then
+                return
+            end
+
+            if vim.b[ev.buf]._agentic_inline_keymaps_bound then
+                return
+            end
+
+            if vim.bo[ev.buf].buftype ~= "" then
+                return
+            end
+
+            if vim.bo[ev.buf].filetype:match("^Agentic") then
+                return
+            end
+
+            BufHelpers.multi_keymap_set(
+                Config.keymaps.inline.open,
+                ev.buf,
+                function()
+                    Agentic.inline_chat()
+                end,
+                { desc = "Agentic: Inline chat" }
+            )
+            vim.b[ev.buf]._agentic_inline_keymaps_bound = true
+        end,
+        desc = "Bind Agentic inline chat keymaps to editable buffers",
+    })
 
     vim.api.nvim_create_autocmd("ColorScheme", {
         group = cleanup_group,

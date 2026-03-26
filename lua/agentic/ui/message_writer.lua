@@ -37,32 +37,46 @@ local NS_TRANSCRIPT_META =
 --- @field status? agentic.acp.ToolCallStatus
 --- @field body? string[]
 --- @field diff? agentic.ui.MessageWriter.ToolCallDiff
+--- @field permission_state? "requested"|"approved"|"rejected"|"dismissed"|nil
+--- @field content_items? agentic.acp.ACPToolCallContent[]
+--- @field content_nodes? agentic.session.ToolCallContentNode[]
+--- @field terminal_id? string
 --- @field collapsed? boolean
+
+--- @class agentic.ui.MessageWriter.RequestContentBlock
+--- @field block_id string
+--- @field extmark_id? integer
+--- @field content_node agentic.session.InteractionContentNode
+--- @field collapsed boolean
 
 --- @class agentic.ui.MessageWriter
 --- @field bufnr integer
 --- @field tool_call_blocks table<string, agentic.ui.MessageWriter.ToolCallBlock>
---- @field _last_message_type? string
+--- @field _request_content_blocks table<string, agentic.ui.MessageWriter.RequestContentBlock>
 --- @field _should_auto_scroll_fn? fun(): boolean
 --- @field _scroll_to_bottom_fn? fun()
 --- @field _scroll_timer? uv.uv_timer_t
 --- @field _scroll_scheduled? boolean
 --- @field _content_changed_listeners table<integer, fun()>
 --- @field _next_content_listener_id integer
---- @field _active_stream_block? {type: string, start_row: integer}
 --- @field _current_turn_id integer
 --- @field _active_turn_diff_cards table<string, string>
---- @field _turn_has_agent_header boolean
+--- @field _provider_name? string
+--- @field _last_interaction_session? agentic.session.InteractionSession
+--- @field _last_render_opts? table|nil
 local MessageWriter = {}
 MessageWriter.__index = MessageWriter
 
 local DEFAULT_SCROLL_DEBOUNCE_MS = 150
 local MAX_DIFF_CARD_HUNKS = 2
 local MAX_DIFF_CARD_CHANGES = 4
-local MAX_TOOL_PREVIEW_LINES = 2
-local MAX_TOOL_PREVIEW_WIDTH = 96
-local CARD_DETAIL_PREFIX = "  "
-local CARD_NESTED_PREFIX = "    "
+local INDENT_UNIT = "  "
+local ENVIRONMENT_INFO_URI = "agentic://environment_info"
+local HIERARCHY_LEVEL = {
+    root = 0,
+    detail = 1,
+    nested = 2,
+}
 
 local DIFF_TOOL_KINDS = {
     edit = true,
@@ -122,11 +136,24 @@ local META_LINE_PATTERNS = {
     "^Agent error · ",
 }
 
+local TRANSCRIPT_PARENT_META_PATTERNS = {
+    "^User · ",
+    "^Review · ",
+    "^Agent · ",
+    "^Agent error · ",
+}
+
 local should_default_collapse
 local is_diff_group_kind
 local is_diff_group_candidate
 local build_turn_diff_group_key
 local aggregate_tool_statuses
+local apply_transcript_hierarchy
+local apply_block_hierarchy
+local indent_prefix
+local indent_text
+local pluralize
+local format_compact_path
 
 --- @param line string
 --- @return boolean
@@ -148,6 +175,40 @@ end
 --- @return boolean
 local function is_reference_line(line)
     return line ~= nil and line:match("^  @") ~= nil
+end
+
+--- @param line string|nil
+--- @return string
+local function get_transcript_meta_hl_group(line)
+    if not line then
+        return Theme.HL_GROUPS.TRANSCRIPT_SYSTEM_META
+    end
+
+    if line:match("^User · ") or line:match("^Review · ") then
+        return Theme.HL_GROUPS.TRANSCRIPT_REQUEST_META
+    end
+
+    if line:match("^Agent · ") then
+        return Theme.HL_GROUPS.TRANSCRIPT_RESPONSE_META
+    end
+
+    return Theme.HL_GROUPS.TRANSCRIPT_SYSTEM_META
+end
+
+--- @param line string|nil
+--- @return integer|nil
+local function get_transcript_body_level(line)
+    if not line or line == "" then
+        return nil
+    end
+
+    for _, pattern in ipairs(TRANSCRIPT_PARENT_META_PATTERNS) do
+        if line:match(pattern) then
+            return HIERARCHY_LEVEL.detail
+        end
+    end
+
+    return nil
 end
 
 --- @param line string
@@ -176,9 +237,21 @@ local function build_meta_line(label, value)
     return string.format("%s · %s", label, value)
 end
 
+--- @param provider_name string|nil
+--- @return string[]
+function MessageWriter:_build_agent_header_lines(provider_name)
+    return {
+        build_meta_line(
+            "Agent",
+            provider_name or self._provider_name or "Unknown provider"
+        ),
+    }
+end
+
 --- @class agentic.ui.MessageWriter.Opts
 --- @field should_auto_scroll? fun(): boolean
 --- @field scroll_to_bottom? fun()
+--- @field provider_name? string
 
 --- @param bufnr integer
 --- @param opts agentic.ui.MessageWriter.Opts|nil
@@ -193,35 +266,30 @@ function MessageWriter:new(bufnr, opts)
     local instance = setmetatable({
         bufnr = bufnr,
         tool_call_blocks = {},
-        _last_message_type = nil,
+        _request_content_blocks = {},
         _should_auto_scroll_fn = opts.should_auto_scroll,
         _scroll_to_bottom_fn = opts.scroll_to_bottom,
         _scroll_timer = nil,
         _scroll_scheduled = false,
         _content_changed_listeners = {},
         _next_content_listener_id = 0,
-        _active_stream_block = nil,
         _current_turn_id = 0,
         _active_turn_diff_cards = {},
-        _turn_has_agent_header = false,
+        _provider_name = opts.provider_name,
+        _last_interaction_session = nil,
+        _last_render_opts = nil,
     }, self)
 
     return instance
 end
 
-function MessageWriter:begin_turn()
-    self._current_turn_id = self._current_turn_id + 1
-    self._active_turn_diff_cards = {}
-    self._turn_has_agent_header = false
-end
-
 function MessageWriter:reset()
     self.tool_call_blocks = {}
-    self._active_stream_block = nil
-    self._last_message_type = nil
+    self._request_content_blocks = {}
     self._current_turn_id = 0
     self._active_turn_diff_cards = {}
-    self._turn_has_agent_header = false
+    self._last_interaction_session = nil
+    self._last_render_opts = nil
 end
 
 --- @param callback fun()
@@ -254,8 +322,10 @@ function MessageWriter:_get_active_diff_group_id(tool_call_block)
         return nil
     end
 
-    local group_key =
-        build_turn_diff_group_key(self._current_turn_id, tool_call_block.file_path)
+    local group_key = build_turn_diff_group_key(
+        self._current_turn_id,
+        tool_call_block.file_path
+    )
     return self._active_turn_diff_cards[group_key]
 end
 
@@ -326,51 +396,6 @@ function MessageWriter:_with_modifiable_and_notify_change(fn)
     end
 end
 
-function MessageWriter:_reset_stream_block()
-    self._last_message_type = nil
-    self._active_stream_block = nil
-end
-
---- @return integer start_row
-function MessageWriter:_ensure_block_gap()
-    if BufHelpers.is_buffer_empty(self.bufnr) then
-        return 0
-    end
-
-    local line_count = vim.api.nvim_buf_line_count(self.bufnr)
-    local trailing_blank_count = 0
-
-    while trailing_blank_count < line_count do
-        local line_index = line_count - trailing_blank_count - 1
-        local line = vim.api.nvim_buf_get_lines(
-            self.bufnr,
-            line_index,
-            line_index + 1,
-            false
-        )[1]
-
-        if line ~= "" then
-            break
-        end
-
-        trailing_blank_count = trailing_blank_count + 1
-    end
-
-    if trailing_blank_count == 0 then
-        self:_append_lines({ "" })
-    elseif trailing_blank_count > 1 then
-        vim.api.nvim_buf_set_lines(
-            self.bufnr,
-            line_count - trailing_blank_count + 1,
-            line_count,
-            false,
-            {}
-        )
-    end
-
-    return vim.api.nvim_buf_line_count(self.bufnr)
-end
-
 --- @param start_row integer
 --- @param end_row integer
 function MessageWriter:_apply_thought_block_highlights(start_row, end_row)
@@ -397,7 +422,7 @@ function MessageWriter:_apply_thought_block_highlights(start_row, end_row)
         if line and #line > 0 then
             vim.api.nvim_buf_set_extmark(self.bufnr, NS_THOUGHT, line_idx, 0, {
                 end_col = #line,
-                hl_group = "Comment",
+                hl_group = Theme.HL_GROUPS.THOUGHT_TEXT,
             })
         end
     end
@@ -429,7 +454,7 @@ function MessageWriter:_apply_transcript_meta_highlights(start_row, lines)
                 0,
                 {
                     end_col = end_col,
-                    hl_group = "Comment",
+                    hl_group = get_transcript_meta_hl_group(line),
                 }
             )
         elseif is_reference_line(line) then
@@ -440,142 +465,10 @@ function MessageWriter:_apply_transcript_meta_highlights(start_row, lines)
                 2,
                 {
                     end_col = #line,
-                    hl_group = "Directory",
+                    hl_group = Theme.HL_GROUPS.RESOURCE_LINK,
                 }
             )
         end
-    end
-end
-
---- @param update agentic.acp.SessionUpdateMessage
---- @param lines string[]
---- @return string[], integer
-function MessageWriter:_prepend_agent_header_if_needed(update, lines)
-    if not update.is_agent_reply or self._turn_has_agent_header then
-        return lines, 0
-    end
-
-    local provider_name = update.provider_name or "Unknown provider"
-    local prefixed_lines = { build_meta_line("Agent", provider_name) }
-    vim.list_extend(prefixed_lines, lines)
-    self._turn_has_agent_header = true
-
-    return prefixed_lines, 1
-end
-
---- Writes a full message to the chat buffer.
---- @param update agentic.acp.SessionUpdateMessage
-function MessageWriter:write_message(update)
-    local text = update.content
-        and update.content.type == "text"
-        and update.content.text
-
-    if not text or text == "" then
-        return
-    end
-
-    local lines = vim.split(text, "\n", { plain = true })
-    lines = self:_prepend_agent_header_if_needed(update, lines)
-
-    self:_auto_scroll(self.bufnr)
-
-    self:_with_modifiable_and_notify_change(function(bufnr)
-        self:_reset_stream_block()
-        local start_row = self:_ensure_block_gap()
-        self:_append_lines(lines)
-        self:_apply_transcript_meta_highlights(start_row, lines)
-    end)
-end
-
---- Appends message chunks to the last line and column in the chat buffer
---- Some ACP providers stream chunks instead of full messages
---- @param update agentic.acp.SessionUpdateMessage
-function MessageWriter:write_message_chunk(update)
-    local text = update.content
-        and update.content.type == "text"
-        and update.content.text
-
-    if not text or text == "" then
-        return
-    end
-
-    self:_auto_scroll(self.bufnr)
-
-    self:_with_modifiable_and_notify_change(function(bufnr)
-        local lines_to_write = vim.split(text, "\n", { plain = true })
-        local starts_new_block = self._active_stream_block == nil
-            or self._active_stream_block.type ~= update.sessionUpdate
-
-        if starts_new_block then
-            local header_count = 0
-            lines_to_write, header_count =
-                self:_prepend_agent_header_if_needed(update, lines_to_write)
-            local start_row = self:_ensure_block_gap()
-            self:_append_lines(lines_to_write)
-            self:_apply_transcript_meta_highlights(start_row, lines_to_write)
-            self._active_stream_block = {
-                type = update.sessionUpdate,
-                start_row = start_row + header_count,
-            }
-        else
-            local last_line = vim.api.nvim_buf_line_count(bufnr) - 1
-            local current_line = vim.api.nvim_buf_get_lines(
-                bufnr,
-                last_line,
-                last_line + 1,
-                false
-            )[1] or ""
-            local start_col = #current_line
-
-            local success, err = pcall(
-                vim.api.nvim_buf_set_text,
-                bufnr,
-                last_line,
-                start_col,
-                last_line,
-                start_col,
-                lines_to_write
-            )
-
-            if not success then
-                Logger.debug(
-                    "Failed to set text in buffer",
-                    err,
-                    lines_to_write
-                )
-            end
-        end
-
-        if
-            update.sessionUpdate == "agent_thought_chunk"
-            and self._active_stream_block
-        then
-            self:_apply_thought_block_highlights(
-                self._active_stream_block.start_row,
-                vim.api.nvim_buf_line_count(bufnr) - 1
-            )
-        end
-    end)
-
-    self._last_message_type = update.sessionUpdate
-end
-
---- @param lines string[]
---- @return nil
-function MessageWriter:_append_lines(lines)
-    local start_line = BufHelpers.is_buffer_empty(self.bufnr) and 0 or -1
-
-    local success, err = pcall(
-        vim.api.nvim_buf_set_lines,
-        self.bufnr,
-        start_line,
-        -1,
-        false,
-        lines
-    )
-
-    if not success then
-        Logger.debug("Failed to append lines to buffer", err, lines)
     end
 end
 
@@ -723,170 +616,11 @@ function MessageWriter:destroy()
 end
 
 --- @param tool_call_block agentic.ui.MessageWriter.ToolCallBlock
-function MessageWriter:write_tool_call_block(tool_call_block)
-    local existing_group_id = self:_get_active_diff_group_id(tool_call_block)
-    if existing_group_id and existing_group_id ~= tool_call_block.tool_call_id then
-        self.tool_call_blocks[tool_call_block.tool_call_id] =
-            self.tool_call_blocks[existing_group_id]
-        self:update_tool_call_block(tool_call_block)
-        return
-    end
-
-    if is_diff_group_candidate(tool_call_block) then
-        tool_call_block = self:_initialize_diff_group(tool_call_block)
-    end
-
-    if should_default_collapse(tool_call_block) and tool_call_block.collapsed == nil then
-        tool_call_block.collapsed = true
-    end
-
-    self:_auto_scroll(self.bufnr)
-
-    self:_with_modifiable_and_notify_change(function(bufnr)
-        self:_reset_stream_block()
-        local kind = tool_call_block.kind
-        local start_row = self:_ensure_block_gap()
-        local lines, highlight_ranges =
-            self:_prepare_block_lines(tool_call_block)
-
-        self:_append_lines(lines)
-
-        local end_row = vim.api.nvim_buf_line_count(bufnr) - 1
-
-        self:_apply_block_highlights(
-            bufnr,
-            start_row,
-            end_row,
-            kind or "other",
-            highlight_ranges
-        )
-
-        tool_call_block.extmark_id =
-            vim.api.nvim_buf_set_extmark(bufnr, NS_TOOL_BLOCKS, start_row, 0, {
-                end_row = end_row,
-                right_gravity = false,
-            })
-
-        self.tool_call_blocks[tool_call_block.tool_call_id] = tool_call_block
-    end)
-end
-
---- @param tool_call_block agentic.ui.MessageWriter.ToolCallBlock
-function MessageWriter:update_tool_call_block(tool_call_block)
-    local tracker = self.tool_call_blocks[tool_call_block.tool_call_id]
-
-    if not tracker then
-        Logger.debug(
-            "Tool call block not found, ID: ",
-            tool_call_block.tool_call_id
-        )
-
-        return
-    end
-
-    local previous_body = tracker.body
-    local display_tool_call_id = tracker.tool_call_id
-
-    if tracker._diff_sources and is_diff_group_candidate(tool_call_block) then
-        self:_merge_diff_source(tracker, tool_call_block)
-        tool_call_block = tracker
-    end
-
-    tracker = vim.tbl_deep_extend("force", tracker, tool_call_block)
-    tracker.tool_call_id = display_tool_call_id
-    tracker.refresh_body = nil
-
-    if should_default_collapse(tracker) and tracker.collapsed == nil then
-        tracker.collapsed = true
-    end
-
-    -- Merge body: append new to previous with divider if both exist and are different
-    if
-        previous_body
-        and tool_call_block.body
-        and not vim.deep_equal(previous_body, tool_call_block.body)
-    then
-        local merged = vim.list_extend({}, previous_body)
-        vim.list_extend(merged, { "", "---", "" })
-        vim.list_extend(merged, tool_call_block.body)
-        tracker.body = merged
-    end
-
-    self.tool_call_blocks[tool_call_block.tool_call_id] = tracker
-
-    local pos = vim.api.nvim_buf_get_extmark_by_id(
-        self.bufnr,
-        NS_TOOL_BLOCKS,
-        tracker.extmark_id,
-        { details = true }
-    )
-
-    if not pos or not pos[1] then
-        Logger.debug(
-            "Extmark not found",
-            { tool_call_id = tracker.tool_call_id }
-        )
-        return
-    end
-
-    local start_row = pos[1]
-    local details = pos[3]
-    local old_end_row = details and details.end_row
-
-    if not old_end_row then
-        Logger.debug(
-            "Could not determine end row of tool call block",
-            { tool_call_id = tracker.tool_call_id, details = details }
-        )
-        return
-    end
-
-    self:_with_modifiable_and_notify_change(function(bufnr)
-        local new_lines, highlight_ranges = self:_prepare_block_lines(tracker)
-
-        vim.api.nvim_buf_set_lines(
-            bufnr,
-            start_row,
-            old_end_row + 1,
-            false,
-            new_lines
-        )
-
-        local new_end_row = start_row + #new_lines - 1
-
-        pcall(
-            vim.api.nvim_buf_clear_namespace,
-            bufnr,
-            NS_DIFF_HIGHLIGHTS,
-            start_row,
-            old_end_row + 1
-        )
-
-        vim.schedule(function()
-            if vim.api.nvim_buf_is_valid(bufnr) then
-                self:_apply_block_highlights(
-                    bufnr,
-                    start_row,
-                    new_end_row,
-                    tracker.kind,
-                    highlight_ranges
-                )
-            end
-        end)
-
-        vim.api.nvim_buf_set_extmark(bufnr, NS_TOOL_BLOCKS, start_row, 0, {
-            id = tracker.extmark_id,
-            end_row = new_end_row,
-            right_gravity = false,
-        })
-    end)
-end
-
 --- @param count integer
 --- @param singular string
 --- @param plural? string
 --- @return string
-local function pluralize(count, singular, plural)
+pluralize = function(count, singular, plural)
     return string.format(
         "%d %s",
         count,
@@ -896,7 +630,7 @@ end
 
 --- @param path string
 --- @return string
-local function format_compact_path(path)
+format_compact_path = function(path)
     local compact = vim.fn.fnamemodify(path, ":~:.")
     return compact ~= "" and compact or path
 end
@@ -908,29 +642,202 @@ local function sanitize_single_line(text)
         return ""
     end
 
-    return text:gsub("\n", " "):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+    return text:gsub("\n", " ")
+        :gsub("%s+", " ")
+        :gsub("^%s+", "")
+        :gsub("%s+$", "")
+end
+
+--- @param text string|nil
+--- @param max_length integer
+--- @return string
+local function truncate_single_line(text, max_length)
+    local sanitized = sanitize_single_line(text)
+    if #sanitized <= max_length then
+        return sanitized
+    end
+
+    return sanitized:sub(1, math.max(max_length - 3, 0)) .. "..."
+end
+
+--- @param uri string|nil
+--- @return string
+local function format_content_uri(uri)
+    if not uri or uri == "" then
+        return "resource"
+    end
+
+    if uri == ENVIRONMENT_INFO_URI then
+        return "environment_info"
+    end
+
+    if vim.startswith(uri, "file://") then
+        local ok, path = pcall(vim.uri_to_fname, uri)
+        if ok and path and path ~= "" then
+            return format_compact_path(path)
+        end
+    end
+
+    return sanitize_single_line(uri)
+end
+
+--- @param content_node agentic.session.InteractionContentNode
+--- @return string
+local function get_content_display_name(content_node)
+    if content_node.type == "resource_link_content" then
+        return content_node.title
+            or content_node.name
+            or format_content_uri(content_node.uri)
+    end
+
+    if content_node.type == "resource_content" then
+        return format_content_uri(content_node.uri)
+    end
+
+    if content_node.type == "image_content" then
+        return content_node.mime_type or "image"
+    end
+
+    if content_node.type == "audio_content" then
+        return content_node.mime_type or "audio"
+    end
+
+    if content_node.type == "text_content" then
+        local first_line =
+            vim.split(content_node.text or "", "\n", { plain = true })[1]
+        return sanitize_single_line(first_line)
+    end
+
+    return "content"
+end
+
+--- @param content_node agentic.session.InteractionContentNode
+--- @return integer
+local function count_content_lines(content_node)
+    if content_node.type == "text_content" then
+        return #vim.split(content_node.text or "", "\n", { plain = true })
+    end
+
+    if content_node.type == "resource_content" and content_node.text then
+        return #vim.split(content_node.text, "\n", { plain = true })
+    end
+
+    return 0
+end
+
+--- @param text string|nil
+--- @return string[]
+local function split_content_lines(text)
+    if not text or text == "" then
+        return {}
+    end
+
+    return vim.split(text, "\n", { plain = true })
+end
+
+--- @param buffered_text string|nil
+--- @param append_line fun(line: string)
+--- @return string|nil
+local function flush_buffered_text_lines(buffered_text, append_line)
+    if buffered_text == nil then
+        return nil
+    end
+
+    for _, line in ipairs(split_content_lines(buffered_text)) do
+        append_line(line)
+    end
+
+    return nil
+end
+
+--- @param level integer
+--- @return string
+indent_prefix = function(level)
+    return string.rep(INDENT_UNIT, math.max(level or 0, 0))
 end
 
 --- @param text string
---- @param prefix string
+--- @param level integer
 --- @return string
-local function indent_text(text, prefix)
+indent_text = function(text, level)
     if text == "" then
         return ""
     end
 
-    return prefix .. text
+    return indent_prefix(level) .. text
 end
 
---- @param text string
---- @param max_width integer
---- @return string
-local function truncate_single_line(text, max_width)
-    if #text <= max_width then
-        return text
+--- @param lines string[]
+--- @return string[]
+apply_transcript_hierarchy = function(lines)
+    local formatted = {}
+    local body_level = nil
+
+    for _, line in ipairs(lines) do
+        if is_meta_line(line) then
+            formatted[#formatted + 1] = line
+            body_level = get_transcript_body_level(line)
+        elseif line == "" then
+            formatted[#formatted + 1] = ""
+        elseif body_level ~= nil then
+            formatted[#formatted + 1] = indent_text(line, body_level)
+        else
+            formatted[#formatted + 1] = line
+        end
     end
 
-    return text:sub(1, math.max(1, max_width - 3)) .. "..."
+    return formatted
+end
+
+--- @param lines string[]
+--- @param base_level integer|nil
+--- @return string[]
+apply_block_hierarchy = function(lines, base_level)
+    if not base_level or base_level <= 0 then
+        return lines
+    end
+
+    local formatted = {}
+
+    for _, line in ipairs(lines) do
+        if line == "" then
+            formatted[#formatted + 1] = ""
+        else
+            formatted[#formatted + 1] = indent_text(line, base_level)
+        end
+    end
+
+    return formatted
+end
+
+--- @param highlight_ranges agentic.ui.MessageWriter.HighlightRange[]
+--- @param lines string[]
+--- @param base_level integer|nil
+local function offset_highlight_ranges(highlight_ranges, lines, base_level)
+    if not base_level or base_level <= 0 then
+        return
+    end
+
+    local offset = #indent_prefix(base_level)
+    if offset == 0 then
+        return
+    end
+
+    for _, hl_range in ipairs(highlight_ranges) do
+        local line = lines[hl_range.line_index + 1]
+        if line and line ~= "" then
+            if hl_range.start_col ~= nil then
+                hl_range.start_col = hl_range.start_col + offset
+            end
+            if hl_range.end_col ~= nil then
+                hl_range.end_col = hl_range.end_col + offset
+            end
+            if hl_range.display_prefix_len ~= nil then
+                hl_range.display_prefix_len = hl_range.display_prefix_len
+                    + offset
+            end
+        end
+    end
 end
 
 --- @param lines string[]|nil
@@ -941,37 +848,6 @@ local function count_body_lines(lines)
     end
 
     return #lines
-end
-
---- @param body string[]|nil
---- @return string[]
-local function build_preview_lines(body)
-    if not body or #body == 0 then
-        return {}
-    end
-
-    local preview = {}
-
-    for _, line in ipairs(body) do
-        local normalized = sanitize_single_line(line)
-        if normalized ~= "" then
-            preview[#preview + 1] =
-                truncate_single_line(normalized, MAX_TOOL_PREVIEW_WIDTH)
-        end
-
-        if #preview >= MAX_TOOL_PREVIEW_LINES then
-            break
-        end
-    end
-
-    if #preview == 0 then
-        preview[1] = truncate_single_line(
-            sanitize_single_line(body[1] or ""),
-            MAX_TOOL_PREVIEW_WIDTH
-        )
-    end
-
-    return preview
 end
 
 --- @param kind string|nil
@@ -1094,7 +970,11 @@ local function build_tool_title(tool_call_block)
 
     if tool_call_block.file_path and tool_call_block.file_path ~= "" then
         if tool_call_block.kind == "read" then
-            return string.format("%s %s", action, format_compact_path(tool_call_block.file_path))
+            return string.format(
+                "%s %s",
+                action,
+                format_compact_path(tool_call_block.file_path)
+            )
         end
     end
 
@@ -1112,24 +992,123 @@ local function build_tool_title(tool_call_block)
     end
 
     if tool_call_block.file_path and tool_call_block.file_path ~= "" then
-        return string.format("%s %s", action, format_compact_path(tool_call_block.file_path))
+        return string.format(
+            "%s %s",
+            action,
+            format_compact_path(tool_call_block.file_path)
+        )
     end
 
     return action
 end
 
 --- @param tool_call_block agentic.ui.MessageWriter.ToolCallBlock
---- @return boolean
-should_default_collapse = function(tool_call_block)
-    if tool_call_block.diff then
-        return true
+--- @return agentic.session.ToolCallContentNode[]
+local function get_tool_semantic_content_nodes(tool_call_block)
+    return tool_call_block.content_nodes or {}
+end
+
+--- @param tool_call_block agentic.ui.MessageWriter.ToolCallBlock
+--- @return integer
+local function count_tool_output_lines(tool_call_block)
+    local line_count = 0
+    local buffered_text = nil
+
+    local function flush_text_count()
+        line_count = line_count + #split_content_lines(buffered_text)
+        buffered_text = nil
     end
 
-    if tool_call_block.kind == "read" then
-        return false
+    for _, content_node in
+        ipairs(get_tool_semantic_content_nodes(tool_call_block))
+    do
+        if
+            content_node.type == "content_output"
+            and content_node.content_node
+        then
+            if content_node.content_node.type == "text_content" then
+                buffered_text = (buffered_text or "")
+                    .. (content_node.content_node.text or "")
+            else
+                flush_text_count()
+                line_count = line_count
+                    + count_content_lines(content_node.content_node)
+            end
+        else
+            flush_text_count()
+        end
     end
 
-    return count_body_lines(tool_call_block.body) > MAX_TOOL_PREVIEW_LINES
+    flush_text_count()
+
+    if line_count > 0 then
+        return line_count
+    end
+
+    return count_body_lines(tool_call_block.body)
+end
+
+--- @param tool_call_block agentic.ui.MessageWriter.ToolCallBlock
+--- @return string[]
+local function build_tool_semantic_summaries(tool_call_block)
+    local summaries = {}
+    local resource_links = 0
+    local resources = 0
+    local images = 0
+    local audio = 0
+    local terminals = 0
+
+    for _, content_node in
+        ipairs(get_tool_semantic_content_nodes(tool_call_block))
+    do
+        if
+            content_node.type == "content_output" and content_node.content_node
+        then
+            local semantic = content_node.content_node
+            if semantic.type == "resource_link_content" then
+                resource_links = resource_links + 1
+            elseif semantic.type == "resource_content" then
+                resources = resources + 1
+            elseif semantic.type == "image_content" then
+                images = images + 1
+            elseif semantic.type == "audio_content" then
+                audio = audio + 1
+            end
+        elseif content_node.type == "terminal_output" then
+            terminals = terminals + 1
+        end
+    end
+
+    local line_count = count_tool_output_lines(tool_call_block)
+    if line_count > 0 then
+        if tool_call_block.kind == "read" then
+            summaries[#summaries + 1] = string.format(
+                "%s loaded into context",
+                pluralize(line_count, "line")
+            )
+        else
+            summaries[#summaries + 1] =
+                build_output_summary(tool_call_block, line_count)
+        end
+    end
+    if resource_links > 0 then
+        summaries[#summaries + 1] = pluralize(resource_links, "linked resource")
+    end
+    if resources > 0 then
+        summaries[#summaries + 1] = pluralize(resources, "embedded resource")
+    end
+    if images > 0 then
+        summaries[#summaries + 1] = pluralize(images, "image")
+    end
+    if audio > 0 then
+        summaries[#summaries + 1] =
+            pluralize(audio, "audio clip", "audio clips")
+    end
+    if terminals > 0 then
+        summaries[#summaries + 1] = pluralize(terminals, "terminal")
+    end
+
+    return summaries
 end
 
 local append_comment_line
@@ -1139,10 +1118,221 @@ local append_highlighted_line
 
 --- @param lines string[]
 --- @param highlight_ranges agentic.ui.MessageWriter.HighlightRange[]
+--- @param level integer
+--- @param content_node agentic.session.InteractionContentNode
+local function append_semantic_tool_content_node(
+    lines,
+    highlight_ranges,
+    level,
+    content_node
+)
+    if content_node.type == "text_content" then
+        for _, line in ipairs(split_content_lines(content_node.text)) do
+            append_highlighted_line(
+                lines,
+                highlight_ranges,
+                indent_text(line, level),
+                Theme.HL_GROUPS.CARD_BODY
+            )
+        end
+    elseif content_node.type == "resource_link_content" then
+        append_spanned_line(lines, highlight_ranges, {
+            { indent_prefix(level), nil },
+            {
+                "@" .. get_content_display_name(content_node),
+                Theme.HL_GROUPS.RESOURCE_LINK,
+            },
+        })
+        if content_node.description and content_node.description ~= "" then
+            append_highlighted_line(
+                lines,
+                highlight_ranges,
+                indent_text(
+                    sanitize_single_line(content_node.description),
+                    level
+                ),
+                Theme.HL_GROUPS.CARD_DETAIL
+            )
+        end
+    elseif content_node.type == "resource_content" then
+        append_spanned_line(lines, highlight_ranges, {
+            { indent_prefix(level), nil },
+            {
+                "@" .. get_content_display_name(content_node),
+                Theme.HL_GROUPS.RESOURCE_LINK,
+            },
+        })
+        local detail = "embedded context"
+        local line_count = count_content_lines(content_node)
+        if line_count > 0 then
+            detail = detail .. " · " .. pluralize(line_count, "line")
+        elseif content_node.blob then
+            detail = detail .. " · binary data"
+        end
+        if content_node.mime_type and content_node.mime_type ~= "" then
+            detail = detail
+                .. " · "
+                .. sanitize_single_line(content_node.mime_type)
+        end
+        append_highlighted_line(
+            lines,
+            highlight_ranges,
+            indent_text(detail, level),
+            Theme.HL_GROUPS.CARD_DETAIL
+        )
+        if content_node.text and content_node.text ~= "" then
+            for _, line in ipairs(split_content_lines(content_node.text)) do
+                append_highlighted_line(
+                    lines,
+                    highlight_ranges,
+                    indent_text(line, level + 1),
+                    Theme.HL_GROUPS.CARD_BODY
+                )
+            end
+        end
+    elseif content_node.type == "image_content" then
+        local label = "image"
+        if content_node.mime_type and content_node.mime_type ~= "" then
+            label = label
+                .. " · "
+                .. sanitize_single_line(content_node.mime_type)
+        end
+        append_highlighted_line(
+            lines,
+            highlight_ranges,
+            indent_text(label, level),
+            Theme.HL_GROUPS.CARD_DETAIL
+        )
+    elseif content_node.type == "audio_content" then
+        local label = "audio"
+        if content_node.mime_type and content_node.mime_type ~= "" then
+            label = label
+                .. " · "
+                .. sanitize_single_line(content_node.mime_type)
+        end
+        append_highlighted_line(
+            lines,
+            highlight_ranges,
+            indent_text(label, level),
+            Theme.HL_GROUPS.CARD_DETAIL
+        )
+    elseif content_node.type == "unknown_content" then
+        append_highlighted_line(
+            lines,
+            highlight_ranges,
+            indent_text(
+                "content · "
+                    .. sanitize_single_line(
+                        content_node.content.type or "unknown"
+                    ),
+                level
+            ),
+            Theme.HL_GROUPS.CARD_DETAIL
+        )
+    end
+end
+
+--- @param lines string[]
+--- @param highlight_ranges agentic.ui.MessageWriter.HighlightRange[]
+--- @param tool_call_block agentic.ui.MessageWriter.ToolCallBlock
+local function append_tool_semantic_details(
+    lines,
+    highlight_ranges,
+    tool_call_block
+)
+    local rendered_semantic_content = false
+    local buffered_text = nil
+
+    local function flush_text_output()
+        if buffered_text == nil then
+            return
+        end
+
+        rendered_semantic_content = true
+        buffered_text = flush_buffered_text_lines(buffered_text, function(line)
+            append_highlighted_line(
+                lines,
+                highlight_ranges,
+                indent_text(line, HIERARCHY_LEVEL.detail),
+                Theme.HL_GROUPS.CARD_BODY
+            )
+        end)
+    end
+
+    for _, content_node in
+        ipairs(get_tool_semantic_content_nodes(tool_call_block))
+    do
+        if
+            content_node.type == "content_output"
+            and content_node.content_node
+            and content_node.content_node.type == "text_content"
+        then
+            buffered_text = (buffered_text or "")
+                .. (content_node.content_node.text or "")
+        elseif
+            content_node.type == "content_output" and content_node.content_node
+        then
+            flush_text_output()
+            rendered_semantic_content = true
+            append_semantic_tool_content_node(
+                lines,
+                highlight_ranges,
+                HIERARCHY_LEVEL.detail,
+                content_node.content_node
+            )
+        elseif content_node.type == "terminal_output" then
+            flush_text_output()
+            rendered_semantic_content = true
+            append_highlighted_line(
+                lines,
+                highlight_ranges,
+                indent_text(
+                    "terminal attached · "
+                        .. sanitize_single_line(content_node.terminal_id),
+                    HIERARCHY_LEVEL.detail
+                ),
+                Theme.HL_GROUPS.CARD_DETAIL
+            )
+        end
+    end
+
+    flush_text_output()
+
+    if rendered_semantic_content or not tool_call_block.body then
+        return
+    end
+
+    for _, line in ipairs(tool_call_block.body) do
+        append_highlighted_line(
+            lines,
+            highlight_ranges,
+            indent_text(line, HIERARCHY_LEVEL.detail),
+            Theme.HL_GROUPS.CARD_BODY
+        )
+    end
+end
+
+--- @param tool_call_block agentic.ui.MessageWriter.ToolCallBlock
+--- @return boolean
+should_default_collapse = function(tool_call_block)
+    if tool_call_block.diff then
+        return true
+    end
+
+    if #get_tool_semantic_content_nodes(tool_call_block) > 0 then
+        return true
+    end
+
+    return count_body_lines(tool_call_block.body) > 0
+end
+
+--- @param lines string[]
+--- @param highlight_ranges agentic.ui.MessageWriter.HighlightRange[]
 --- @param tool_call_block agentic.ui.MessageWriter.ToolCallBlock
 local function append_tool_header(lines, highlight_ranges, tool_call_block)
     local is_collapsible = tool_call_block.collapsed ~= nil
-    local prefix = is_collapsible and (tool_call_block.collapsed and "▸ " or "▾ ")
+    local prefix = is_collapsible
+            and (tool_call_block.collapsed and "▸ " or "▾ ")
         or ""
 
     append_spanned_line(lines, highlight_ranges, {
@@ -1157,20 +1347,37 @@ end
 local function append_read_card(lines, highlight_ranges, tool_call_block)
     append_tool_header(lines, highlight_ranges, tool_call_block)
 
-    local line_count = count_body_lines(tool_call_block.body)
-    if line_count > 0 then
+    local summaries = build_tool_semantic_summaries(tool_call_block)
+    if #summaries == 0 then
+        return
+    end
+
+    for _, summary in ipairs(summaries) do
         append_highlighted_line(
             lines,
             highlight_ranges,
-            indent_text(
-                string.format(
-                    "%s loaded into context",
-                    pluralize(line_count, "line")
-                ),
-                CARD_DETAIL_PREFIX
-            ),
+            indent_text(summary, HIERARCHY_LEVEL.detail),
             Theme.HL_GROUPS.CARD_DETAIL
         )
+    end
+
+    if tool_call_block.collapsed == false then
+        append_tool_semantic_details(lines, highlight_ranges, tool_call_block)
+        append_spanned_line(lines, highlight_ranges, {
+            { indent_prefix(HIERARCHY_LEVEL.detail), nil },
+            { "<CR> collapse", Theme.HL_GROUPS.CARD_DETAIL },
+        })
+        return
+    end
+
+    if tool_call_block.collapsed ~= nil then
+        append_spanned_line(lines, highlight_ranges, {
+            {
+                indent_text("Details hidden · ", HIERARCHY_LEVEL.detail),
+                Theme.HL_GROUPS.FOLD_HINT,
+            },
+            { "<CR> expand", Theme.HL_GROUPS.FOLD_HINT },
+        })
     end
 end
 
@@ -1180,60 +1387,36 @@ end
 local function append_result_card(lines, highlight_ranges, tool_call_block)
     append_tool_header(lines, highlight_ranges, tool_call_block)
 
-    local body = tool_call_block.body or {}
-    local line_count = count_body_lines(body)
-
-    if line_count == 0 then
+    local summaries = build_tool_semantic_summaries(tool_call_block)
+    if #summaries == 0 then
         return
     end
 
-    append_highlighted_line(
-        lines,
-        highlight_ranges,
-        indent_text(
-            build_output_summary(tool_call_block, line_count),
-            CARD_DETAIL_PREFIX
-        ),
-        Theme.HL_GROUPS.CARD_DETAIL
-    )
+    for _, summary in ipairs(summaries) do
+        append_highlighted_line(
+            lines,
+            highlight_ranges,
+            indent_text(summary, HIERARCHY_LEVEL.detail),
+            Theme.HL_GROUPS.CARD_DETAIL
+        )
+    end
 
     if tool_call_block.collapsed == false then
-        for _, line in ipairs(body) do
-            append_highlighted_line(
-                lines,
-                highlight_ranges,
-                indent_text(line, CARD_DETAIL_PREFIX),
-                Theme.HL_GROUPS.CARD_BODY
-            )
-        end
+        append_tool_semantic_details(lines, highlight_ranges, tool_call_block)
         append_spanned_line(lines, highlight_ranges, {
-            { CARD_DETAIL_PREFIX, nil },
+            { indent_prefix(HIERARCHY_LEVEL.detail), nil },
             { "<CR> collapse", Theme.HL_GROUPS.CARD_DETAIL },
         })
         return
     end
 
-    local preview_lines = build_preview_lines(body)
-    for _, line in ipairs(preview_lines) do
-        append_highlighted_line(
-            lines,
-            highlight_ranges,
-            indent_text(line, CARD_DETAIL_PREFIX),
-            Theme.HL_GROUPS.CARD_BODY
-        )
-    end
-
-    local hidden_count = math.max(line_count - #preview_lines, 0)
-    if hidden_count > 0 and tool_call_block.collapsed ~= nil then
+    if tool_call_block.collapsed ~= nil then
         append_spanned_line(lines, highlight_ranges, {
             {
-                indent_text(
-                    string.format("%s · ", pluralize(hidden_count, "more line")),
-                    CARD_DETAIL_PREFIX
-                ),
-                Theme.HL_GROUPS.CARD_DETAIL,
+                indent_text("Details hidden · ", HIERARCHY_LEVEL.detail),
+                Theme.HL_GROUPS.FOLD_HINT,
             },
-            { "<CR> expand", Theme.HL_GROUPS.CARD_DETAIL },
+            { "<CR> expand", Theme.HL_GROUPS.FOLD_HINT },
         })
     end
 end
@@ -1287,11 +1470,13 @@ end
 --- @param lines string[]
 --- @param highlight_ranges agentic.ui.MessageWriter.HighlightRange[]
 --- @param text string
-append_comment_line = function(lines, highlight_ranges, text)
+--- @param hl_group? string
+append_comment_line = function(lines, highlight_ranges, text, hl_group)
     table.insert(lines, text)
     highlight_ranges[#highlight_ranges + 1] = {
         type = "comment",
         line_index = #lines - 1,
+        hl_group = hl_group,
     }
 end
 
@@ -1356,7 +1541,7 @@ end
 --- @param status string
 append_status_line = function(lines, highlight_ranges, status)
     append_spanned_line(lines, highlight_ranges, {
-        { CARD_DETAIL_PREFIX, nil },
+        { indent_prefix(HIERARCHY_LEVEL.detail), nil },
         { format_status_label(status), Theme.get_status_hl_group(status) },
     })
 end
@@ -1473,7 +1658,10 @@ end
 --- @return agentic.ui.MessageWriter.DiffCardSample[]
 --- @return integer
 local function summarize_diff_tracker(tool_call_block)
-    if not tool_call_block._diff_sources or not tool_call_block._diff_source_order then
+    if
+        not tool_call_block._diff_sources
+        or not tool_call_block._diff_source_order
+    then
         return summarize_diff_blocks(ToolCallDiff.extract_diff_blocks({
             path = tool_call_block.file_path or "",
             old_text = tool_call_block.diff.old,
@@ -1510,7 +1698,8 @@ local function summarize_diff_tracker(tool_call_block)
                 stats.edit_count = stats.edit_count + 1
             end
             stats.hunk_count = stats.hunk_count + source_stats.hunk_count
-            stats.modifications = stats.modifications + source_stats.modifications
+            stats.modifications = stats.modifications
+                + source_stats.modifications
             stats.additions = stats.additions + source_stats.additions
             stats.deletions = stats.deletions + source_stats.deletions
 
@@ -1531,7 +1720,8 @@ local function append_diff_card_sample(lines, highlight_ranges, sample)
     append_comment_line(
         lines,
         highlight_ranges,
-        indent_text(sample.label, CARD_DETAIL_PREFIX)
+        indent_text(sample.label, HIERARCHY_LEVEL.detail),
+        Theme.HL_GROUPS.CARD_DETAIL
     )
 
     for _, pair in ipairs(sample.pairs) do
@@ -1543,7 +1733,7 @@ local function append_diff_card_sample(lines, highlight_ranges, sample)
                 pair.old_line,
                 pair.old_line,
                 pair.new_line,
-                CARD_NESTED_PREFIX .. "- "
+                indent_prefix(HIERARCHY_LEVEL.nested) .. "- "
             )
             append_diff_line(
                 lines,
@@ -1552,7 +1742,7 @@ local function append_diff_card_sample(lines, highlight_ranges, sample)
                 pair.new_line,
                 pair.old_line,
                 pair.new_line,
-                CARD_NESTED_PREFIX .. "+ "
+                indent_prefix(HIERARCHY_LEVEL.nested) .. "+ "
             )
         elseif pair.old_line then
             append_diff_line(
@@ -1562,7 +1752,7 @@ local function append_diff_card_sample(lines, highlight_ranges, sample)
                 pair.old_line,
                 pair.old_line,
                 nil,
-                CARD_NESTED_PREFIX .. "- "
+                indent_prefix(HIERARCHY_LEVEL.nested) .. "- "
             )
         elseif pair.new_line then
             append_diff_line(
@@ -1572,7 +1762,7 @@ local function append_diff_card_sample(lines, highlight_ranges, sample)
                 pair.new_line,
                 nil,
                 pair.new_line,
-                CARD_NESTED_PREFIX .. "+ "
+                indent_prefix(HIERARCHY_LEVEL.nested) .. "+ "
             )
         end
     end
@@ -1585,7 +1775,8 @@ local function append_diff_card(lines, highlight_ranges, tool_call_block)
     local diff_path = tool_call_block.file_path or ""
     local stats, samples, sampled_changes
     if tool_call_block.diff or tool_call_block._diff_sources then
-        stats, samples, sampled_changes = summarize_diff_tracker(tool_call_block)
+        stats, samples, sampled_changes =
+            summarize_diff_tracker(tool_call_block)
     else
         stats = {
             edit_count = 1,
@@ -1624,7 +1815,7 @@ local function append_diff_card(lines, highlight_ranges, tool_call_block)
     append_highlighted_line(
         lines,
         highlight_ranges,
-        indent_text(summary, CARD_DETAIL_PREFIX),
+        indent_text(summary, HIERARCHY_LEVEL.detail),
         Theme.HL_GROUPS.CARD_DETAIL
     )
 
@@ -1636,35 +1827,38 @@ local function append_diff_card(lines, highlight_ranges, tool_call_block)
         if is_collapsed then
             append_spanned_line(lines, highlight_ranges, {
                 {
-                    indent_text(hint .. " · ", CARD_DETAIL_PREFIX),
-                    Theme.HL_GROUPS.CARD_DETAIL,
+                    indent_text(hint .. " · ", HIERARCHY_LEVEL.detail),
+                    Theme.HL_GROUPS.FOLD_HINT,
                 },
-                { "<CR> expand", Theme.HL_GROUPS.CARD_DETAIL },
+                { "<CR> expand", Theme.HL_GROUPS.FOLD_HINT },
             })
         else
             append_spanned_line(lines, highlight_ranges, {
                 {
-                    indent_text(hint .. " · ", CARD_DETAIL_PREFIX),
-                    Theme.HL_GROUPS.CARD_DETAIL,
+                    indent_text(hint .. " · ", HIERARCHY_LEVEL.detail),
+                    Theme.HL_GROUPS.FOLD_HINT,
                 },
-                { "<CR> collapse", Theme.HL_GROUPS.CARD_DETAIL },
+                { "<CR> collapse", Theme.HL_GROUPS.FOLD_HINT },
             })
         end
     elseif is_collapsed then
         append_spanned_line(lines, highlight_ranges, {
             {
-                indent_text("Details hidden · ", CARD_DETAIL_PREFIX),
-                Theme.HL_GROUPS.CARD_DETAIL,
+                indent_text("Details hidden · ", HIERARCHY_LEVEL.detail),
+                Theme.HL_GROUPS.FOLD_HINT,
             },
-            { "<CR> expand", Theme.HL_GROUPS.CARD_DETAIL },
+            { "<CR> expand", Theme.HL_GROUPS.FOLD_HINT },
         })
     else
         append_spanned_line(lines, highlight_ranges, {
             {
-                indent_text("Inline details expanded · ", CARD_DETAIL_PREFIX),
-                Theme.HL_GROUPS.CARD_DETAIL,
+                indent_text(
+                    "Inline details expanded · ",
+                    HIERARCHY_LEVEL.detail
+                ),
+                Theme.HL_GROUPS.FOLD_HINT,
             },
-            { "<CR> collapse", Theme.HL_GROUPS.CARD_DETAIL },
+            { "<CR> collapse", Theme.HL_GROUPS.FOLD_HINT },
         })
     end
 
@@ -1677,11 +1871,12 @@ local function append_diff_card(lines, highlight_ranges, tool_call_block)
             lines,
             highlight_ranges,
             indent_text(
-            tool_call_block.status == "pending"
-                and "Preparing change preview"
-                or "No diff details available",
-                CARD_DETAIL_PREFIX
-            )
+                tool_call_block.status == "pending"
+                        and "Preparing change preview"
+                    or "No diff details available",
+                HIERARCHY_LEVEL.detail
+            ),
+            Theme.HL_GROUPS.CARD_DETAIL
         )
         return
     end
@@ -1702,8 +1897,9 @@ local function append_diff_card(lines, highlight_ranges, tool_call_block)
                     "... %s in buffer review",
                     pluralize(total_changes - sampled_changes, "more change")
                 ),
-                CARD_DETAIL_PREFIX
-            )
+                HIERARCHY_LEVEL.detail
+            ),
+            Theme.HL_GROUPS.CARD_DETAIL
         )
     end
 end
@@ -1733,30 +1929,38 @@ function MessageWriter:_prepare_block_lines(tool_call_block)
 
     table.insert(lines, "")
 
+    offset_highlight_ranges(highlight_ranges, lines, HIERARCHY_LEVEL.detail)
+    lines = apply_block_hierarchy(lines, HIERARCHY_LEVEL.detail)
+
     return lines, highlight_ranges
 end
 
 --- @param buffer_line integer
---- @return agentic.ui.MessageWriter.ToolCallBlock|nil
+--- @return table|nil
 function MessageWriter:_find_tool_call_block_at_line(buffer_line)
-    for _, tracker in pairs(self.tool_call_blocks) do
-        if tracker.extmark_id then
-            local pos = vim.api.nvim_buf_get_extmark_by_id(
-                self.bufnr,
-                NS_TOOL_BLOCKS,
-                tracker.extmark_id,
-                { details = true }
-            )
+    for _, trackers in ipairs({
+        self._request_content_blocks,
+        self.tool_call_blocks,
+    }) do
+        for _, tracker in pairs(trackers) do
+            if tracker.extmark_id then
+                local pos = vim.api.nvim_buf_get_extmark_by_id(
+                    self.bufnr,
+                    NS_TOOL_BLOCKS,
+                    tracker.extmark_id,
+                    { details = true }
+                )
 
-            local start_row = pos and pos[1]
-            local end_row = pos and pos[3] and pos[3].end_row
-            if
-                start_row ~= nil
-                and end_row ~= nil
-                and buffer_line >= start_row
-                and buffer_line <= end_row
-            then
-                return tracker
+                local start_row = pos and pos[1]
+                local end_row = pos and pos[3] and pos[3].end_row
+                if
+                    start_row ~= nil
+                    and end_row ~= nil
+                    and buffer_line >= start_row
+                    and buffer_line <= end_row
+                then
+                    return tracker
+                end
             end
         end
     end
@@ -1766,17 +1970,22 @@ end
 
 --- @param buffer_line integer
 --- @return boolean toggled
-function MessageWriter:toggle_diff_block_at_line(buffer_line)
+function MessageWriter:toggle_tool_block_at_line(buffer_line)
     local tracker = self:_find_tool_call_block_at_line(buffer_line)
     if not tracker or tracker.collapsed == nil then
         return false
     end
 
-    self:update_tool_call_block({
-        tool_call_id = tracker.tool_call_id,
-        collapsed = tracker.collapsed == false,
-        refresh_body = true,
-    })
+    tracker.collapsed = tracker.collapsed == false
+
+    if not self._last_interaction_session then
+        return false
+    end
+
+    self:render_interaction_session(
+        self._last_interaction_session,
+        self._last_render_opts
+    )
 
     return true
 end
@@ -1853,7 +2062,8 @@ function MessageWriter:_apply_diff_highlights(start_row, highlight_ranges)
                     0,
                     {
                         end_col = #line,
-                        hl_group = "Comment",
+                        hl_group = hl_range.hl_group
+                            or Theme.HL_GROUPS.CARD_DETAIL,
                     }
                 )
             end
@@ -1873,6 +2083,918 @@ function MessageWriter:_apply_diff_highlights(start_row, highlight_ranges)
             )
         end
     end
+end
+
+--- @param lines string[]
+--- @param content_nodes agentic.session.InteractionContentNode[]|nil
+--- @param opts {show_embedded_text?: boolean|nil}
+local function append_semantic_content_lines(lines, content_nodes, opts)
+    opts = opts or {}
+    local buffered_text = nil
+
+    local function flush_text_content()
+        buffered_text = flush_buffered_text_lines(buffered_text, function(line)
+            lines[#lines + 1] = line
+        end)
+    end
+
+    for _, content_node in ipairs(content_nodes or {}) do
+        if content_node.type == "text_content" then
+            buffered_text = (buffered_text or "") .. (content_node.text or "")
+        elseif content_node.type == "resource_link_content" then
+            flush_text_content()
+            local label = get_content_display_name(content_node)
+            lines[#lines + 1] = "@" .. label
+            if content_node.description and content_node.description ~= "" then
+                lines[#lines + 1] = "linked resource · "
+                    .. sanitize_single_line(content_node.description)
+            elseif content_node.mime_type and content_node.mime_type ~= "" then
+                lines[#lines + 1] = "linked resource · "
+                    .. sanitize_single_line(content_node.mime_type)
+            else
+                lines[#lines + 1] = "linked resource"
+            end
+        elseif content_node.type == "resource_content" then
+            flush_text_content()
+            local label = get_content_display_name(content_node)
+            lines[#lines + 1] = "@" .. label
+
+            local detail = "embedded context"
+            local line_count = count_content_lines(content_node)
+            if line_count > 0 then
+                detail = detail .. " · " .. pluralize(line_count, "line")
+            elseif content_node.blob then
+                detail = detail .. " · binary data"
+            end
+            if content_node.mime_type and content_node.mime_type ~= "" then
+                detail = detail
+                    .. " · "
+                    .. sanitize_single_line(content_node.mime_type)
+            end
+            lines[#lines + 1] = detail
+
+            if
+                opts.show_embedded_text
+                and content_node.text
+                and content_node.text ~= ""
+            then
+                for _, line in ipairs(split_content_lines(content_node.text)) do
+                    lines[#lines + 1] = line
+                end
+            end
+        elseif content_node.type == "image_content" then
+            flush_text_content()
+            local label = "image"
+            if content_node.mime_type and content_node.mime_type ~= "" then
+                label = label
+                    .. " · "
+                    .. sanitize_single_line(content_node.mime_type)
+            end
+            if content_node.uri and content_node.uri ~= "" then
+                label = label .. " · " .. format_content_uri(content_node.uri)
+            end
+            lines[#lines + 1] = label
+        elseif content_node.type == "audio_content" then
+            flush_text_content()
+            local label = "audio"
+            if content_node.mime_type and content_node.mime_type ~= "" then
+                label = label
+                    .. " · "
+                    .. sanitize_single_line(content_node.mime_type)
+            end
+            lines[#lines + 1] = label
+        elseif content_node.type == "unknown_content" then
+            flush_text_content()
+            local raw_type =
+                sanitize_single_line(content_node.content.type or "unknown")
+            lines[#lines + 1] = "content · " .. raw_type
+        end
+    end
+
+    flush_text_content()
+end
+
+--- @param content_nodes agentic.session.InteractionContentNode[]|nil
+--- @return string[]
+local function build_semantic_content_lines(content_nodes)
+    local lines = {}
+    append_semantic_content_lines(lines, content_nodes, {
+        show_embedded_text = false,
+    })
+    return lines
+end
+
+--- @param request agentic.session.InteractionRequest
+--- @return string[]
+local function build_request_header_lines(request)
+    if not request then
+        return {}
+    end
+
+    local timestamp = request.timestamp
+            and os.date("%Y-%m-%d %H:%M:%S", request.timestamp)
+        or os.date("%Y-%m-%d %H:%M:%S")
+    local label = request.kind == "review" and "Review" or "User"
+
+    return {
+        build_meta_line(label, timestamp),
+    }
+end
+
+--- @param content_node agentic.session.InteractionContentNode
+--- @return string
+local function get_request_content_type_label(content_node)
+    if content_node.type == "text_content" then
+        return "text"
+    end
+
+    if content_node.type == "resource_link_content" then
+        return "resource_link"
+    end
+
+    if content_node.type == "resource_content" then
+        return "resource"
+    end
+
+    if content_node.type == "image_content" then
+        return "image"
+    end
+
+    if content_node.type == "audio_content" then
+        return "audio"
+    end
+
+    return "unknown"
+end
+
+--- @param content_node agentic.session.InteractionContentNode
+--- @return string[]
+local function build_request_content_summaries(content_node)
+    if content_node.type == "text_content" then
+        local root_tag = content_node.xml_root_tag
+        local line_count = count_content_lines(content_node)
+        if root_tag then
+            return {
+                string.format(
+                    "structured text · %s · %s",
+                    root_tag,
+                    pluralize(line_count, "line")
+                ),
+            }
+        end
+
+        local preview = truncate_single_line(content_node.text, 72)
+        if preview ~= "" and line_count > 1 then
+            preview = preview .. " · " .. pluralize(line_count, "line")
+        elseif preview == "" then
+            preview = pluralize(line_count, "line")
+        end
+
+        return { preview }
+    end
+
+    if content_node.type == "resource_link_content" then
+        return {
+            get_content_display_name(content_node),
+        }
+    end
+
+    if content_node.type == "resource_content" then
+        local detail = get_content_display_name(content_node)
+        local line_count = count_content_lines(content_node)
+        if line_count > 0 then
+            detail = detail .. " · " .. pluralize(line_count, "line")
+        elseif content_node.blob then
+            detail = detail .. " · binary data"
+        end
+        if content_node.mime_type and content_node.mime_type ~= "" then
+            detail = detail
+                .. " · "
+                .. sanitize_single_line(content_node.mime_type)
+        end
+
+        return { detail }
+    end
+
+    if content_node.type == "image_content" then
+        local detail = "image"
+        if content_node.mime_type and content_node.mime_type ~= "" then
+            detail = detail
+                .. " · "
+                .. sanitize_single_line(content_node.mime_type)
+        end
+        if content_node.uri and content_node.uri ~= "" then
+            detail = detail .. " · " .. format_content_uri(content_node.uri)
+        end
+        return { detail }
+    end
+
+    if content_node.type == "audio_content" then
+        local detail = "audio"
+        if content_node.mime_type and content_node.mime_type ~= "" then
+            detail = detail
+                .. " · "
+                .. sanitize_single_line(content_node.mime_type)
+        end
+        return { detail }
+    end
+
+    return {
+        "content · "
+            .. sanitize_single_line(content_node.content.type or "unknown"),
+    }
+end
+
+--- @param lines string[]
+--- @param highlight_ranges agentic.ui.MessageWriter.HighlightRange[]
+--- @param label string
+--- @param value string
+--- @param level integer
+local function append_request_field_line(
+    lines,
+    highlight_ranges,
+    label,
+    value,
+    level
+)
+    append_spanned_line(lines, highlight_ranges, {
+        { indent_text(label .. ": ", level), Theme.HL_GROUPS.CARD_DETAIL },
+        { value, Theme.HL_GROUPS.CARD_BODY },
+    })
+end
+
+--- @param lines string[]
+--- @param highlight_ranges agentic.ui.MessageWriter.HighlightRange[]
+--- @param content_node agentic.session.InteractionContentNode
+local function append_request_content_details(
+    lines,
+    highlight_ranges,
+    content_node
+)
+    if content_node.type == "text_content" then
+        for _, line in ipairs(split_content_lines(content_node.text)) do
+            append_highlighted_line(
+                lines,
+                highlight_ranges,
+                indent_text(line, HIERARCHY_LEVEL.detail),
+                Theme.HL_GROUPS.CARD_BODY
+            )
+        end
+        return
+    end
+
+    if content_node.type == "resource_link_content" then
+        append_request_field_line(
+            lines,
+            highlight_ranges,
+            "uri",
+            sanitize_single_line(content_node.uri),
+            HIERARCHY_LEVEL.detail
+        )
+        append_request_field_line(
+            lines,
+            highlight_ranges,
+            "name",
+            sanitize_single_line(content_node.name),
+            HIERARCHY_LEVEL.detail
+        )
+        if content_node.title and content_node.title ~= "" then
+            append_request_field_line(
+                lines,
+                highlight_ranges,
+                "title",
+                sanitize_single_line(content_node.title),
+                HIERARCHY_LEVEL.detail
+            )
+        end
+        if content_node.description and content_node.description ~= "" then
+            append_request_field_line(
+                lines,
+                highlight_ranges,
+                "description",
+                sanitize_single_line(content_node.description),
+                HIERARCHY_LEVEL.detail
+            )
+        end
+        if content_node.mime_type and content_node.mime_type ~= "" then
+            append_request_field_line(
+                lines,
+                highlight_ranges,
+                "mimeType",
+                sanitize_single_line(content_node.mime_type),
+                HIERARCHY_LEVEL.detail
+            )
+        end
+        return
+    end
+
+    if content_node.type == "resource_content" then
+        append_request_field_line(
+            lines,
+            highlight_ranges,
+            "uri",
+            sanitize_single_line(content_node.uri),
+            HIERARCHY_LEVEL.detail
+        )
+        if content_node.mime_type and content_node.mime_type ~= "" then
+            append_request_field_line(
+                lines,
+                highlight_ranges,
+                "mimeType",
+                sanitize_single_line(content_node.mime_type),
+                HIERARCHY_LEVEL.detail
+            )
+        end
+        if content_node.text and content_node.text ~= "" then
+            append_highlighted_line(
+                lines,
+                highlight_ranges,
+                indent_text("text:", HIERARCHY_LEVEL.detail),
+                Theme.HL_GROUPS.CARD_DETAIL
+            )
+            for _, line in ipairs(split_content_lines(content_node.text)) do
+                append_highlighted_line(
+                    lines,
+                    highlight_ranges,
+                    indent_text(line, HIERARCHY_LEVEL.nested),
+                    Theme.HL_GROUPS.CARD_BODY
+                )
+            end
+        elseif content_node.blob then
+            append_highlighted_line(
+                lines,
+                highlight_ranges,
+                indent_text(
+                    "blob: binary payload omitted",
+                    HIERARCHY_LEVEL.detail
+                ),
+                Theme.HL_GROUPS.CARD_DETAIL
+            )
+        end
+        return
+    end
+
+    if content_node.type == "image_content" then
+        if content_node.mime_type and content_node.mime_type ~= "" then
+            append_request_field_line(
+                lines,
+                highlight_ranges,
+                "mimeType",
+                sanitize_single_line(content_node.mime_type),
+                HIERARCHY_LEVEL.detail
+            )
+        end
+        if content_node.uri and content_node.uri ~= "" then
+            append_request_field_line(
+                lines,
+                highlight_ranges,
+                "uri",
+                sanitize_single_line(content_node.uri),
+                HIERARCHY_LEVEL.detail
+            )
+        end
+        append_highlighted_line(
+            lines,
+            highlight_ranges,
+            indent_text("data: binary payload omitted", HIERARCHY_LEVEL.detail),
+            Theme.HL_GROUPS.CARD_DETAIL
+        )
+        return
+    end
+
+    if content_node.type == "audio_content" then
+        if content_node.mime_type and content_node.mime_type ~= "" then
+            append_request_field_line(
+                lines,
+                highlight_ranges,
+                "mimeType",
+                sanitize_single_line(content_node.mime_type),
+                HIERARCHY_LEVEL.detail
+            )
+        end
+        append_highlighted_line(
+            lines,
+            highlight_ranges,
+            indent_text("data: binary payload omitted", HIERARCHY_LEVEL.detail),
+            Theme.HL_GROUPS.CARD_DETAIL
+        )
+        return
+    end
+
+    append_highlighted_line(
+        lines,
+        highlight_ranges,
+        indent_text(
+            "content type: "
+                .. sanitize_single_line(content_node.content.type or "unknown"),
+            HIERARCHY_LEVEL.detail
+        ),
+        Theme.HL_GROUPS.CARD_DETAIL
+    )
+end
+
+--- @param lines string[]
+--- @param highlight_ranges agentic.ui.MessageWriter.HighlightRange[]
+--- @param tracker agentic.ui.MessageWriter.RequestContentBlock
+local function append_request_content_card(lines, highlight_ranges, tracker)
+    append_spanned_line(lines, highlight_ranges, {
+        { tracker.collapsed and "▸ " or "▾ ", "Comment" },
+        {
+            get_request_content_type_label(tracker.content_node),
+            Theme.HL_GROUPS.CARD_TITLE,
+        },
+    })
+
+    for _, summary in
+        ipairs(build_request_content_summaries(tracker.content_node))
+    do
+        append_highlighted_line(
+            lines,
+            highlight_ranges,
+            indent_text(summary, HIERARCHY_LEVEL.detail),
+            Theme.HL_GROUPS.CARD_DETAIL
+        )
+    end
+
+    if tracker.collapsed then
+        append_spanned_line(lines, highlight_ranges, {
+            {
+                indent_text("Details hidden · ", HIERARCHY_LEVEL.detail),
+                Theme.HL_GROUPS.FOLD_HINT,
+            },
+            { "<CR> expand", Theme.HL_GROUPS.FOLD_HINT },
+        })
+        return
+    end
+
+    append_request_content_details(
+        lines,
+        highlight_ranges,
+        tracker.content_node
+    )
+    append_spanned_line(lines, highlight_ranges, {
+        { indent_prefix(HIERARCHY_LEVEL.detail), nil },
+        { "<CR> collapse", Theme.HL_GROUPS.CARD_DETAIL },
+    })
+end
+
+--- @param tracker agentic.ui.MessageWriter.RequestContentBlock
+--- @return string[]
+--- @return agentic.ui.MessageWriter.HighlightRange[]
+function MessageWriter:_prepare_request_content_block_lines(tracker)
+    local lines = {}
+
+    --- @type agentic.ui.MessageWriter.HighlightRange[]
+    local highlight_ranges = {}
+
+    append_request_content_card(lines, highlight_ranges, tracker)
+    table.insert(lines, "")
+
+    offset_highlight_ranges(highlight_ranges, lines, HIERARCHY_LEVEL.detail)
+    lines = apply_block_hierarchy(lines, HIERARCHY_LEVEL.detail)
+
+    return lines, highlight_ranges
+end
+
+--- @param turn_index integer
+--- @param content_index integer
+--- @return string
+local function build_request_content_block_id(turn_index, content_index)
+    return string.format("request:%d:%d", turn_index, content_index)
+end
+
+--- @param request agentic.session.InteractionRequest
+--- @param turn_index integer
+--- @param previous_blocks table<string, agentic.ui.MessageWriter.RequestContentBlock>
+--- @return table[]
+local function build_request_items(request, turn_index, previous_blocks)
+    local items = {}
+
+    for _, request_node in ipairs(request.nodes or {}) do
+        if request_node.type == "request_text" then
+            items[#items + 1] = {
+                type = "lines",
+                lines = split_content_lines(request_node.text),
+            }
+        else
+            local block_id = build_request_content_block_id(
+                turn_index,
+                request_node.content_index
+            )
+            local previous = previous_blocks[block_id]
+
+            --- @type agentic.ui.MessageWriter.RequestContentBlock
+            local tracker = {
+                block_id = block_id,
+                content_node = vim.deepcopy(request_node.content_node),
+                collapsed = previous and previous.collapsed or true,
+            }
+
+            if previous and previous.collapsed == false then
+                tracker.collapsed = false
+            end
+
+            items[#items + 1] = {
+                type = "request_content",
+                tracker = tracker,
+            }
+        end
+    end
+
+    if #items == 0 and request.text ~= "" then
+        items[#items + 1] = {
+            type = "lines",
+            lines = vim.split(request.text, "\n", { plain = true }),
+        }
+    end
+
+    return items
+end
+
+--- @param request agentic.session.InteractionRequest
+--- @return string[]
+local function build_request_lines(request)
+    return apply_transcript_hierarchy(build_request_header_lines(request))
+end
+
+--- @param result agentic.session.InteractionTurnResult
+--- @return string[]
+local function build_turn_result_lines(result)
+    local lines = {}
+
+    if result.error_text and result.error_text ~= "" then
+        lines[#lines + 1] = build_meta_line("Agent error", "details below")
+        for _, line in
+            ipairs(vim.split(result.error_text, "\n", { plain = true }))
+        do
+            lines[#lines + 1] = line
+        end
+    elseif result.stop_reason == "cancelled" then
+        lines[#lines + 1] = build_meta_line("Stopped", "user request")
+    end
+
+    lines[#lines + 1] = build_meta_line(
+        "Turn complete",
+        os.date("%Y-%m-%d %H:%M:%S", result.timestamp or os.time())
+    )
+
+    return apply_transcript_hierarchy(lines)
+end
+
+--- @param node agentic.session.InteractionPlanNode
+--- @return string[]
+local function build_plan_lines(node)
+    local lines = {
+        indent_text("Plan", HIERARCHY_LEVEL.detail),
+    }
+
+    for _, entry in ipairs(node.entries or {}) do
+        local status = sanitize_single_line(entry.status or "pending")
+        local content = sanitize_single_line(entry.content or "")
+        if content ~= "" then
+            lines[#lines + 1] = indent_text(
+                string.format("[%s] %s", status, content),
+                HIERARCHY_LEVEL.nested
+            )
+        end
+    end
+
+    return lines
+end
+
+--- @param node agentic.session.InteractionToolCallNode
+--- @param previous_blocks table<string, agentic.ui.MessageWriter.ToolCallBlock>
+--- @return agentic.ui.MessageWriter.ToolCallBlock
+function MessageWriter:_build_tool_call_block_from_node(node, previous_blocks)
+    local block = {
+        tool_call_id = node.tool_call_id or tostring(vim.loop.hrtime()),
+        kind = node.kind,
+        argument = node.title,
+        status = node.status,
+        file_path = node.file_path,
+        terminal_id = node.terminal_id,
+        body = {},
+        diff = nil,
+        content_nodes = vim.deepcopy(node.content_nodes or {}),
+        collapsed = nil,
+    }
+
+    local function append_body_lines(lines)
+        if not lines or #lines == 0 then
+            return
+        end
+
+        if #block.body > 0 then
+            vim.list_extend(block.body, { "", "---", "" })
+        end
+
+        for _, line in ipairs(lines) do
+            block.body[#block.body + 1] = line
+        end
+    end
+
+    local buffered_body_text = nil
+
+    local function flush_body_text()
+        if buffered_body_text == nil then
+            return
+        end
+
+        append_body_lines(split_content_lines(buffered_body_text))
+        buffered_body_text = nil
+    end
+
+    for _, content_node in ipairs(node.content_nodes or {}) do
+        if
+            content_node.type == "content_output"
+            and content_node.content_node
+            and content_node.content_node.type == "text_content"
+        then
+            buffered_body_text = (buffered_body_text or "")
+                .. (content_node.content_node.text or "")
+        elseif
+            content_node.type == "diff_output"
+            and content_node.old_lines
+            and content_node.new_lines
+        then
+            flush_body_text()
+            block.diff = {
+                old = vim.deepcopy(content_node.old_lines),
+                new = vim.deepcopy(content_node.new_lines),
+            }
+            block.file_path = content_node.file_path or block.file_path
+        elseif content_node.type == "terminal_output" then
+            flush_body_text()
+            block.terminal_id = content_node.terminal_id
+        end
+    end
+
+    flush_body_text()
+
+    if #block.body == 0 then
+        block.body = nil
+    end
+
+    local previous = previous_blocks[node.tool_call_id or ""]
+    if previous and previous.collapsed ~= nil then
+        block.collapsed = previous.collapsed
+    end
+
+    return block
+end
+
+--- @param tool_call_block agentic.ui.MessageWriter.ToolCallBlock
+--- @param previous_blocks table<string, agentic.ui.MessageWriter.ToolCallBlock>
+--- @param ordered_items table[]
+function MessageWriter:_register_interaction_tool_block(
+    tool_call_block,
+    previous_blocks,
+    ordered_items
+)
+    local existing_group_id = self:_get_active_diff_group_id(tool_call_block)
+    if
+        existing_group_id
+        and existing_group_id ~= tool_call_block.tool_call_id
+    then
+        local tracker = self.tool_call_blocks[existing_group_id]
+        if tracker then
+            self:_merge_diff_source(tracker, tool_call_block)
+        end
+        return
+    end
+
+    if is_diff_group_candidate(tool_call_block) then
+        tool_call_block = self:_initialize_diff_group(tool_call_block)
+    end
+
+    local previous = previous_blocks[tool_call_block.tool_call_id]
+    if previous and previous.collapsed ~= nil then
+        tool_call_block.collapsed = previous.collapsed
+    end
+
+    if
+        should_default_collapse(tool_call_block)
+        and tool_call_block.collapsed == nil
+    then
+        tool_call_block.collapsed = true
+    end
+
+    self.tool_call_blocks[tool_call_block.tool_call_id] = tool_call_block
+    ordered_items[#ordered_items + 1] = {
+        type = "tool_call",
+        tracker = tool_call_block,
+    }
+end
+
+--- @param interaction_session agentic.session.InteractionSession
+--- @param opts {welcome_lines?: string[]|nil}|nil
+function MessageWriter:render_interaction_session(interaction_session, opts)
+    opts = opts or {}
+    if not vim.api.nvim_buf_is_valid(self.bufnr) then
+        return
+    end
+
+    self:_auto_scroll(self.bufnr)
+
+    local previous_blocks = self.tool_call_blocks
+    local previous_request_blocks = self._request_content_blocks
+    self:reset()
+    self._last_interaction_session = vim.deepcopy(interaction_session)
+    self._last_render_opts = vim.deepcopy(opts)
+
+    local lines = {}
+    local meta_blocks = {}
+    local thought_blocks = {}
+    local fold_blocks = {}
+
+    local function append_block(block_lines, block_opts)
+        if not block_lines or #block_lines == 0 then
+            return
+        end
+
+        local join_with_previous = block_opts and block_opts.join_with_previous
+        if not join_with_previous and #lines > 0 and lines[#lines] ~= "" then
+            lines[#lines + 1] = ""
+        end
+
+        local start_row = #lines
+        vim.list_extend(lines, block_lines)
+        local end_row = #lines - 1
+
+        if block_opts and block_opts.meta then
+            meta_blocks[#meta_blocks + 1] = {
+                start_row = start_row,
+                lines = vim.deepcopy(block_lines),
+            }
+        end
+
+        if block_opts and block_opts.thought then
+            thought_blocks[#thought_blocks + 1] = {
+                start_row = start_row,
+                end_row = end_row,
+            }
+        end
+
+        if block_opts and block_opts.fold then
+            fold_blocks[#fold_blocks + 1] = {
+                start_row = start_row,
+                end_row = end_row,
+                kind = block_opts.fold.kind,
+                highlight_ranges = block_opts.fold.highlight_ranges,
+                tracker = block_opts.fold.tracker,
+            }
+        end
+    end
+
+    append_block(opts.welcome_lines or {}, { meta = true })
+
+    for _, turn in ipairs(interaction_session.turns or {}) do
+        self._current_turn_id = turn.index
+        self._active_turn_diff_cards = {}
+
+        append_block(build_request_lines(turn.request), { meta = true })
+
+        local request_items = build_request_items(
+            turn.request,
+            turn.index,
+            previous_request_blocks
+        )
+        local joined_to_request_header = true
+        for _, item in ipairs(request_items) do
+            local join_with_previous = joined_to_request_header
+            joined_to_request_header = false
+
+            if item.type == "lines" then
+                append_block(
+                    apply_block_hierarchy(item.lines, HIERARCHY_LEVEL.detail),
+                    { join_with_previous = join_with_previous }
+                )
+            elseif item.type == "request_content" and item.tracker then
+                self._request_content_blocks[item.tracker.block_id] =
+                    item.tracker
+                local block_lines, highlight_ranges =
+                    self:_prepare_request_content_block_lines(item.tracker)
+                append_block(block_lines, {
+                    join_with_previous = join_with_previous,
+                    fold = {
+                        kind = "request_content",
+                        highlight_ranges = highlight_ranges,
+                        tracker = item.tracker,
+                    },
+                })
+            end
+        end
+
+        local response_items = {}
+        for _, node in ipairs(turn.response.nodes or {}) do
+            if node.type == "tool_call" then
+                local block =
+                    self:_build_tool_call_block_from_node(node, previous_blocks)
+                self:_register_interaction_tool_block(
+                    block,
+                    previous_blocks,
+                    response_items
+                )
+            else
+                response_items[#response_items + 1] = node
+            end
+        end
+
+        local joined_to_response_header = false
+        if #response_items > 0 and turn.response.provider_name then
+            local header_lines =
+                self:_build_agent_header_lines(turn.response.provider_name)
+            append_block(header_lines, { meta = true })
+            joined_to_response_header = true
+        end
+
+        for _, item in ipairs(response_items) do
+            local join_with_previous = joined_to_response_header
+            joined_to_response_header = false
+            if item.type == "message" then
+                local block_lines =
+                    build_semantic_content_lines(item.content_nodes)
+                if #block_lines == 0 then
+                    block_lines =
+                        vim.split(item.text or "", "\n", { plain = true })
+                end
+                append_block(
+                    apply_block_hierarchy(block_lines, HIERARCHY_LEVEL.detail),
+                    { join_with_previous = join_with_previous }
+                )
+            elseif item.type == "thought" then
+                local block_lines =
+                    build_semantic_content_lines(item.content_nodes)
+                if #block_lines == 0 then
+                    block_lines =
+                        vim.split(item.text or "", "\n", { plain = true })
+                end
+                append_block(
+                    apply_block_hierarchy(block_lines, HIERARCHY_LEVEL.detail),
+                    {
+                        thought = true,
+                        join_with_previous = join_with_previous,
+                    }
+                )
+            elseif item.type == "plan" then
+                append_block(build_plan_lines(item), {
+                    join_with_previous = join_with_previous,
+                })
+            elseif item.type == "tool_call" and item.tracker then
+                local block_lines, highlight_ranges =
+                    self:_prepare_block_lines(item.tracker)
+                append_block(block_lines, {
+                    join_with_previous = join_with_previous,
+                    fold = {
+                        kind = item.tracker.kind or "other",
+                        highlight_ranges = highlight_ranges,
+                        tracker = item.tracker,
+                    },
+                })
+            end
+        end
+
+        if turn.result then
+            append_block(build_turn_result_lines(turn.result), { meta = true })
+        end
+    end
+
+    self:_with_modifiable_and_notify_change(function(bufnr)
+        vim.api.nvim_buf_clear_namespace(bufnr, NS_TOOL_BLOCKS, 0, -1)
+        vim.api.nvim_buf_clear_namespace(bufnr, NS_DIFF_HIGHLIGHTS, 0, -1)
+        vim.api.nvim_buf_clear_namespace(bufnr, NS_THOUGHT, 0, -1)
+        vim.api.nvim_buf_clear_namespace(bufnr, NS_TRANSCRIPT_META, 0, -1)
+        vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+
+        for _, block in ipairs(meta_blocks) do
+            self:_apply_transcript_meta_highlights(block.start_row, block.lines)
+        end
+
+        for _, block in ipairs(thought_blocks) do
+            self:_apply_thought_block_highlights(block.start_row, block.end_row)
+        end
+
+        for _, block in ipairs(fold_blocks) do
+            self:_apply_block_highlights(
+                bufnr,
+                block.start_row,
+                block.end_row,
+                block.kind or "other",
+                block.highlight_ranges or {}
+            )
+
+            block.tracker.extmark_id = vim.api.nvim_buf_set_extmark(
+                bufnr,
+                NS_TOOL_BLOCKS,
+                block.start_row,
+                0,
+                {
+                    end_row = block.end_row,
+                    right_gravity = false,
+                }
+            )
+        end
+    end)
 end
 
 return MessageWriter

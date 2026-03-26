@@ -2,6 +2,7 @@ local Config = require("agentic.config")
 local BufHelpers = require("agentic.utils.buf_helpers")
 local DiffPreview = require("agentic.ui.diff_preview")
 local ChatViewport = require("agentic.ui.chat_viewport")
+local KeymapHelp = require("agentic.ui.keymap_help")
 local Logger = require("agentic.utils.logger")
 local WindowDecoration = require("agentic.ui.window_decoration")
 local WidgetLayout = require("agentic.ui.widget_layout")
@@ -42,6 +43,8 @@ local WidgetLayout = require("agentic.ui.widget_layout")
 --- @field _message_writer? agentic.ui.MessageWriter
 local ChatWidget = {}
 ChatWidget.__index = ChatWidget
+local KEYMAP_HELP_KEY = "?"
+local KEYMAP_HELP_SUFFIX = "?: keymaps"
 
 --- @param tab_page_id integer
 --- @param on_submit_input fun(prompt: string)
@@ -375,6 +378,20 @@ function ChatWidget:focus_input()
     end)
 end
 
+--- @param text string
+function ChatWidget:set_input_text(text)
+    local normalized = (text or ""):gsub("\r", "")
+    local lines = vim.split(normalized, "\n", { plain = true })
+
+    if #lines == 0 then
+        lines = { "" }
+    end
+
+    BufHelpers.with_modifiable(self.buf_nrs.input, function(bufnr)
+        vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+    end)
+end
+
 function ChatWidget:_initialize()
     self.buf_nrs = self:_create_buf_nrs()
     self:_bind_keymaps()
@@ -460,6 +477,10 @@ function ChatWidget:_bind_keymaps()
             end,
             { desc = "Agentic: Switch provider" }
         )
+
+        BufHelpers.multi_keymap_set(KEYMAP_HELP_KEY, bufnr, function()
+            KeymapHelp.show_for_buffer(bufnr)
+        end, { desc = "Agentic: Show available keymaps" })
     end
 
     BufHelpers.keymap_set(self.buf_nrs.chat, "n", "<CR>", function()
@@ -474,7 +495,7 @@ function ChatWidget:_bind_keymaps()
 
         local cursor = vim.api.nvim_win_get_cursor(winid)
         local toggled =
-            self._message_writer:toggle_diff_block_at_line(cursor[1] - 1)
+            self._message_writer:toggle_tool_block_at_line(cursor[1] - 1)
 
         if not toggled then
             vim.cmd("normal! \\<CR>")
@@ -611,25 +632,11 @@ end
 --- @param mode string
 --- @return string|nil
 local function build_input_suffix(mode)
-    local parts = {}
-    local config_key = find_keymap(Config.keymaps.widget.change_mode, mode)
-    local queue_key = find_keymap(Config.keymaps.widget.manage_queue, mode)
+    local parts = { KEYMAP_HELP_SUFFIX }
     local submit_key = find_keymap(Config.keymaps.prompt.submit, mode)
-
-    if config_key ~= nil then
-        parts[#parts + 1] = string.format("%s: config", config_key)
-    end
-
-    if queue_key ~= nil then
-        parts[#parts + 1] = string.format("%s: queue", queue_key)
-    end
 
     if submit_key ~= nil then
         parts[#parts + 1] = string.format("%s: submit", submit_key)
-    end
-
-    if #parts == 0 then
-        return nil
     end
 
     return table.concat(parts, " · ")
@@ -642,7 +649,7 @@ function ChatWidget:_refresh_header_keymap_hints()
 
     local headers = WindowDecoration.get_headers_state(self.tab_page_id)
 
-    headers.chat.suffix = nil
+    headers.chat.suffix = KEYMAP_HELP_SUFFIX
     headers.input.suffix = build_input_suffix(vim.fn.mode())
 
     WindowDecoration.set_headers_state(self.tab_page_id, headers)

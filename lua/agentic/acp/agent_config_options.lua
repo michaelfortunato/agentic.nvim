@@ -9,27 +9,58 @@ local Logger = require("agentic.utils.logger")
 --- @field model? agentic.acp.ConfigOption
 --- @field thought_level? agentic.acp.ConfigOption
 --- @field approval_preset? agentic.acp.ConfigOption
---- @field legacy_agent_modes agentic.acp.AgentModes
---- @field legacy_agent_models agentic.acp.AgentModels
 --- @field _options agentic.acp.ConfigOption[]
 --- @field _options_by_id table<string, agentic.acp.ConfigOption>
---- @field _set_mode_callback fun(mode_id: string, is_legacy: boolean)
---- @field _set_model_callback fun(model_id: string, is_legacy: boolean)
+--- @field _set_mode_callback fun(mode_id: string)
+--- @field _set_model_callback fun(model_id: string)
 --- @field _set_config_option_callback fun(config_id: string, value: string)
 local AgentConfigOptions = {}
 AgentConfigOptions.__index = AgentConfigOptions
 
---- @param target agentic.acp.ConfigOption|nil
+--- @param option agentic.acp.ConfigOption|nil
+--- @return boolean
+local function is_select_option(option)
+    return option ~= nil and (option.type == nil or option.type == "select")
+end
+
+--- @param option agentic.acp.ConfigOption|nil
+--- @return agentic.acp.ConfigOption.Option[]
+local function flatten_option_values(option)
+    local options = option and option.options or nil
+    if
+        not is_select_option(option)
+        or type(options) ~= "table"
+        or #options == 0
+    then
+        return {}
+    end
+
+    local first = options[1]
+    if type(first) == "table" and first.options ~= nil then
+        local flattened = {}
+        for _, group in ipairs(options) do
+            for _, grouped_option in ipairs(group.options or {}) do
+                flattened[#flattened + 1] = grouped_option
+            end
+        end
+        return flattened
+    end
+
+    return options
+end
+
+--- @param option agentic.acp.ConfigOption|nil
 --- @param value string
 --- @return agentic.acp.ConfigOption.Option|nil
-local function get_option_value(target, value)
-    if not target or not target.options or #target.options == 0 then
+local function get_option_value(option, value)
+    local options = flatten_option_values(option)
+    if #options == 0 then
         return nil
     end
 
-    for _, option in ipairs(target.options) do
-        if option.value == value then
-            return option
+    for _, candidate in ipairs(options) do
+        if candidate.value == value then
+            return candidate
         end
     end
 
@@ -39,13 +70,29 @@ end
 --- @param option agentic.acp.ConfigOption|nil
 --- @return boolean
 local function has_select_options(option)
-    return option ~= nil and option.options ~= nil and #option.options > 0
+    return is_select_option(option) and #flatten_option_values(option) > 0
 end
 
 --- @param option agentic.acp.ConfigOption|nil
 --- @return string
 local function get_option_display_name(option)
     return option and option.name or "unknown"
+end
+
+--- @param option agentic.acp.ConfigOption
+--- @return string
+local function get_selector_prompt(option)
+    return string.format(
+        "Select %s (applies live):",
+        get_option_display_name(option)
+    )
+end
+
+--- @param option agentic.acp.ConfigOption
+--- @return string
+local function get_current_value_name(option)
+    local current = get_option_value(option, option.currentValue)
+    return current and current.name or option.currentValue or "unknown"
 end
 
 --- @param text string|nil
@@ -62,63 +109,21 @@ local function is_approval_preset_option(option)
     end
 
     local category = normalize_option_label(option.category)
-    if category == "approval_preset" or category == "approval preset" then
-        return true
-    end
-
-    local name = normalize_option_label(option.name)
-    local description = normalize_option_label(option.description)
-    local id = normalize_option_label(option.id)
-
-    local function matches_approval_label(text)
-        if text == "" then
-            return false
-        end
-
-        if text == "approval preset" then
-            return true
-        end
-
-        return text:find("approval", 1, true) ~= nil
-            and (
-                text:find("preset", 1, true) ~= nil
-                or text:find("mode", 1, true) ~= nil
-                or text:find("access", 1, true) ~= nil
-            )
-    end
-
-    return matches_approval_label(name)
-        or matches_approval_label(description)
-        or matches_approval_label(id)
-end
-
---- @param option agentic.acp.ConfigOption
---- @return string
-local function get_selector_prompt(option)
-    return string.format("Select %s (applies live):", get_option_display_name(option))
-end
-
---- @param option agentic.acp.ConfigOption
---- @return string
-local function get_current_value_name(option)
-    local current = get_option_value(option, option.currentValue)
-    return current and current.name or option.currentValue or "unknown"
+    return category == "approval_preset" or category == "approval preset"
 end
 
 --- @param parts string[]
 --- @param label string
 --- @param value string|nil
 local function append_summary_part(parts, label, value)
-    if not value or value == "" then
-        return
+    if value and value ~= "" then
+        parts[#parts + 1] = string.format("%s: %s", label, value)
     end
-
-    parts[#parts + 1] = string.format("%s: %s", label, value)
 end
 
---- @param buffers agentic.ui.ChatWidget.BufNrs Same buffers as ChatWidget instance
---- @param set_mode_callback fun(mode_id: string, is_legacy: boolean)
---- @param set_model_callback fun(model_id: string, is_legacy: boolean)
+--- @param buffers agentic.ui.ChatWidget.BufNrs
+--- @param set_mode_callback fun(mode_id: string)
+--- @param set_model_callback fun(model_id: string)
 --- @param set_config_option_callback? fun(config_id: string, value: string)
 --- @return agentic.acp.AgentConfigOptions
 function AgentConfigOptions:new(
@@ -127,16 +132,11 @@ function AgentConfigOptions:new(
     set_model_callback,
     set_config_option_callback
 )
-    local AgentModes = require("agentic.acp.agent_modes")
-    local AgentModels = require("agentic.acp.agent_models")
-
     self = setmetatable({
         mode = nil,
         model = nil,
         thought_level = nil,
         approval_preset = nil,
-        legacy_agent_modes = AgentModes:new(),
-        legacy_agent_models = AgentModels:new(),
         _options = {},
         _options_by_id = {},
         _set_mode_callback = set_mode_callback,
@@ -193,19 +193,17 @@ function AgentConfigOptions:clear()
     self.approval_preset = nil
     self._options = {}
     self._options_by_id = {}
-    self.legacy_agent_modes:clear()
-    self.legacy_agent_models:clear()
 end
 
---- @param configOptions agentic.acp.ConfigOption[]|nil
-function AgentConfigOptions:set_options(configOptions)
+--- @param config_options agentic.acp.ConfigOption[]|nil
+function AgentConfigOptions:set_options(config_options)
     self:clear()
 
-    if not configOptions then
+    if not config_options then
         return
     end
 
-    for _, option in ipairs(configOptions) do
+    for _, option in ipairs(config_options) do
         self._options[#self._options + 1] = option
         self._options_by_id[option.id] = option
 
@@ -221,55 +219,30 @@ function AgentConfigOptions:set_options(configOptions)
     end
 end
 
---- Modes from providers that don't support the new Config Options
---- @param modes_info agentic.acp.ModesInfo
-function AgentConfigOptions:set_legacy_modes(modes_info)
-    self.legacy_agent_modes:set_modes(modes_info)
-end
-
---- Models from providers that don't support the new Config Options
---- @param models_info agentic.acp.ModelsInfo
-function AgentConfigOptions:set_legacy_models(models_info)
-    self.legacy_agent_models:set_models(models_info)
-end
-
 --- @param target_mode string|nil
---- @param handle_mode_change fun(mode: string, is_legacy: boolean|nil): any
+--- @param handle_mode_change fun(mode: string): any
 function AgentConfigOptions:set_initial_mode(target_mode, handle_mode_change)
     if not target_mode or target_mode == "" then
         Logger.debug("not setting initial mode", target_mode)
         return
     end
 
-    local is_legacy = false
-    local can_switch = false
-
-    if self:get_mode(target_mode) ~= nil then
-        can_switch = target_mode ~= self.mode.currentValue
-        Logger.debug("Setting initial config mode", target_mode, can_switch)
-    elseif self.legacy_agent_modes:get_mode(target_mode) ~= nil then
-        is_legacy = true
-        can_switch = target_mode ~= self.legacy_agent_modes.current_mode_id
-        Logger.debug("Setting initial legacy mode", target_mode, can_switch)
+    local mode = self:get_mode(target_mode)
+    if mode and self.mode and target_mode ~= self.mode.currentValue then
+        handle_mode_change(target_mode)
+        return
     end
 
-    if can_switch then
-        handle_mode_change(target_mode, is_legacy)
-    else
-        local current = self.mode and self.mode.currentValue
-            or self.legacy_agent_modes.current_mode_id
-            or "unknown"
-        Logger.notify(
-            string.format(
-                "Configured default_mode ‘%s’ not available. "
-                    .. "Using provider’s default ‘%s’",
-                target_mode,
-                current
-            ),
-            vim.log.levels.WARN,
-            { title = "Agentic" }
-        )
-    end
+    local current = self.mode and self.mode.currentValue or "unknown"
+    Logger.notify(
+        string.format(
+            "Configured default_mode ‘%s’ not available. Using provider’s default ‘%s’",
+            target_mode,
+            current
+        ),
+        vim.log.levels.WARN,
+        { title = "Agentic" }
+    )
 end
 
 --- @param config_id string
@@ -298,36 +271,14 @@ end
 function AgentConfigOptions:get_header_context()
     local parts = {}
 
-    if #self._options > 0 then
-        for _, option in ipairs(self._options) do
-            if has_select_options(option) then
-                append_summary_part(
-                    parts,
-                    get_option_display_name(option),
-                    get_current_value_name(option)
-                )
-            end
+    for _, option in ipairs(self._options) do
+        if has_select_options(option) then
+            append_summary_part(
+                parts,
+                get_option_display_name(option),
+                get_current_value_name(option)
+            )
         end
-    else
-        local legacy_mode = self.legacy_agent_modes:get_mode(
-            self.legacy_agent_modes.current_mode_id or ""
-        )
-        append_summary_part(
-            parts,
-            "Mode",
-            legacy_mode and legacy_mode.name
-                or self.legacy_agent_modes.current_mode_id
-        )
-
-        local legacy_model = self.legacy_agent_models:get_model(
-            self.legacy_agent_models.current_model_id or ""
-        )
-        append_summary_part(
-            parts,
-            "Model",
-            legacy_model and legacy_model.name
-                or self.legacy_agent_models.current_model_id
-        )
     end
 
     if #parts == 0 then
@@ -344,21 +295,19 @@ function AgentConfigOptions:get_mode(mode_value)
 end
 
 --- @param mode_value string
---- @return string|nil mode_name
+--- @return string|nil
 function AgentConfigOptions:get_mode_name(mode_value)
     local mode = self:get_mode(mode_value)
+    return mode and mode.name or nil
+end
 
-    if mode then
-        return mode.name
+--- @param mode_id string|nil
+function AgentConfigOptions:set_current_mode(mode_id)
+    if not mode_id or not self.mode then
+        return
     end
 
-    local legacy_mode = self.legacy_agent_modes:get_mode(mode_value)
-
-    if legacy_mode then
-        return legacy_mode.name
-    end
-
-    return nil
+    self.mode.currentValue = mode_id
 end
 
 --- @param model_value string
@@ -367,32 +316,20 @@ function AgentConfigOptions:get_model(model_value)
     return get_option_value(self.model, model_value)
 end
 
---- @param handle_mode_change? fun(mode: string, is_legacy: boolean): any
+--- @param handle_mode_change? fun(mode: string): any
 --- @return boolean shown
 function AgentConfigOptions:show_mode_selector(handle_mode_change)
     handle_mode_change = handle_mode_change or self._set_mode_callback
 
     local shown = self:_show_selector(
         self.mode,
-        get_selector_prompt(self.mode or {
-            name = "Agent Mode",
-        }),
+        get_selector_prompt(self.mode or { name = "Agent Mode" }),
         function(value)
-            handle_mode_change(value, false)
+            handle_mode_change(value)
         end
     )
 
-    if shown then
-        return true
-    end
-
-    local legacy_shown = self.legacy_agent_modes:show_mode_selector(
-        function(mode)
-            handle_mode_change(mode, true)
-        end
-    )
-
-    if not legacy_shown then
+    if not shown then
         Logger.notify(
             "This provider does not support mode switching",
             vim.log.levels.WARN,
@@ -400,35 +337,23 @@ function AgentConfigOptions:show_mode_selector(handle_mode_change)
         )
     end
 
-    return legacy_shown
+    return shown
 end
 
---- @param handle_model_change? fun(model_id: string, is_legacy: boolean): any
+--- @param handle_model_change? fun(model_id: string): any
 --- @return boolean shown
 function AgentConfigOptions:show_model_selector(handle_model_change)
     handle_model_change = handle_model_change or self._set_model_callback
 
     local shown = self:_show_selector(
         self.model,
-        get_selector_prompt(self.model or {
-            name = "Model",
-        }),
+        get_selector_prompt(self.model or { name = "Model" }),
         function(value)
-            handle_model_change(value, false)
+            handle_model_change(value)
         end
     )
 
-    if shown then
-        return true
-    end
-
-    local legacy_shown = self.legacy_agent_models:show_model_selector(
-        function(model_id)
-            handle_model_change(model_id, true)
-        end
-    )
-
-    if not legacy_shown then
+    if not shown then
         Logger.notify(
             "This provider does not support model switching",
             vim.log.levels.WARN,
@@ -436,22 +361,18 @@ function AgentConfigOptions:show_model_selector(handle_model_change)
         )
     end
 
-    return legacy_shown
+    return shown
 end
 
 --- @return boolean shown
 function AgentConfigOptions:show_thought_level_selector()
     local shown = self:_show_selector(
         self.thought_level,
-        get_selector_prompt(self.thought_level or {
-            name = "Reasoning Effort",
-        }),
+        get_selector_prompt(self.thought_level or { name = "Reasoning Effort" }),
         function(value)
-            if not self.thought_level then
-                return
+            if self.thought_level then
+                self._set_config_option_callback(self.thought_level.id, value)
             end
-
-            self._set_config_option_callback(self.thought_level.id, value)
         end
     )
 
@@ -468,26 +389,15 @@ end
 
 --- @return boolean shown
 function AgentConfigOptions:show_approval_preset_selector()
-    if not has_select_options(self.approval_preset) then
-        for _, option in ipairs(self._options) do
-            if has_select_options(option) and is_approval_preset_option(option) then
-                self.approval_preset = option
-                break
-            end
-        end
-    end
-
     local shown = self:_show_selector(
         self.approval_preset,
-        get_selector_prompt(self.approval_preset or {
-            name = "Approval Preset",
-        }),
+        get_selector_prompt(
+            self.approval_preset or { name = "Approval Preset" }
+        ),
         function(value)
-            if not self.approval_preset then
-                return
+            if self.approval_preset then
+                self._set_config_option_callback(self.approval_preset.id, value)
             end
-
-            self._set_config_option_callback(self.approval_preset.id, value)
         end
     )
 
@@ -504,7 +414,14 @@ end
 
 --- @return boolean shown
 function AgentConfigOptions:show_config_selector()
-    local items = self:_build_steering_items()
+    local items = {}
+
+    for _, option in ipairs(self._options) do
+        if has_select_options(option) then
+            items[#items + 1] = option
+        end
+    end
+
     if #items == 0 then
         Logger.notify(
             "This provider does not expose configurable session options",
@@ -517,75 +434,21 @@ function AgentConfigOptions:show_config_selector()
     Chooser.show(items, {
         prompt = "Session config (applies live):",
         format_item = function(item)
-            if item.kind == "legacy_mode" then
-                return Chooser.format_named_item(
-                    "Mode",
-                    self.legacy_agent_modes.current_mode_id,
-                    false
-                )
-            end
-
-            if item.kind == "legacy_model" then
-                return Chooser.format_named_item(
-                    "Model",
-                    self.legacy_agent_models.current_model_id,
-                    false
-                )
-            end
-
+            --- @cast item agentic.acp.ConfigOption
             return Chooser.format_named_item(
-                get_option_display_name(item.option),
-                get_current_value_name(item.option),
+                get_option_display_name(item),
+                get_current_value_name(item),
                 false
             )
         end,
         max_height = math.min(#items, 8),
-    }, function(selected_item)
-        if not selected_item then
-            return
+    }, function(selected_option)
+        if selected_option then
+            self:_show_config_option_selector(selected_option)
         end
-
-        if selected_item.kind == "legacy_mode" then
-            self:show_mode_selector()
-            return
-        end
-
-        if selected_item.kind == "legacy_model" then
-            self:show_model_selector()
-            return
-        end
-
-        self:_show_config_option_selector(selected_item.option)
     end)
 
     return true
-end
-
---- @return table[]
-function AgentConfigOptions:_build_steering_items()
-    local items = {}
-
-    if #self._options > 0 then
-        for _, option in ipairs(self._options) do
-            if has_select_options(option) then
-                items[#items + 1] = {
-                    kind = "config_option",
-                    option = option,
-                }
-            end
-        end
-        return items
-    end
-
-    if #self.legacy_agent_modes._modes > 0 then
-        items[#items + 1] = { kind = "legacy_mode" }
-    end
-
-    if #self.legacy_agent_models._models > 0 then
-        items[#items + 1] = { kind = "legacy_model" }
-    end
-
-    return items
 end
 
 --- @param option agentic.acp.ConfigOption
@@ -614,8 +477,11 @@ function AgentConfigOptions:_show_selector(target, prompt, handle_change)
         return false
     end
 
+    --- @cast target agentic.acp.ConfigOption
+    local current_value = target.currentValue
+
     local ordered_options =
-        List.move_to_head(target.options, "value", target.currentValue)
+        List.move_to_head(flatten_option_values(target), "value", current_value)
 
     Chooser.show(ordered_options, {
         prompt = prompt,
@@ -624,11 +490,11 @@ function AgentConfigOptions:_show_selector(target, prompt, handle_change)
             return Chooser.format_named_item(
                 item.name,
                 item.description,
-                item.value == target.currentValue
+                item.value == current_value
             )
         end,
     }, function(selected_option)
-        if selected_option and selected_option.value ~= target.currentValue then
+        if selected_option and selected_option.value ~= current_value then
             handle_change(selected_option.value)
         end
     end)

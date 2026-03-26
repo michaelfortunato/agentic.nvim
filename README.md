@@ -121,8 +121,8 @@ _...and any future ACP-compatible provider._
 - **🧠 Model Switcher** - Switch between available models mid-session
   (`<localLeader>m` in the chat widget)
 - **🔀 Switch Providers** - Switch between ACP providers mid-conversation
-  without losing chat history (`<localLeader>s` in the chat widget)
-- **♻️ Session Restore** - Restore your session and chat history at any time,
+  without losing the current session transcript (`<localLeader>s` in the chat widget)
+- **♻️ Session Restore** - Restore your session and transcript at any time,
   for all providers
 - **📝 Context Control** - Add files and text selections to conversation context
   with one keypress
@@ -474,7 +474,7 @@ header parts:
 
 ## 🚀 Usage (Public Lua API)
 
-### Commands
+### Lua Functions
 
 | Function                                                     | Description                                                       |
 | ------------------------------------------------------------ | ----------------------------------------------------------------- |
@@ -487,11 +487,26 @@ header parts:
 | `:lua require("agentic").add_files_to_context(opts)`         | Add a list of file paths or buffer numbers to context             |
 | `:lua require("agentic").add_current_line_diagnostics()`     | Add diagnostics at cursor line to context                         |
 | `:lua require("agentic").add_buffer_diagnostics()`           | Add all diagnostics from current buffer to context                |
+| `:lua require("agentic").inline_chat()`                      | Open inline chat for the current visual selection                 |
 | `:lua require("agentic").new_session()`                      | Start new chat session, destroying and cleaning the current one   |
 | `:lua require("agentic").stop_generation()`                  | Stop current generation or tool execution (session stays active)  |
 | `:lua require("agentic").restore_session()`                  | Show session picker to restore a previous session and continue    |
 | `:lua require("agentic").switch_provider()`                  | Switch ACP provider mid-session (shows picker, preserves history) |
 | `:lua require("agentic").rotate_layout()`                    | Rotate window position through layouts (right → bottom → left)    |
+
+### Ex Commands
+
+| Command                  | Description                                                                                |
+| ------------------------ | ------------------------------------------------------------------------------------------ |
+| `:AgenticChat`           | Toggle the chat widget. With a range, opens the chat and prefills the input from the range |
+| `:AgenticChat new`       | Start a new chat session. With a range, prefills the input from the range                  |
+| `:AgenticChat restore`   | Open the saved-session picker and restore a previous chat                                  |
+| `:AgenticInline`         | Open inline chat for the current visual selection or an explicit command range             |
+
+`:'<,'>AgenticChat` and `:'<,'>AgenticChat new` use the selected line range to prefill the
+prompt input buffer. This is useful when you want to turn an existing note,
+comment block, or code snippet into the next prompt without submitting it
+immediately.
 
 ### Optional Parameters
 
@@ -499,10 +514,18 @@ Open and Toggle supports optional parameter:
 
 - **auto_add_to_context** (boolean, default: `true`) - Whether to automatically
   add the current visual selection or file to context when opening the Chat
+- **prompt_text** (string, default: `nil`) - Pre-fill the prompt input after
+  opening the Chat
 
 ```lua
 -- Open the chat without adding anything to context
 require("agentic").open({ auto_add_to_context = false })
+
+-- Open the chat with a pre-filled prompt
+require("agentic").toggle({
+  auto_add_to_context = false,
+  prompt_text = "Refactor this function to reduce duplication",
+})
 ```
 
 When adding files or selections to context, you can also specify whether to
@@ -542,18 +565,21 @@ require("agentic").add_files_to_context({
 
 ### Built-in Keybindings
 
-These keybindings are automatically set in Agentic buffers:
+These keybindings are automatically set in Agentic buffers. The inline entry
+mapping is also added to regular editable file buffers:
 
 | Keybinding       | Mode  | Description                                                     |
 | ---------------- | ----- | --------------------------------------------------------------- |
-| `<CR>`           | n     | Submit prompt                                                   |
+| `?`              | n     | Show available keymaps for the current Agentic window           |
+| `<CR>`           | n/i   | Submit prompt                                                   |
 | `<C-s>`          | n/v/i | Submit prompt                                                   |
 | `<localLeader>p` | n     | Switch approval preset when the provider exposes it             |
 | `<C-v>`          | i     | Paste image from clipboard (same as Claude-code)                |
-| `<localLeader>s` | n     | Switch ACP provider (preserves chat history)                    |
-| `<localLeader>m` | n     | Switch model without (preserves chat history)                   |
+| `<localLeader>s` | n     | Switch ACP provider (preserves current session transcript)      |
+| `<localLeader>m` | n     | Switch model without (preserves current session transcript)     |
 | `<localLeader>e` | n     | Switch reasoning effort when the provider exposes it            |
 | `<localLeader>q` | n     | Open the queued-message manager                                 |
+| `<C-S-k>`        | x     | Open inline chat for the current visual selection               |
 | `q`              | n     | Close chat widget                                               |
 | `d`              | n     | Remove file, code selection, or diagnostic at cursor            |
 | `d`              | v     | Remove multiple selected files, code selections, or diagnostics |
@@ -590,7 +616,10 @@ binding explicitly if you want one:
       -- Keybindings for the prompt buffer only
       prompt = {
         submit = {
-          "<CR>",  -- Normal mode, just Enter
+          {
+            "<CR>",
+            mode = { "n", "i" },
+          },
           {
             "<C-s>",
             mode = { "n", "v", "i" },
@@ -602,6 +631,16 @@ binding explicitly if you want one:
             "<C-v>", -- Same as Claude-code in insert mode
             mode = { "i" },
           }
+        },
+      },
+
+      -- Keybindings for inline chat entrypoints in regular file buffers
+      inline = {
+        open = {
+          {
+            "<C-S-k>",
+            mode = { "x" },
+          },
         },
       },
 
@@ -625,6 +664,45 @@ binding explicitly if you want one:
 
 The header text in the chat and prompt buffers will automatically update to show
 the appropriate keybinding for the current mode.
+
+### Inline Chat
+
+Inline chat opens a small anchored prompt from a visual selection and sends that
+range to the active ACP session as structured selection context.
+
+- It uses the same provider, model, reasoning level, and approval preset as the
+  regular chat for the current tabpage.
+- Provider-sent `agent_thought_chunk` updates are rendered inline in the source
+  buffer while the request is running.
+- The inline thread is anchored to the selected range with a tracked extmark, so
+  the status overlay follows buffer edits and Agentic can retain per-range
+  inline history.
+- File edits still go through the normal ACP tool-call and approval flow, so
+  reviewable diffs appear inline in the buffer when the provider requests
+  permission.
+- On Neovim 0.12+, Agentic also emits native progress messages for inline
+  requests via `nvim_echo(..., { kind = "progress", ... })`.
+
+```lua
+{
+  "carlos-algms/agentic.nvim",
+  opts = {
+    inline = {
+      enabled = true,
+      prompt_width = 56,
+      prompt_height = 1,
+      show_thoughts = true,
+      max_thought_lines = 6,
+      result_ttl_ms = 8000,
+      progress = true,
+    },
+  },
+}
+```
+
+**Note:** `<C-S-k>` is the default inline mapping, but some terminals do not
+distinguish Ctrl+Shift combinations reliably. Override `keymaps.inline.open` if
+your terminal sends a different sequence.
 
 ### Diff Preview
 
@@ -825,13 +903,10 @@ integrating with other plugins.
         -- data.tab_page_id: number - The Neovim tabpage ID
         -- data.update: table -- The update
 
-          if data.update.sessionUpdate == "usage_update" then
-            -- Use this in your status line, scoped per tab/session.
+          if data.update.sessionUpdate == "config_option_update" then
+            -- React to live session config changes.
             if vim.api.nvim_tabpage_is_valid(data.tab_page_id) then
-              vim.t[data.tab_page_id].agentic_usage = {
-                used = data.update.used,
-                size = data.update.size,
-              }
+              vim.t[data.tab_page_id].agentic_config_options = data.update.configOptions
             end
           end
       end
@@ -844,6 +919,10 @@ integrating with other plugins.
 
 Agentic.nvim uses custom highlight groups that you can override to match your
 colorscheme.
+
+```lua
+vim.api.nvim_set_hl(0, "AgenticInlineFade", { blend = 45 })
+```
 
 ### Available Highlight Groups
 
@@ -858,6 +937,7 @@ colorscheme.
 | `AgenticStatusFailed`    | Failed tool call status indicator        | `bg=#7a2d2d`                        |
 | `AgenticCodeBlockFence`  | The left border decoration on tool calls | Links to `Directory`                |
 | `AgenticTitle`           | Window titles in sidebar                 | `bg=#2787b0, fg=#000000, bold=true` |
+| `AgenticInlineFade`      | Fade layer applied to inline extmark UI  | `blend=35`                          |
 
 If any of these highlight exists, Agentic will use it instead of creating new
 ones.
@@ -969,6 +1049,9 @@ setup.
 
 Agentic registers a native `blink.cmp` source for `@` file mentions inside
 `AgenticInput` automatically. No omnifunc setup is required.
+
+Typing `@` in `AgenticInput` will open Agentic's file source even when your
+global Blink setup uses manual completion menus.
 
 If you use another completion plugin alongside `blink.cmp`, disable the other
 plugin on `AgenticInput` so the prompt only has one completion menu.

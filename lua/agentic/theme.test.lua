@@ -8,10 +8,18 @@ describe("agentic.Theme", function()
         "DiffDelete",
         "DiagnosticWarn",
         "DiagnosticInfo",
+        "Comment",
+        "Directory",
         Theme.HL_GROUPS.DIFF_ADD_WORD,
         Theme.HL_GROUPS.DIFF_DELETE_WORD,
         Theme.HL_GROUPS.STATUS_PENDING,
         Theme.HL_GROUPS.SPINNER_GENERATING,
+        Theme.HL_GROUPS.TRANSCRIPT_REQUEST_META,
+        Theme.HL_GROUPS.TRANSCRIPT_RESPONSE_META,
+        Theme.HL_GROUPS.THOUGHT_TEXT,
+        Theme.HL_GROUPS.RESOURCE_LINK,
+        Theme.HL_GROUPS.FOLD_HINT,
+        Theme.HL_GROUPS.INLINE_FADE,
     }
 
     local saved_highlights
@@ -55,10 +63,14 @@ describe("agentic.Theme", function()
 
         Theme.setup()
 
-        local add_word =
-            vim.api.nvim_get_hl(0, { name = Theme.HL_GROUPS.DIFF_ADD_WORD, link = false })
-        local delete_word =
-            vim.api.nvim_get_hl(0, { name = Theme.HL_GROUPS.DIFF_DELETE_WORD, link = false })
+        local add_word = vim.api.nvim_get_hl(
+            0,
+            { name = Theme.HL_GROUPS.DIFF_ADD_WORD, link = false }
+        )
+        local delete_word = vim.api.nvim_get_hl(
+            0,
+            { name = Theme.HL_GROUPS.DIFF_DELETE_WORD, link = false }
+        )
 
         assert.equal(0x112233, add_word.fg)
         assert.equal(0xAABBCC, add_word.bg)
@@ -75,10 +87,14 @@ describe("agentic.Theme", function()
 
         Theme.setup()
 
-        local pending =
-            vim.api.nvim_get_hl(0, { name = Theme.HL_GROUPS.STATUS_PENDING, link = false })
-        local generating =
-            vim.api.nvim_get_hl(0, { name = Theme.HL_GROUPS.SPINNER_GENERATING, link = false })
+        local pending = vim.api.nvim_get_hl(
+            0,
+            { name = Theme.HL_GROUPS.STATUS_PENDING, link = false }
+        )
+        local generating = vim.api.nvim_get_hl(
+            0,
+            { name = Theme.HL_GROUPS.SPINNER_GENERATING, link = false }
+        )
 
         assert.equal(0x111111, pending.fg)
         assert.equal(0x222222, generating.fg)
@@ -88,12 +104,61 @@ describe("agentic.Theme", function()
 
         Theme.setup()
 
-        pending =
-            vim.api.nvim_get_hl(0, { name = Theme.HL_GROUPS.STATUS_PENDING, link = false })
-        generating =
-            vim.api.nvim_get_hl(0, { name = Theme.HL_GROUPS.SPINNER_GENERATING, link = false })
+        pending = vim.api.nvim_get_hl(
+            0,
+            { name = Theme.HL_GROUPS.STATUS_PENDING, link = false }
+        )
+        generating = vim.api.nvim_get_hl(
+            0,
+            { name = Theme.HL_GROUPS.SPINNER_GENERATING, link = false }
+        )
 
         assert.equal(0x333333, pending.fg)
         assert.equal(0x444444, generating.fg)
     end)
+
+    it(
+        "derives semantic transcript groups from comment and directory highlights",
+        function()
+            vim.api.nvim_set_hl(0, "Comment", { fg = 0x111111, italic = false })
+            vim.api.nvim_set_hl(
+                0,
+                "Directory",
+                { fg = 0x222222, italic = false }
+            )
+
+            Theme.setup()
+
+            local request_meta = vim.api.nvim_get_hl(
+                0,
+                { name = Theme.HL_GROUPS.TRANSCRIPT_REQUEST_META, link = false }
+            )
+            local response_meta = vim.api.nvim_get_hl(0, {
+                name = Theme.HL_GROUPS.TRANSCRIPT_RESPONSE_META,
+                link = false,
+            })
+            local thought = vim.api.nvim_get_hl(
+                0,
+                { name = Theme.HL_GROUPS.THOUGHT_TEXT, link = false }
+            )
+            local resource_link = vim.api.nvim_get_hl(
+                0,
+                { name = Theme.HL_GROUPS.RESOURCE_LINK, link = false }
+            )
+            local fold_hint = vim.api.nvim_get_hl(
+                0,
+                { name = Theme.HL_GROUPS.FOLD_HINT, link = false }
+            )
+            assert.equal(0x111111, request_meta.fg)
+            assert.is_true(request_meta.italic)
+            assert.equal(0x111111, response_meta.fg)
+            assert.equal(0x111111, thought.fg)
+            assert.is_true(thought.italic)
+            assert.equal(0x222222, resource_link.fg)
+            assert.is_true(resource_link.underline)
+            assert.equal(0x111111, fold_hint.fg)
+            assert.is_true(fold_hint.italic)
+            assert.equal(1, vim.fn.hlexists(Theme.HL_GROUPS.INLINE_FADE))
+        end
+    )
 end)

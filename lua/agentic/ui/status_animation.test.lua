@@ -55,6 +55,9 @@ describe("agentic.ui.StatusAnimation", function()
         local mark = find_activity_mark(bufnr)
         assert.truthy(mark)
         assert.truthy(activity_text(mark):match("Thinking"))
+        local chunks = mark[4].virt_lines[1] or {}
+        assert.equal(2, #chunks)
+        assert.equal(" Thinking", chunks[2][1])
     end)
 
     it("reanchors the activity line when the chat buffer grows", function()
@@ -83,4 +86,33 @@ describe("agentic.ui.StatusAnimation", function()
             return mark ~= nil and mark[2] == 2
         end))
     end)
+
+    it(
+        "renders activity detail without indenting it under tool cards",
+        function()
+            local bufnr = vim.api.nvim_create_buf(false, true)
+            vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "tool card", "" })
+
+            local animation = StatusAnimation:new(bufnr)
+            active_animations[#active_animations + 1] = animation
+
+            animation:start(
+                "searching",
+                { detail = "Read ~/demo/file_picker.lua" }
+            )
+
+            assert.is_true(vim.wait(100, function()
+                return find_activity_mark(bufnr) ~= nil
+            end))
+
+            local mark = find_activity_mark(bufnr)
+            assert.truthy(mark)
+            assert.equal(1, mark[2])
+            assert.truthy(
+                activity_text(mark):match(
+                    "Using tools · Read ~/demo/file_picker.lua"
+                )
+            )
+        end
+    )
 end)

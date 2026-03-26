@@ -18,6 +18,7 @@ describe("diff_preview", function()
             read_stub:invokes(function()
                 return { "local x = 1", "print(x)", "" }, nil
             end)
+            vim.wo.winfixbuf = false
             get_winid_spy = spy_module.new(function()
                 return vim.api.nvim_get_current_win()
             end)
@@ -74,7 +75,11 @@ describe("diff_preview", function()
             "renders inline review in a visible non-current window while typing elsewhere",
             function()
                 local file_path = "/tmp/test_diff_preview_visible.lua"
-                local file_bufnr = vim.api.nvim_get_current_buf()
+                local file_bufnr = vim.api.nvim_create_buf(true, false)
+                vim.api.nvim_win_set_buf(
+                    vim.api.nvim_get_current_win(),
+                    file_bufnr
+                )
                 vim.api.nvim_buf_set_name(file_bufnr, file_path)
                 vim.api.nvim_buf_set_lines(file_bufnr, 0, -1, false, {
                     "local x = 1",
@@ -119,6 +124,9 @@ describe("diff_preview", function()
 
                 vim.cmd("only")
                 vim.api.nvim_buf_delete(prompt_bufnr, { force = true })
+                if vim.api.nvim_buf_is_valid(file_bufnr) then
+                    vim.api.nvim_buf_delete(file_bufnr, { force = true })
+                end
             end
         )
 
@@ -168,6 +176,76 @@ describe("diff_preview", function()
                 vim.cmd("only")
             end
         )
+
+        it(
+            "installs review approval keymaps and restores prior buffer-local mappings",
+            function()
+                local file_path = "/tmp/test_diff_preview_review_keys.lua"
+                local file_bufnr = vim.api.nvim_create_buf(true, false)
+                vim.api.nvim_win_set_buf(
+                    vim.api.nvim_get_current_win(),
+                    file_bufnr
+                )
+                vim.api.nvim_buf_set_name(file_bufnr, file_path)
+                vim.api.nvim_buf_set_lines(file_bufnr, 0, -1, false, {
+                    "local x = 1",
+                    "print(x)",
+                    "",
+                })
+
+                local original_rhs =
+                    "<Cmd>let g:agentic_diff_preview_restored = 1<CR>"
+                vim.api.nvim_buf_set_keymap(
+                    file_bufnr,
+                    "n",
+                    "j",
+                    original_rhs,
+                    { noremap = true, silent = true }
+                )
+
+                local accept_spy = spy_module.new(function() end)
+                local reject_spy = spy_module.new(function() end)
+
+                DiffPreview.show_diff({
+                    file_path = file_path,
+                    diff = {
+                        old = { "local x = 1", "print(x)", "" },
+                        new = { "local x = 2", "print(x)", "" },
+                    },
+                    review_actions = {
+                        on_accept = function()
+                            accept_spy()
+                        end,
+                        on_reject = function()
+                            reject_spy()
+                        end,
+                    },
+                    get_winid = get_winid_spy --[[@as function]],
+                })
+
+                vim.api.nvim_set_current_buf(file_bufnr)
+
+                local accept_map = vim.fn.maparg("j", "n", false, true)
+                local reject_map = vim.fn.maparg("k", "n", false, true)
+                local accept_all_map = vim.fn.maparg("J", "n", false, true)
+                local reject_all_map = vim.fn.maparg("K", "n", false, true)
+
+                accept_map.callback()
+                reject_map.callback()
+                accept_all_map.callback()
+                reject_all_map.callback()
+
+                assert.spy(accept_spy).was.called(2)
+                assert.spy(reject_spy).was.called(2)
+
+                DiffPreview.clear_diff(file_bufnr)
+
+                local restored_map = vim.fn.maparg("j", "n", false, true)
+                assert.equal(original_rhs, restored_map.rhs)
+
+                vim.api.nvim_buf_delete(file_bufnr, { force = true })
+            end
+        )
     end)
 
     describe("clear_diff", function()
@@ -184,6 +262,7 @@ describe("diff_preview", function()
         it(
             "switches to alternate buffer when clearing unsaved named buffer",
             function()
+                vim.wo.winfixbuf = false
                 vim.cmd("edit tests/init.lua")
                 local init_bufnr = vim.api.nvim_get_current_buf()
 

@@ -81,7 +81,10 @@ describe("agentic.ui.QueueList", function()
         assert.truthy(lines[3]:match("%.%.%.$"))
         assert.is_nil(lines[3]:match("\n"))
         assert.equal("2. short prompt", lines[4])
-        assert.is_true(vim.fn.strdisplaywidth(lines[3]) <= vim.api.nvim_win_get_width(winid))
+        assert.is_true(
+            vim.fn.strdisplaywidth(lines[3])
+                <= vim.api.nvim_win_get_width(winid)
+        )
     end)
 
     it("routes actions from the selected line", function()
@@ -96,7 +99,9 @@ describe("agentic.ui.QueueList", function()
         assert.equal(11, queue_list:_get_submission_id_at_cursor())
 
         queue_list:_run_action(remove_spy --[[@as fun(submission_id: integer)]])
-        queue_list:_run_action(send_now_spy --[[@as fun(submission_id: integer)]])
+        queue_list:_run_action(
+            send_now_spy --[[@as fun(submission_id: integer)]]
+        )
         queue_list:_run_action(steer_spy --[[@as fun(submission_id: integer)]])
 
         assert.spy(remove_spy).was.called(1)

@@ -96,7 +96,10 @@ function FileList:_setup_keybindings()
         if line_content and line_content:match("%S") then -- Check if line is not empty
             self:remove_file_at(line)
         end
-    end, { nowait = true })
+    end, {
+        desc = "Agentic files: remove file at cursor",
+        nowait = true,
+    })
 
     BufHelpers.keymap_set(self._bufnr, "v", "d", function()
         local start_pos = vim.fn.getpos("v")
@@ -125,7 +128,10 @@ function FileList:_setup_keybindings()
 
         -- Exit visual mode
         BufHelpers.feed_ESC_key()
-    end, { nowait = true })
+    end, {
+        desc = "Agentic files: remove selected files",
+        nowait = true,
+    })
 end
 
 return FileList

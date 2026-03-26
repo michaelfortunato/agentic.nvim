@@ -93,6 +93,30 @@ function M.create_resource_link_content(path)
     return resource
 end
 
+--- @param uri string
+--- @param text string
+--- @param mime_type string|nil
+--- @return agentic.acp.ResourceContent
+function M.create_text_resource_content(uri, text, mime_type)
+    --- @type agentic.acp.EmbeddedResource
+    local resource = {
+        uri = uri,
+        text = text,
+    }
+
+    if mime_type and mime_type ~= "" then
+        resource.mimeType = mime_type
+    end
+
+    --- @type agentic.acp.ResourceContent
+    local content = {
+        type = "resource",
+        resource = resource,
+    }
+
+    return content
+end
+
 return M
 
 --- @class agentic.acp.UserMessageChunk

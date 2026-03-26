@@ -22,8 +22,8 @@ NOTE: Install instructions are in the README.md
 All providers use a **single generic `ACPClient`** (`acp_client.lua`). There are
 no per-provider adapter files.
 
-The client parses standard ACP protocol fields and handles provider quirks (e.g.
-`rawInput` fallback for OpenCode) inline via protected methods in `ACPClient`
+The client parses standard ACP protocol fields only. Provider-specific parse
+quirks are not treated as alternate render sources.
 itself.
 
 **Adding a new provider** only requires a config entry in `config_default.lua`
@@ -68,12 +68,17 @@ ACPClient         -- routes by message type (notification vs response)
   |  __handle_tool_call_update, __build_tool_call_message
   v
 SessionManager    -- registered as subscriber per session_id
-  |  routes by sessionUpdate type
-  |  (see "Session update routing" below)
+  |  dispatches ACP-shaped events into SessionState
   v
-MessageWriter     -- writes to chat buffer, tracks tool call state
+SessionState      -- canonical runtime model
+  |
+  v
+InteractionModel  -- synthesizes turn/request/response tree from state
+  |
+  v
+MessageWriter     -- renders AgenticChat from InteractionSession
 PermissionManager -- queues permission prompts, manages keymaps
-ChatHistory       -- accumulates messages for persistence
+PersistedSession       -- accumulates messages for persistence
 ```
 
 ## Session update routing
@@ -81,20 +86,20 @@ ChatHistory       -- accumulates messages for persistence
 `ACPClient` receives `session/update` notifications. The `sessionUpdate` field
 determines routing:
 
-| `sessionUpdate` value   | Routed to                                  |
-| ----------------------- | ------------------------------------------ |
-| `"tool_call"`           | `__handle_tool_call` → subscriber          |
-| `"tool_call_update"`    | `__handle_tool_call_update` → subscriber   |
-| `"agent_message_chunk"` | `MessageWriter:write_message_chunk()`      |
-| `"agent_thought_chunk"` | `MessageWriter:write_message_chunk()`      |
-| `"plan"`                | `TodoList.render()`                        |
-| `"request_permission"`  | `PermissionManager` (queued, sequential)   |
-| others                  | `subscriber.on_session_update()` (generic) |
+| `sessionUpdate` value   | Routed to                                               |
+| ----------------------- | ------------------------------------------------------- |
+| `"tool_call"`           | `__handle_tool_call` → subscriber → `SessionState`      |
+| `"tool_call_update"`    | `__handle_tool_call_update` → subscriber → `SessionState` |
+| `"agent_message_chunk"` | subscriber → `SessionState` transcript event log        |
+| `"agent_thought_chunk"` | subscriber → `SessionState` transcript event log        |
+| `"plan"`                | subscriber → `SessionState` plan state                  |
+| `"request_permission"`  | `PermissionManager` (queued, sequential)                |
+| others                  | `subscriber.on_session_update()`                        |
 
 ## Tool call lifecycle
 
-Tool calls go through **3 phases**. `MessageWriter` tracks each via
-`tool_call_blocks[tool_call_id]`, persisting state across all phases.
+Tool calls go through **3 phases**. Runtime state tracks them first, and
+`MessageWriter` derives renderable tool cards from the interaction tree.
 
 **Phase 1 — `tool_call` (initial)**
 
@@ -103,11 +108,9 @@ Provider sends "tool_call"
   -> ACPClient builds ToolCallBlock via __build_tool_call_message
      { tool_call_id, kind, argument, status, body?, diff? }
   -> subscriber.on_tool_call(block)
-  -> MessageWriter:write_tool_call_block(block)
-     1. Renders header + body/diff lines to buffer
-     2. Creates range extmark (NS_TOOL_BLOCKS) as position anchor
-     3. Creates decoration extmarks (borders, status icon)
-     4. Stores block in tool_call_blocks[id]
+  -> SessionState stores tool call event
+  -> InteractionModel exposes tool-call node in the active turn response
+  -> MessageWriter rerenders AgenticChat from InteractionSession
 ```
 
 **Phase 2 — `tool_call_update` (one or more)**
@@ -115,53 +118,40 @@ Provider sends "tool_call"
 ```
 Provider sends "tool_call_update"
   -> ACPClient builds ToolCallBase via __build_tool_call_message
-     (only CHANGED fields needed — MessageWriter merges)
+     (only changed fields needed)
   -> subscriber.on_tool_call_update(partial)
-  -> MessageWriter:update_tool_call_block(partial)
-     1. Looks up tracker = tool_call_blocks[id]
-     2. Deep-merges via tbl_deep_extend("force", tracker, partial)
-     3. Appends body (if both old and new exist and differ)
-     4. Locates block position via range extmark
-     5. Diff already rendered: refresh decorations + status only
-        (content frozen to prevent flicker)
-     6. Diff is NEW: replace buffer lines, re-render everything
+  -> SessionState merges the update into the tool lifecycle state
+  -> InteractionModel exposes updated tool-call content/status
+  -> MessageWriter rerenders the affected card from the tree
 ```
 
 **Phase 3 — final `tool_call_update` with terminal status**
 
 ```
 Same as Phase 2, but status = "completed" | "failed"
-  -> Visual status icon updates to final state
+  -> Visual card state updates to final state
   -> If "failed": PermissionManager removes pending request
 ```
 
 ## Key design rules
 
-- **Updates are partial:** Only send what changed. MessageWriter merges onto the
-  existing tracker via `tbl_deep_extend`.
-- **Diffs are immutable after first render:** Once a diff is written to the
-  buffer, content is frozen. Only status/decorations refresh on subsequent
-  updates.
-- **Body accumulates:** Multiple updates with different body content get
-  concatenated with `---` dividers, not replaced.
-- **Extmarks as position anchors:** Range extmark in `NS_TOOL_BLOCKS`
-  auto-adjusts when buffer content shifts. Single source of truth for block
-  position.
+- **Updates are partial:** Only send what changed. State is the merge point.
+- **Interaction tree is canonical:** `MessageWriter` renders from
+  `InteractionSession`, not from ad hoc event-stream writes.
+- **Tool output stays hierarchical:** output/diff/terminal content remains a
+  child of the tool-call node until the renderer chooses how to present it.
+- **Extmarks are view state only:** `NS_TOOL_BLOCKS` tracks rendered fold ranges,
+  not protocol truth.
 
-## Provider quirk handling
+## Provider parsing
 
-Instead of per-provider adapters, `ACPClient` handles protocol deviations inline
-in `__build_tool_call_message`:
+`ACPClient` parses only formal ACP fields:
 
-- **`rawInput` fallback** (OpenCode): when `content` is missing for `edit` kind
-  tool calls, builds diff from `rawInput.new_string`/`rawInput.newString` fields
-- **`locations` fallback**: extracts `file_path` from `update.locations[0].path`
-  when not in `rawInput`
-- **Unknown kinds**: logs a warning for unrecognized `kind` values so users
-  report them as issues
+- `content` drives tool output rendering
+- `locations` and `rawInput` remain available as opaque ACP metadata
+- unknown `kind` values still log a warning so users report them as issues
 
-To handle a new provider quirk, add the fallback logic in
-`__build_tool_call_message` with a comment explaining which provider needs it.
+Do not add provider-specific fallback parsing in `__build_tool_call_message`.
 
 ## Permission flow (interleaved with tool calls)
 
@@ -186,7 +176,7 @@ requires it, but currently all providers use the default implementations:
 | Method                        | Behavior                                  |
 | ----------------------------- | ----------------------------------------- |
 | `__handle_tool_call`          | Builds ToolCallBlock, notifies subscriber |
-| `__build_tool_call_message`   | Parses ACP fields + quirk fallbacks       |
+| `__build_tool_call_message`   | Parses formal ACP tool call fields        |
 | `__handle_tool_call_update`   | Builds partial, notifies subscriber       |
 | `__handle_request_permission` | Sends result back to provider             |
 | `__handle_session_update`     | Routes by `sessionUpdate` type            |

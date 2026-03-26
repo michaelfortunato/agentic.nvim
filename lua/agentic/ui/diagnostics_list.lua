@@ -265,7 +265,10 @@ function DiagnosticsList:_setup_keybindings()
         if line_content and line_content:match("%S") then
             self:remove_at(line)
         end
-    end, { nowait = true })
+    end, {
+        desc = "Agentic diagnostics: remove diagnostic at cursor",
+        nowait = true,
+    })
 
     BufHelpers.keymap_set(self._bufnr, "v", "d", function()
         local start_pos = vim.fn.getpos("v")
@@ -317,7 +320,10 @@ function DiagnosticsList:_setup_keybindings()
 
         -- Exit visual mode
         BufHelpers.feed_ESC_key()
-    end, { nowait = true })
+    end, {
+        desc = "Agentic diagnostics: remove selected diagnostics",
+        nowait = true,
+    })
 end
 
 return DiagnosticsList

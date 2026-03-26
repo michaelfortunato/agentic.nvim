@@ -446,7 +446,8 @@ describe("agentic.ui.DiagnosticsList", function()
         before_each(function()
             test_bufnr = vim.api.nvim_create_buf(false, true)
             ns = vim.api.nvim_create_namespace("test_diag_cursor")
-            vim.api.nvim_set_current_buf(test_bufnr)
+            vim.wo.winfixbuf = false
+            vim.api.nvim_win_set_buf(vim.api.nvim_get_current_win(), test_bufnr)
         end)
 
         after_each(function()

@@ -1,6 +1,7 @@
 local assert = require("tests.helpers.assert")
 local spy = require("tests.helpers.spy")
 local Config = require("agentic.config")
+local KeymapHelp = require("agentic.ui.keymap_help")
 local Logger = require("agentic.utils.logger")
 local WidgetLayout = require("agentic.ui.widget_layout")
 local WindowDecoration = require("agentic.ui.window_decoration")
@@ -12,9 +13,15 @@ describe("agentic.ui.ChatWidget", function()
     ChatWidget = require("agentic.ui.chat_widget")
 
     after_each(function()
-        pcall(vim.cmd, "silent! stopinsert")
-        pcall(vim.cmd, "silent! tabonly")
-        pcall(vim.cmd, "silent! only")
+        pcall(function()
+            vim.cmd("silent! stopinsert")
+        end)
+        pcall(function()
+            vim.cmd("silent! tabonly")
+        end)
+        pcall(function()
+            vim.cmd("silent! only")
+        end)
     end)
 
     --- Helper to populate a dynamic buffer with content
@@ -84,13 +91,64 @@ describe("agentic.ui.ChatWidget", function()
                     local headers =
                         WindowDecoration.get_headers_state(tab_page_id)
 
-                    assert.is_nil(headers.chat.suffix)
+                    assert.equal("?: keymaps", headers.chat.suffix)
                     assert.equal(
-                        "<localLeader>q: queue · <CR>: submit",
+                        "?: keymaps · <CR>: submit",
                         headers.input.suffix
                     )
                 end
             )
+
+            it("set_input_text replaces the prompt buffer content", function()
+                widget:set_input_text("first line\nsecond line")
+
+                assert.same(
+                    { "first line", "second line" },
+                    vim.api.nvim_buf_get_lines(
+                        widget.buf_nrs.input,
+                        0,
+                        -1,
+                        false
+                    )
+                )
+            end)
+
+            it(
+                "binds ? to open keymap help for the current widget buffer",
+                function()
+                    local help_stub = spy.stub(KeymapHelp, "show_for_buffer")
+
+                    widget:show({ focus_prompt = false })
+                    vim.api.nvim_set_current_win(widget.win_nrs.chat)
+
+                    local mapping = vim.fn.maparg("?", "n", false, true)
+                    mapping.callback()
+
+                    assert.spy(help_stub).was.called(1)
+                    assert.equal(widget.buf_nrs.chat, help_stub.calls[1][1])
+
+                    help_stub:revert()
+                end
+            )
+
+            it("submits the prompt with <CR> in insert mode", function()
+                local on_submit_spy = spy.new(function() end)
+                widget.on_submit_input = on_submit_spy --[[@as function]]
+
+                widget:show({ focus_prompt = true })
+                fill_buffer(widget, "input", { "hello from insert enter" })
+
+                vim.api.nvim_set_current_win(widget.win_nrs.input)
+                vim.cmd("startinsert")
+
+                local mapping = vim.fn.maparg("<CR>", "i", false, true)
+                mapping.callback()
+
+                assert.spy(on_submit_spy).was.called(1)
+                assert
+                    .spy(on_submit_spy).was
+                    .called_with("hello from insert enter")
+            end)
 
             it(
                 "does not attach treesitter highlighters to side buffers",
@@ -149,37 +207,93 @@ describe("agentic.ui.ChatWidget", function()
                     widget:bind_message_writer(writer)
                     widget:show({ focus_prompt = false })
 
-                    writer:write_tool_call_block({
-                        tool_call_id = "toggle-execute",
-                        status = "completed",
-                        kind = "execute",
-                        argument = "rg -n queue lua/agentic",
-                        body = {
-                            "lua/agentic/ui/queue_list.lua:45:Queued messages",
-                            "lua/agentic/session_manager.lua:643:Queue: 3",
-                            "lua/agentic/ui/window_decoration.lua:35:Queue",
+                    writer:render_interaction_session({
+                        session_id = "session-1",
+                        title = "Test Session",
+                        timestamp = os.time(),
+                        config_options = {},
+                        available_commands = {},
+                        turns = {
+                            {
+                                index = 1,
+                                request = {
+                                    kind = "user",
+                                    text = "",
+                                    content = {},
+                                    content_nodes = {},
+                                },
+                                response = {
+                                    provider_name = "Codex ACP",
+                                    nodes = {
+                                        {
+                                            type = "tool_call",
+                                            tool_call_id = "toggle-execute",
+                                            title = "rg -n queue lua/agentic",
+                                            kind = "execute",
+                                            status = "completed",
+                                            content_nodes = {
+                                                {
+                                                    type = "content_output",
+                                                    content_node = {
+                                                        type = "text_content",
+                                                        text = table.concat({
+                                                            "lua/agentic/ui/queue_list.lua:45:Queued messages",
+                                                            "lua/agentic/session_manager.lua:643:Queue: 3",
+                                                            "lua/agentic/ui/window_decoration.lua:35:Queue",
+                                                        }, "\n"),
+                                                        content = {
+                                                            type = "text",
+                                                            text = table.concat(
+                                                                {
+                                                                    "lua/agentic/ui/queue_list.lua:45:Queued messages",
+                                                                    "lua/agentic/session_manager.lua:643:Queue: 3",
+                                                                    "lua/agentic/ui/window_decoration.lua:35:Queue",
+                                                                },
+                                                                "\n"
+                                                            ),
+                                                        },
+                                                    },
+                                                },
+                                            },
+                                        },
+                                    },
+                                },
+                            },
                         },
                     })
 
                     vim.cmd("stopinsert")
                     vim.api.nvim_set_current_win(widget.win_nrs.chat)
-                    vim.api.nvim_win_set_cursor(widget.win_nrs.chat, { 3, 0 })
-                    local mapping =
-                        vim.fn.maparg("<CR>", "n", false, true)
+                    local lines = vim.api.nvim_buf_get_lines(
+                        widget.buf_nrs.chat,
+                        0,
+                        -1,
+                        false
+                    )
+                    local preview_line =
+                        vim.fn.index(lines, "    3 output lines")
+                    assert.is_true(preview_line >= 0)
+                    vim.api.nvim_win_set_cursor(
+                        widget.win_nrs.chat,
+                        { preview_line + 1, 0 }
+                    )
+                    local mapping = vim.fn.maparg("<CR>", "n", false, true)
                     mapping.callback()
 
-                    local lines =
-                        vim.api.nvim_buf_get_lines(widget.buf_nrs.chat, 0, -1, false)
+                    lines = vim.api.nvim_buf_get_lines(
+                        widget.buf_nrs.chat,
+                        0,
+                        -1,
+                        false
+                    )
 
                     assert.is_true(
                         vim.tbl_contains(
                             lines,
-                            "  lua/agentic/ui/window_decoration.lua:35:Queue"
+                            "    lua/agentic/ui/window_decoration.lua:35:Queue"
                         )
                     )
-                    assert.is_true(
-                        vim.tbl_contains(lines, "  <CR> collapse")
-                    )
+                    assert.is_true(vim.tbl_contains(lines, "    <CR> collapse"))
 
                     writer:destroy()
                 end
@@ -851,21 +965,25 @@ describe("agentic.ui.ChatWidget", function()
             assert.equal(expected, input_width)
         end)
 
-        it("queue occupies the top of the right stack when populated", function()
-            fill_buffer(widget, "queue", { "1. queued prompt" })
+        it(
+            "queue occupies the top of the right stack when populated",
+            function()
+                fill_buffer(widget, "queue", { "1. queued prompt" })
 
-            widget:show()
+                widget:show()
 
-            local chat_pos = vim.api.nvim_win_get_position(widget.win_nrs.chat)
-            local queue_pos =
-                vim.api.nvim_win_get_position(widget.win_nrs.queue)
-            local input_pos =
-                vim.api.nvim_win_get_position(widget.win_nrs.input)
+                local chat_pos =
+                    vim.api.nvim_win_get_position(widget.win_nrs.chat)
+                local queue_pos =
+                    vim.api.nvim_win_get_position(widget.win_nrs.queue)
+                local input_pos =
+                    vim.api.nvim_win_get_position(widget.win_nrs.input)
 
-            assert.is_true(queue_pos[2] > chat_pos[2])
-            assert.equal(queue_pos[2], input_pos[2])
-            assert.is_true(input_pos[1] > queue_pos[1])
-        end)
+                assert.is_true(queue_pos[2] > chat_pos[2])
+                assert.equal(queue_pos[2], input_pos[2])
+                assert.is_true(input_pos[1] > queue_pos[1])
+            end
+        )
     end)
 
     describe("rotate_layout", function()

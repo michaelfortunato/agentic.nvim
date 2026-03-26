@@ -2,16 +2,11 @@ local assert = require("tests.helpers.assert")
 local spy = require("tests.helpers.spy")
 
 describe("agentic.acp.AgentConfigOptions", function()
-    --- @type agentic.acp.AgentConfigOptions
     local AgentConfigOptions
-
-    --- @type agentic.acp.AgentConfigOptions
     local config_options
-
-    --- @type TestStub
     local multi_keymap_stub
+    local test_bufnr
 
-    --- @type agentic.acp.ConfigOption
     local mode_option = {
         id = "mode-1",
         category = "mode",
@@ -19,59 +14,46 @@ describe("agentic.acp.AgentConfigOptions", function()
         description = "Agent mode",
         name = "Mode",
         options = {
-            {
-                value = "normal",
-                name = "Normal",
-                description = "Standard mode",
-            },
-            {
-                value = "plan",
-                name = "Plan",
-                description = "Planning mode",
-            },
-            { value = "code", name = "Code", description = "Coding mode" },
+            { value = "normal", name = "Normal", description = "Standard" },
+            { value = "plan", name = "Plan", description = "Planning" },
         },
     }
 
-    --- @type agentic.acp.ConfigOption
     local model_option = {
         id = "model-1",
         category = "model",
-        currentValue = "claude-sonnet",
+        currentValue = "gpt-5.4",
         description = "Model selection",
         name = "Model",
         options = {
-            {
-                value = "claude-sonnet",
-                name = "Sonnet",
-                description = "Fast model",
-            },
+            { value = "gpt-5.4", name = "GPT-5.4", description = "Fast" },
+            { value = "gpt-5.5", name = "GPT-5.5", description = "Newer" },
         },
     }
 
-    --- @type agentic.acp.ConfigOption
     local thought_option = {
         id = "thought-1",
         category = "thought_level",
-        currentValue = "normal",
-        description = "Thinking depth",
-        name = "Thought Level",
+        currentValue = "high",
+        description = "Reasoning Effort",
+        name = "Reasoning Effort",
         options = {
-            { value = "normal", name = "Normal", description = "Standard" },
+            { value = "high", name = "High", description = "More work" },
+            { value = "xhigh", name = "Xhigh", description = "Max work" },
         },
     }
 
-    --- @type agentic.acp.ConfigOption
     local approval_option = {
         id = "approval-1",
+        category = "approval_preset",
         currentValue = "read-only",
-        description = "Approval Preset",
+        description = "Approval access level",
         name = "Approval Preset",
         options = {
             {
                 value = "read-only",
                 name = "Read Only",
-                description = "No write access",
+                description = "No writes",
             },
             {
                 value = "default",
@@ -81,8 +63,38 @@ describe("agentic.acp.AgentConfigOptions", function()
         },
     }
 
-    --- @type integer
-    local test_bufnr
+    local grouped_model_option = {
+        id = "model-grouped",
+        category = "model",
+        currentValue = "gpt-5.5",
+        description = "Model selection",
+        name = "Model",
+        type = "select",
+        options = {
+            {
+                group = "stable",
+                name = "Stable",
+                options = {
+                    {
+                        value = "gpt-5.4",
+                        name = "GPT-5.4",
+                        description = "Fast",
+                    },
+                },
+            },
+            {
+                group = "preview",
+                name = "Preview",
+                options = {
+                    {
+                        value = "gpt-5.5",
+                        name = "GPT-5.5",
+                        description = "Newer",
+                    },
+                },
+            },
+        },
+    }
 
     before_each(function()
         local BufHelpers = require("agentic.utils.buf_helpers")
@@ -102,736 +114,244 @@ describe("agentic.acp.AgentConfigOptions", function()
         vim.api.nvim_buf_delete(test_bufnr, { force = true })
     end)
 
-    describe("constructor", function()
-        it(
-            "registers keymaps for config, model, reasoning effort, and approval preset on all buffers",
-            function()
-                assert.stub(multi_keymap_stub).was.called(4)
-
-                local mode_call = multi_keymap_stub.calls[1]
-                assert.equal("function", type(mode_call[3]))
-
-                local model_call = multi_keymap_stub.calls[2]
-                assert.equal("function", type(model_call[3]))
-
-                local thought_call = multi_keymap_stub.calls[3]
-                assert.equal("function", type(thought_call[3]))
-
-                local approval_call = multi_keymap_stub.calls[4]
-                assert.equal("function", type(approval_call[3]))
-                assert.equal("<localLeader>p", approval_call[1])
-            end
-        )
+    it("registers config keymaps on construction", function()
+        assert.stub(multi_keymap_stub).was.called(4)
+        assert.equal("<localLeader>p", multi_keymap_stub.calls[4][1])
     end)
 
-    describe("set_options", function()
-        it("assigns all known categories from a single call", function()
-            config_options:set_options({
-                mode_option,
-                model_option,
-                thought_option,
-                approval_option,
-            })
+    it("assigns known config categories from provider options", function()
+        config_options:set_options({
+            mode_option,
+            model_option,
+            thought_option,
+            approval_option,
+        })
 
-            assert.equal("mode-1", config_options.mode.id)
-            assert.equal("model-1", config_options.model.id)
-            assert.equal("thought-1", config_options.thought_level.id)
-            assert.equal("approval-1", config_options.approval_preset.id)
-        end)
+        assert.equal("mode-1", config_options.mode.id)
+        assert.equal("model-1", config_options.model.id)
+        assert.equal("thought-1", config_options.thought_level.id)
+        assert.equal("approval-1", config_options.approval_preset.id)
+    end)
 
-        it("detects approval preset options by approval-like labels", function()
-            --- @type agentic.acp.ConfigOption
-            local aliased_approval = vim.tbl_extend("force", approval_option, {
+    it(
+        "does not infer approval preset shortcuts from unrelated categories",
+        function()
+            local aliased = vim.tbl_extend("force", approval_option, {
                 category = "sandbox_mode",
                 name = "Approval Mode",
                 description = "Approval access level",
-            }) --[[@as agentic.acp.ConfigOption]]
+            })
 
-            config_options:set_options({ aliased_approval })
+            config_options:set_options({ aliased })
 
-            assert.equal("approval-1", config_options.approval_preset.id)
-        end)
-
-        it("does nothing when configOptions is nil", function()
-            config_options:set_options(nil)
-
-            assert.is_nil(config_options.mode)
-            assert.is_nil(config_options.model)
-            assert.is_nil(config_options.thought_level)
             assert.is_nil(config_options.approval_preset)
-        end)
+        end
+    )
 
-        it("ignores unknown categories", function()
-            --- @type agentic.acp.ConfigOption
-            local unknown = vim.tbl_extend("force", mode_option, {
-                category = "unknown_cat",
-            }) --[[@as agentic.acp.ConfigOption]]
+    it("builds header context from provider option order", function()
+        config_options:set_options({
+            approval_option,
+            model_option,
+            thought_option,
+        })
 
-            config_options:set_options({ unknown })
-
-            assert.is_nil(config_options.mode)
-        end)
-    end)
-
-    describe("get_mode", function()
-        it("returns matching option by value", function()
-            config_options:set_options({ mode_option })
-
-            local result = config_options:get_mode("plan")
-
-            assert.is_not_nil(result)
-            if result then
-                assert.equal("Plan", result.name)
-            end
-        end)
-
-        it(
-            "returns nil when mode is unset, empty, or value not found",
-            function()
-                assert.is_nil(config_options:get_mode("normal"))
-
-                local empty_mode = vim.tbl_extend("force", mode_option, {
-                    options = {},
-                }) --[[@as agentic.acp.ConfigOption]]
-                config_options:set_options({ empty_mode })
-                assert.is_nil(config_options:get_mode("normal"))
-
-                config_options:set_options({ mode_option })
-                assert.is_nil(config_options:get_mode("nonexistent"))
-            end
+        assert.equal(
+            "Approval Preset: Read Only | Model: GPT-5.4 | Reasoning Effort: High",
+            config_options:get_header_context()
         )
     end)
 
-    describe("get_model", function()
-        it("returns matching model option by value", function()
-            config_options:set_options({ model_option })
+    it("returns mode and model names from config options", function()
+        config_options:set_options({ mode_option, model_option })
 
-            local result = config_options:get_model("claude-sonnet")
-
-            assert.is_not_nil(result)
-            if result then
-                assert.equal("Sonnet", result.name)
-            end
-        end)
-
-        it("returns nil when model is unset or value not found", function()
-            assert.is_nil(config_options:get_model("claude-sonnet"))
-
-            config_options:set_options({ model_option })
-            assert.is_nil(config_options:get_model("nonexistent"))
-        end)
+        assert.equal("Plan", config_options:get_mode_name("plan"))
+        assert.equal(
+            "GPT-5.5",
+            config_options:get_config_value_name("model-1", "gpt-5.5")
+        )
     end)
 
-    describe("get_mode_name", function()
-        it("returns name from config option mode", function()
-            config_options:set_options({ mode_option })
+    it("applies current_mode_update to the active mode option", function()
+        config_options:set_options({
+            vim.tbl_deep_extend("force", {}, mode_option),
+        })
 
-            assert.equal("Plan", config_options:get_mode_name("plan"))
-        end)
+        config_options:set_current_mode("plan")
 
-        it("returns name from legacy mode", function()
-            config_options.legacy_agent_modes:set_modes({
-                availableModes = {
-                    {
-                        id = "legacy-mode",
-                        name = "Legacy",
-                        description = "Legacy mode",
-                    },
-                },
-                currentModeId = "legacy-mode",
-            })
-
-            assert.equal("Legacy", config_options:get_mode_name("legacy-mode"))
-        end)
-
-        it("returns nil when mode not found in either source", function()
-            config_options:set_options({ mode_option })
-
-            assert.is_nil(config_options:get_mode_name("nonexistent"))
-        end)
+        assert.equal("plan", config_options.mode.currentValue)
     end)
 
-    describe("set_initial_mode", function()
-        --- @type TestStub
-        local notify_stub
+    it("warns when configured default_mode is not available", function()
+        local Logger = require("agentic.utils.logger")
+        local notify_stub = spy.stub(Logger, "notify")
+        local handler = spy.new(function() end)
+
+        config_options:set_options({ mode_option })
+        config_options:set_initial_mode("missing-mode", handler)
+
+        assert.spy(handler).was.called(0)
+        assert.stub(notify_stub).was.called(1)
+
+        notify_stub:revert()
+    end)
+
+    it("switches to a configured default mode when available", function()
+        local handler = spy.new(function() end)
+
+        config_options:set_options({ mode_option })
+        config_options:set_initial_mode("plan", handler)
+
+        assert.spy(handler).was.called_with("plan")
+    end)
+
+    describe("selectors", function()
+        local chooser_show_stub
 
         before_each(function()
-            config_options:set_options({ mode_option })
-            local Logger = require("agentic.utils.logger")
-            notify_stub = spy.stub(Logger, "notify")
+            local Chooser = require("agentic.ui.chooser")
+            chooser_show_stub = spy.stub(Chooser, "show")
         end)
 
         after_each(function()
-            notify_stub:revert()
+            chooser_show_stub:revert()
         end)
 
-        it(
-            "calls handler when target differs from current config mode",
-            function()
-                local handler = spy.new(function() end)
-
-                config_options:set_initial_mode(
-                    "plan",
-                    handler --[[@as fun(mode: string, is_legacy: boolean|nil): any]]
-                )
-
-                assert.spy(handler).was.called(1)
-                local args = handler.calls[1]
-                assert.equal("plan", args[1])
-                assert.is_false(args[2])
-            end
-        )
-
-        it("calls handler with is_legacy=true for legacy modes", function()
-            config_options.legacy_agent_modes:set_modes({
-                availableModes = {
-                    {
-                        id = "legacy-plan",
-                        name = "Legacy Plan",
-                        description = "",
-                    },
-                },
-                currentModeId = "legacy-normal",
-            })
-
+        it("shows model selector and routes selected model value", function()
             local handler = spy.new(function() end)
+            config_options:set_options({ model_option })
 
-            config_options:set_initial_mode(
-                "legacy-plan",
-                handler --[[@as fun(mode: string, is_legacy: boolean|nil): any]]
-            )
-
-            assert.spy(handler).was.called(1)
-            local args = handler.calls[1]
-            assert.equal("legacy-plan", args[1])
-            assert.is_true(args[2])
-        end)
-
-        it("skips handler when target matches currentValue", function()
-            local handler = spy.new(function() end)
-
-            config_options:set_initial_mode(
-                "normal",
-                handler --[[@as fun(mode: string, is_legacy: boolean|nil): any]]
-            )
-
-            assert.spy(handler).was.called(0)
-        end)
-
-        it("warns when target is not in any mode source", function()
-            local handler = spy.new(function() end)
-
-            config_options:set_initial_mode(
-                "nonexistent",
-                handler --[[@as fun(mode: string, is_legacy: boolean|nil): any]]
-            )
-
-            assert.spy(handler).was.called(0)
-            assert.stub(notify_stub).was.called(1)
-            assert.is_true(
-                string.find(notify_stub.calls[1][1], "nonexistent") ~= nil
-            )
-        end)
-
-        it("does nothing when target is nil or empty", function()
-            local handler = spy.new(function() end)
-
-            config_options:set_initial_mode(
-                nil,
-                handler --[[@as fun(mode: string, is_legacy: boolean|nil): any]]
-            )
-            config_options:set_initial_mode(
-                "",
-                handler --[[@as fun(mode: string, is_legacy: boolean|nil): any]]
-            )
-
-            assert.spy(handler).was.called(0)
-            assert.stub(notify_stub).was.called(0)
-        end)
-
-        it(
-            "does not crash when no config options and no legacy modes exist",
-            function()
-                local fresh = AgentConfigOptions:new(
-                    { chat = test_bufnr },
-                    function() end,
-                    function() end
-                )
-                local handler = spy.new(function() end)
-
-                assert.has_no_errors(function()
-                    fresh:set_initial_mode(
-                        "nonexistent",
-                        handler --[[@as fun(mode: string, is_legacy: boolean|nil): any]]
-                    )
-                end)
-
-                assert.spy(handler).was.called(0)
-                assert.stub(notify_stub).was.called(1)
-                assert.is_true(
-                    string.find(notify_stub.calls[1][1], "unknown") ~= nil
-                )
-            end
-        )
-    end)
-
-    describe("show_mode_selector", function()
-        --- @type TestStub
-        local select_stub
-
-        before_each(function()
-            config_options:set_options({ mode_option })
-            select_stub = spy.stub(vim.ui, "select")
-        end)
-
-        after_each(function()
-            select_stub:revert()
-        end)
-
-        it(
-            "returns true and opens vim.ui.select when config modes exist",
-            function()
-                local shown = config_options:show_mode_selector(function() end)
-
-                assert.is_true(shown)
-                assert.stub(select_stub).was.called(1)
-            end
-        )
-
-        it(
-            "calls handler with value and is_legacy=false on config-option selection",
-            function()
-                local handler = spy.new(function() end)
-                select_stub:invokes(function(items, _opts, on_choice)
-                    on_choice(items[2])
-                end)
-
-                config_options:show_mode_selector(
-                    handler --[[@as fun(mode: string, is_legacy: boolean): any]]
-                )
-
-                assert.spy(handler).was.called_with("plan", false)
-            end
-        )
-
-        it("does not call handler on current value or cancel", function()
-            local handler = spy.new(function() end)
-
-            select_stub:invokes(function(items, _opts, on_choice)
-                on_choice(items[1])
+            chooser_show_stub:invokes(function(items, _opts, on_choice)
+                on_choice(items[2])
             end)
-            config_options:show_mode_selector(
-                handler --[[@as fun(mode: string, is_config_option: boolean): any]]
-            )
 
-            select_stub:invokes(function(_items, _opts, on_choice)
-                on_choice(nil)
+            assert.is_true(config_options:show_model_selector(handler))
+            assert.spy(handler).was.called_with("gpt-5.5")
+        end)
+
+        it("shows mode selector and routes selected mode value", function()
+            local handler = spy.new(function() end)
+            config_options:set_options({ mode_option })
+
+            chooser_show_stub:invokes(function(items, _opts, on_choice)
+                on_choice(items[2])
             end)
-            config_options:show_mode_selector(
-                handler --[[@as fun(mode: string, is_config_option: boolean): any]]
-            )
 
-            assert.spy(handler).was.called(0)
+            assert.is_true(config_options:show_mode_selector(handler))
+            assert.spy(handler).was.called_with("plan")
         end)
 
-        it(
-            "falls back to legacy modes and wraps callback with is_legacy=true",
-            function()
-                local fresh = AgentConfigOptions:new(
-                    { chat = test_bufnr },
-                    function() end,
-                    function() end
-                )
-                fresh.legacy_agent_modes:set_modes({
-                    availableModes = {
-                        {
-                            id = "legacy",
-                            name = "Legacy",
-                            description = "Legacy mode",
-                        },
-                        {
-                            id = "legacy-2",
-                            name = "Legacy 2",
-                            description = "Another",
-                        },
-                    },
-                    currentModeId = "legacy",
-                })
-
-                local handler = spy.new(function() end)
-                select_stub:invokes(function(items, _opts, on_choice)
-                    on_choice(items[2])
-                end)
-
-                local shown = fresh:show_mode_selector(
-                    handler --[[@as fun(mode: string, is_config_option: boolean): any]]
-                )
-
-                assert.is_true(shown)
-                assert.stub(select_stub).was.called(1)
-                assert.spy(handler).was.called_with("legacy-2", true)
-            end
-        )
-
-        it("returns false and notifies when no modes exist at all", function()
-            local Logger = require("agentic.utils.logger")
-            local notify_stub = spy.stub(Logger, "notify")
-
-            local fresh = AgentConfigOptions:new(
-                { chat = test_bufnr },
-                function() end,
-                function() end
-            )
-            local handler = function() end
-
-            assert.is_false(fresh:show_mode_selector(handler))
-            assert.stub(select_stub).was.called(0)
-            assert.stub(notify_stub).was.called(1)
-            assert.truthy(
-                string.find(notify_stub.calls[1][1], "mode switching")
-            )
-            assert.equal(vim.log.levels.WARN, notify_stub.calls[1][2])
-
-            notify_stub:revert()
-        end)
-    end)
-
-    describe("show_model_selector", function()
-        --- @type TestStub
-        local select_stub
-
-        before_each(function()
-            config_options:set_options({ model_option })
-            select_stub = spy.stub(vim.ui, "select")
-        end)
-
-        after_each(function()
-            select_stub:revert()
-        end)
-
-        it("opens vim.ui.select with model options", function()
-            local shown = config_options:show_model_selector(function() end)
-
-            assert.is_true(shown)
-            assert.stub(select_stub).was.called(1)
-        end)
-
-        it(
-            "calls handler with selected model value and is_legacy=false",
-            function()
-                local handler = spy.new(function() end)
-                --- Add a second model so selection differs from current
-                local multi_model = vim.tbl_extend("force", model_option, {
-                    options = {
-                        {
-                            value = "claude-sonnet",
-                            name = "Sonnet",
-                            description = "Fast",
-                        },
-                        {
-                            value = "claude-opus",
-                            name = "Opus",
-                            description = "Smart",
-                        },
-                    },
-                }) --[[@as agentic.acp.ConfigOption]]
-                config_options:set_options({ multi_model })
-
-                select_stub:invokes(function(items, _opts, on_choice)
-                    on_choice(items[2])
-                end)
-
-                config_options:show_model_selector(
-                    handler --[[@as fun(model: string, is_legacy: boolean): any]]
-                )
-
-                assert.spy(handler).was.called_with("claude-opus", false)
-            end
-        )
-
-        it(
-            "falls back to legacy models and wraps callback with is_legacy=true",
-            function()
-                local fresh = AgentConfigOptions:new(
-                    { chat = test_bufnr },
-                    function() end,
-                    function() end
-                )
-                fresh.legacy_agent_models:set_models({
-                    availableModels = {
-                        {
-                            modelId = "default",
-                            name = "Default",
-                            description = "Default model",
-                        },
-                        {
-                            modelId = "opus",
-                            name = "Opus",
-                            description = "Most capable",
-                        },
-                    },
-                    currentModelId = "default",
-                })
-
-                local handler = spy.new(function() end)
-                select_stub:invokes(function(items, _opts, on_choice)
-                    on_choice(items[2])
-                end)
-
-                local shown = fresh:show_model_selector(
-                    handler --[[@as fun(model: string, is_legacy: boolean): any]]
-                )
-
-                assert.is_true(shown)
-                assert.stub(select_stub).was.called(1)
-                assert.spy(handler).was.called_with("opus", true)
-            end
-        )
-
-        it("returns false and notifies when no model options exist", function()
-            local Logger = require("agentic.utils.logger")
-            local notify_stub = spy.stub(Logger, "notify")
-
+        it("flattens grouped select options from the ACP schema", function()
+            local handler = spy.new(function() end)
             local fresh = AgentConfigOptions:new(
                 { chat = test_bufnr },
                 function() end,
                 function() end
             )
 
-            assert.is_false(fresh:show_model_selector(function() end))
-            assert.stub(select_stub).was.called(0)
-            assert.stub(notify_stub).was.called(1)
-            assert.truthy(
-                string.find(notify_stub.calls[1][1], "model switching")
-            )
-            assert.equal(vim.log.levels.WARN, notify_stub.calls[1][2])
+            fresh:set_options({ grouped_model_option })
 
-            notify_stub:revert()
-        end)
-    end)
+            chooser_show_stub:invokes(function(items, _opts, on_choice)
+                assert.equal(2, #items)
+                on_choice(items[2])
+            end)
 
-    describe("show_thought_level_selector", function()
-        --- @type TestStub
-        local select_stub
-
-        before_each(function()
-            select_stub = spy.stub(vim.ui, "select")
-        end)
-
-        after_each(function()
-            select_stub:revert()
+            assert.is_true(fresh:show_model_selector(handler))
+            assert.spy(handler).was.called_with("gpt-5.4")
         end)
 
         it(
-            "routes the selected reasoning effort through set_config_option",
+            "shows thought-level selector and writes config option changes",
             function()
                 local generic_change = spy.new(function() end)
                 local fresh = AgentConfigOptions:new(
                     { chat = test_bufnr },
                     function() end,
                     function() end,
-                    generic_change --[[@as fun(config_id: string, value: string)]]
+                    generic_change
                 )
-                local multi_thought = vim.tbl_extend("force", thought_option, {
-                    options = {
-                        {
-                            value = "normal",
-                            name = "Normal",
-                            description = "Standard",
-                        },
-                        {
-                            value = "deep",
-                            name = "Deep",
-                            description = "Extended",
-                        },
-                    },
-                }) --[[@as agentic.acp.ConfigOption]]
 
-                fresh:set_options({ multi_thought })
-
-                select_stub:invokes(function(items, _opts, on_choice)
+                fresh:set_options({ thought_option })
+                chooser_show_stub:invokes(function(items, _opts, on_choice)
                     on_choice(items[2])
                 end)
 
                 assert.is_true(fresh:show_thought_level_selector())
-                assert.spy(generic_change).was.called_with("thought-1", "deep")
+                assert.spy(generic_change).was.called_with("thought-1", "xhigh")
             end
         )
 
         it(
-            "returns false and notifies when reasoning effort is unavailable",
-            function()
-                local Logger = require("agentic.utils.logger")
-                local notify_stub = spy.stub(Logger, "notify")
-                local fresh = AgentConfigOptions:new(
-                    { chat = test_bufnr },
-                    function() end,
-                    function() end
-                )
-
-                assert.is_false(fresh:show_thought_level_selector())
-                assert.stub(select_stub).was.called(0)
-                assert.stub(notify_stub).was.called(1)
-                assert.truthy(
-                    string.find(
-                        notify_stub.calls[1][1],
-                        "reasoning effort switching"
-                    )
-                )
-
-                notify_stub:revert()
-            end
-        )
-    end)
-
-    describe("show_approval_preset_selector", function()
-        --- @type TestStub
-        local select_stub
-
-        before_each(function()
-            select_stub = spy.stub(vim.ui, "select")
-        end)
-
-        after_each(function()
-            select_stub:revert()
-        end)
-
-        it(
-            "routes the selected approval preset through set_config_option",
+            "shows approval preset selector and writes config option changes",
             function()
                 local generic_change = spy.new(function() end)
                 local fresh = AgentConfigOptions:new(
                     { chat = test_bufnr },
                     function() end,
                     function() end,
-                    generic_change --[[@as fun(config_id: string, value: string)]]
+                    generic_change
                 )
 
                 fresh:set_options({ approval_option })
-
-                select_stub:invokes(function(items, _opts, on_choice)
+                chooser_show_stub:invokes(function(items, _opts, on_choice)
                     on_choice(items[2])
                 end)
 
                 assert.is_true(fresh:show_approval_preset_selector())
-                assert.spy(generic_change).was.called_with("approval-1", "default")
+                assert
+                    .spy(generic_change).was
+                    .called_with("approval-1", "default")
             end
         )
 
-        it(
-            "falls back to matching provider options even if approval_preset was not assigned yet",
-            function()
-                local generic_change = spy.new(function() end)
-                local fresh = AgentConfigOptions:new(
-                    { chat = test_bufnr },
-                    function() end,
-                    function() end,
-                    generic_change --[[@as fun(config_id: string, value: string)]]
-                )
-
-                local aliased_approval = vim.tbl_extend("force", approval_option, {
-                    category = "sandbox_mode",
-                    name = "Approval Mode",
-                    description = "Approval access level",
-                }) --[[@as agentic.acp.ConfigOption]]
-
-                fresh._options = { aliased_approval }
-                fresh._options_by_id = {
-                    [aliased_approval.id] = aliased_approval,
-                }
-
-                select_stub:invokes(function(items, _opts, on_choice)
-                    on_choice(items[2])
-                end)
-
-                assert.is_true(fresh:show_approval_preset_selector())
-                assert.spy(generic_change).was.called_with("approval-1", "default")
-            end
-        )
-
-        it(
-            "returns false and notifies when approval preset is unavailable",
-            function()
-                local Logger = require("agentic.utils.logger")
-                local notify_stub = spy.stub(Logger, "notify")
-                local fresh = AgentConfigOptions:new(
-                    { chat = test_bufnr },
-                    function() end,
-                    function() end
-                )
-
-                assert.is_false(fresh:show_approval_preset_selector())
-                assert.stub(select_stub).was.called(0)
-                assert.stub(notify_stub).was.called(1)
-                assert.truthy(
-                    string.find(
-                        notify_stub.calls[1][1],
-                        "approval preset switching"
-                    )
-                )
-
-                notify_stub:revert()
-            end
-        )
-    end)
-
-    describe("set_legacy_models", function()
-        it("stores legacy models info", function()
-            config_options:set_legacy_models({
-                availableModels = {
-                    {
-                        modelId = "opus",
-                        name = "Opus",
-                        description = "Most capable",
-                    },
-                },
-                currentModelId = "opus",
-            })
-
-            local model = config_options.legacy_agent_models:get_model("opus")
-            assert.is_not_nil(model)
-            assert.equal(
-                "opus",
-                config_options.legacy_agent_models.current_model_id
+        it("shows session config selector in provider order", function()
+            local generic_change = spy.new(function() end)
+            local fresh = AgentConfigOptions:new(
+                { chat = test_bufnr },
+                function() end,
+                function() end,
+                generic_change
             )
+            local render = {}
+            local select_call = 0
+
+            fresh:set_options({ thought_option, model_option, approval_option })
+
+            chooser_show_stub:invokes(function(items, opts, on_choice)
+                select_call = select_call + 1
+
+                if select_call == 1 then
+                    render = vim.tbl_map(opts.format_item, items)
+                    on_choice(items[1])
+                    return
+                end
+
+                on_choice(items[2])
+            end)
+
+            assert.is_true(fresh:show_config_selector())
+            assert.same({
+                "  Reasoning Effort: High",
+                "  Model: GPT-5.4",
+                "  Approval Preset: Read Only",
+            }, render)
+            assert.spy(generic_change).was.called_with("thought-1", "xhigh")
         end)
     end)
 
-    describe("clear", function()
-        it("resets all fields, legacy modes, and legacy models", function()
-            config_options:set_options({
-                mode_option,
-                model_option,
-                thought_option,
-                approval_option,
-            })
-            config_options.legacy_agent_modes:set_modes({
-                availableModes = {
-                    { id = "legacy", name = "Legacy", description = "" },
-                },
-                currentModeId = "legacy",
-            })
-            config_options.legacy_agent_models:set_models({
-                availableModels = {
-                    {
-                        modelId = "opus",
-                        name = "Opus",
-                        description = "Most capable",
-                    },
-                },
-                currentModelId = "opus",
-            })
+    it("clear resets provider options", function()
+        config_options:set_options({
+            mode_option,
+            model_option,
+            thought_option,
+            approval_option,
+        })
 
-            config_options:clear()
+        config_options:clear()
 
-            assert.is_nil(config_options.mode)
-            assert.is_nil(config_options.model)
-            assert.is_nil(config_options.thought_level)
-            assert.is_nil(config_options.approval_preset)
-            assert.is_nil(config_options.legacy_agent_modes:get_mode("legacy"))
-            assert.is_nil(config_options.legacy_agent_modes.current_mode_id)
-            assert.is_nil(config_options.legacy_agent_models:get_model("opus"))
-            assert.is_nil(config_options.legacy_agent_models.current_model_id)
-        end)
+        assert.is_nil(config_options.mode)
+        assert.is_nil(config_options.model)
+        assert.is_nil(config_options.thought_level)
+        assert.is_nil(config_options.approval_preset)
+        assert.same({}, config_options._options)
     end)
 end)

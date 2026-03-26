@@ -25,31 +25,37 @@ local BufHelpers = require("agentic.utils.buf_helpers")
 local WindowDecoration = {}
 local NS_CHAT_CONTEXT = vim.api.nvim_create_namespace("agentic_chat_context")
 local CHAT_CONTEXT_LINE_COUNT_KEY = "agentic_chat_context_line_count"
+local KEYMAP_HELP_SUFFIX = "?: keymaps"
 
 --- @type agentic.ui.ChatWidget.Headers
 local WINDOW_HEADERS = {
     chat = {
         title = "󰻞 Agentic Chat",
+        suffix = KEYMAP_HELP_SUFFIX,
     },
     queue = {
         title = "Agentic Queue",
-        suffix = "<CR>: actions · !: send now · d: remove · Esc: prompt",
+        suffix = KEYMAP_HELP_SUFFIX,
     },
-    input = { title = "󰦨 Prompt", suffix = "<C-s>: submit" },
+    input = {
+        title = "󰦨 Prompt",
+        suffix = KEYMAP_HELP_SUFFIX .. " · <CR>: submit",
+    },
     code = {
         title = "󰪸 Selected Code Snippets",
-        suffix = "d: remove block",
+        suffix = KEYMAP_HELP_SUFFIX,
     },
     files = {
         title = " Referenced Files",
-        suffix = "d: remove file",
+        suffix = KEYMAP_HELP_SUFFIX,
     },
     diagnostics = {
         title = " Diagnostics",
-        suffix = "d: remove diagnostic",
+        suffix = KEYMAP_HELP_SUFFIX,
     },
     todos = {
         title = " Tasks list",
+        suffix = KEYMAP_HELP_SUFFIX,
     },
 }
 
@@ -130,10 +136,8 @@ local function wrap_context_text(text, max_width)
                 end
 
                 pieces[#pieces + 1] = piece
-                remaining = vim.fn.strcharpart(
-                    remaining,
-                    vim.fn.strchars(piece)
-                )
+                remaining =
+                    vim.fn.strcharpart(remaining, vim.fn.strchars(piece))
             end
 
             return pieces
@@ -236,7 +240,8 @@ local function set_chat_context(bufnr, winid, context)
     end
 
     BufHelpers.with_modifiable(bufnr, function()
-        local is_empty = existing_count == 0 and BufHelpers.is_buffer_empty(bufnr)
+        local is_empty = existing_count == 0
+            and BufHelpers.is_buffer_empty(bufnr)
         vim.api.nvim_buf_set_lines(
             bufnr,
             0,
@@ -337,15 +342,70 @@ local function resolve_header(dynamic_header, window_name)
         )
 end
 
+--- @param text string
+--- @return string
+local function escape_statusline_text(text)
+    local escaped = (text or ""):gsub("%%", "%%%%")
+    return escaped
+end
+
+--- @param header_parts agentic.ui.ChatWidget.HeaderParts|nil
+--- @param header_text string
+--- @return string
+local function build_winbar_text(header_parts, header_text)
+    if header_text == nil or header_text == "" then
+        return ""
+    end
+
+    if not header_parts then
+        return string.format(
+            "%%#%s#%s%%*",
+            Theme.HL_GROUPS.STATUS_LINE,
+            escape_statusline_text(header_text)
+        )
+    end
+
+    local pieces = {}
+
+    local function add_piece(text, hl_group)
+        if text == nil or text == "" then
+            return
+        end
+
+        if #pieces > 0 then
+            pieces[#pieces + 1] =
+                string.format("%%#%s# | ", Theme.HL_GROUPS.STATUS_LINE)
+        end
+
+        pieces[#pieces + 1] =
+            string.format("%%#%s#%s", hl_group, escape_statusline_text(text))
+    end
+
+    add_piece(header_parts.title, Theme.HL_GROUPS.WIN_BAR_TITLE)
+    add_piece(header_parts.context, Theme.HL_GROUPS.WIN_BAR_CONTEXT)
+    add_piece(header_parts.suffix, Theme.HL_GROUPS.WIN_BAR_HINT)
+
+    if #pieces == 0 then
+        return ""
+    end
+
+    pieces[#pieces + 1] = "%*"
+    return table.concat(pieces)
+end
+
 --- @param winid integer
---- @param _header_parts agentic.ui.ChatWidget.HeaderParts|nil
---- @param _header_text string
+--- @param header_parts agentic.ui.ChatWidget.HeaderParts|nil
+--- @param header_text string
 local function set_winbar(winid, header_parts, header_text)
     if not winid or not vim.api.nvim_win_is_valid(winid) then
         return
     end
 
-    vim.api.nvim_set_option_value("winbar", "", { win = winid })
+    vim.api.nvim_set_option_value(
+        "winbar",
+        build_winbar_text(header_parts, header_text),
+        { win = winid }
+    )
 end
 
 --- Sets the buffer name based on header text and tab count
@@ -381,6 +441,8 @@ function WindowDecoration.apply_window_style(winid)
 
     local winhl = parse_option_map(vim.wo[winid].winhighlight)
     winhl.WinSeparator = Theme.HL_GROUPS.WIN_SEPARATOR
+    winhl.WinBar = Theme.HL_GROUPS.STATUS_LINE
+    winhl.WinBarNC = Theme.HL_GROUPS.STATUS_LINE
 
     vim.api.nvim_set_option_value(
         "winhighlight",
@@ -431,7 +493,8 @@ function WindowDecoration.render_header(bufnr, window_name, context)
             Logger.notify(err)
         end
 
-        local rendered_parts = header_parts and vim.deepcopy(header_parts) or nil
+        local rendered_parts = header_parts and vim.deepcopy(header_parts)
+            or nil
         if window_name == "chat" and rendered_parts then
             set_chat_context(bufnr, winid, rendered_parts.context)
             rendered_parts.context = nil
@@ -444,7 +507,12 @@ function WindowDecoration.render_header(bufnr, window_name, context)
 
         WindowDecoration.apply_window_style(winid)
         set_winbar(winid, rendered_parts or header_parts, text)
-        set_buffer_name(bufnr, rendered_parts or header_parts, header_text, tab_page_id)
+        set_buffer_name(
+            bufnr,
+            rendered_parts or header_parts,
+            header_text,
+            tab_page_id
+        )
     end)
 end
 

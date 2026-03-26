@@ -7,6 +7,8 @@ local Logger = require("agentic.utils.logger")
 --- @field _bufnr integer
 --- @field _root string
 --- @field _resolve_root? fun(): string|nil
+--- @field _on_file_selected? fun(file_path: string)
+--- @field _skip_auto_show_once boolean
 local FilePicker = {}
 FilePicker.__index = FilePicker
 
@@ -41,7 +43,9 @@ FilePicker.CMD_BFS = {
     "-print",
 }
 
---- Buffer-local storage (weak values for automatic cleanup)
+--- Buffer-local lookup cache.
+--- Lifetime is anchored by SessionManager.file_picker; weak values avoid stale
+--- entries after the owning session is released.
 local instances_by_buffer = setmetatable({}, { __mode = "v" })
 local CACHE_REFRESH_MS = 10000
 local MAX_COMPLETION_RESULTS = 200
@@ -53,12 +57,18 @@ local blink_filetype_registered = false
 
 --- @class agentic.ui.FilePicker.Opts
 --- @field resolve_root? fun(): string|nil
+--- @field on_file_selected? fun(file_path: string)
 
 --- @class agentic.ui.FilePicker.RootCache
 --- @field files table[]
 --- @field scanning boolean
 --- @field updated_at integer
 --- @field waiters fun(files: table[])[]
+
+--- @class agentic.ui.FilePicker.BlinkAPI
+--- @field show fun(opts: {providers?: string[]}|nil)
+--- @field add_source_provider fun(source_id: string, source_config: table)
+--- @field add_filetype_source fun(filetype: string, source_id: string)
 
 --- @return integer
 local function now_ms()
@@ -141,6 +151,8 @@ function FilePicker:new(bufnr, opts)
         _bufnr = bufnr,
         _root = normalize_root(vim.fn.getcwd()),
         _resolve_root = opts.resolve_root,
+        _on_file_selected = opts.on_file_selected,
+        _skip_auto_show_once = false,
     }, self)
     instance:_setup_blink_completion(bufnr)
     return instance
@@ -169,7 +181,7 @@ local function get_active_mention(line, cursor_col)
     }
 end
 
---- @return blink.cmp.API|nil
+--- @return agentic.ui.FilePicker.BlinkAPI|nil
 function FilePicker:_get_blink()
     local ok, blink = pcall(require, "blink.cmp")
     if not ok then
@@ -212,11 +224,72 @@ function FilePicker:_ensure_blink_registered()
     return blink
 end
 
+--- @return boolean
+function FilePicker:_is_blink_menu_open()
+    local ok_menu, menu = pcall(require, "blink.cmp.completion.windows.menu")
+    if not ok_menu or not menu or not menu.win or not menu.win.is_open then
+        return false
+    end
+
+    return menu.win:is_open()
+end
+
+--- @param line string
+--- @param cursor_col integer
+function FilePicker:_show_mention_completion_if_needed(line, cursor_col)
+    if self._skip_auto_show_once then
+        self._skip_auto_show_once = false
+        return
+    end
+
+    local mention = get_active_mention(line, cursor_col)
+    if not mention or self:_is_blink_menu_open() then
+        return
+    end
+
+    local blink = self:_get_blink()
+    if not blink then
+        return
+    end
+
+    blink.show({
+        providers = { BLINK_SOURCE_ID },
+    })
+end
+
+function FilePicker:skip_next_auto_show()
+    self._skip_auto_show_once = true
+    vim.schedule(function()
+        if self._skip_auto_show_once then
+            self._skip_auto_show_once = false
+        end
+    end)
+end
+
 --- Sets up blink-triggered completion for @ file mentions
 --- @param bufnr number
 function FilePicker:_setup_blink_completion(bufnr)
     instances_by_buffer[bufnr] = self
     self:_ensure_blink_registered()
+
+    vim.api.nvim_create_autocmd("TextChangedI", {
+        buffer = bufnr,
+        callback = function()
+            if not vim.api.nvim_buf_is_valid(bufnr) then
+                return
+            end
+
+            local cursor = vim.api.nvim_win_get_cursor(0)
+            local line = vim.api.nvim_buf_get_lines(
+                bufnr,
+                cursor[1] - 1,
+                cursor[1],
+                false
+            )[1] or ""
+
+            self:_show_mention_completion_if_needed(line, cursor[2])
+        end,
+    })
 end
 
 --- @return boolean
@@ -234,10 +307,51 @@ function FilePicker:_resolve_scan_root()
     return normalize_root(root)
 end
 
+--- @param path string
+--- @return string
+function FilePicker:resolve_path(path)
+    return to_absolute_path(self:_resolve_scan_root(), path)
+end
+
+--- @param input_text string
+--- @return string[] file_paths
+function FilePicker:resolve_mentioned_file_paths(input_text)
+    local file_paths = {}
+    local seen = {}
+
+    for path in (" " .. input_text):gmatch("%s@([^%s]+)") do
+        local abs_path = self:resolve_path(path)
+        local stat = vim.uv.fs_stat(abs_path)
+
+        if stat and stat.type == "file" and not seen[abs_path] then
+            seen[abs_path] = true
+            file_paths[#file_paths + 1] = abs_path
+        end
+    end
+
+    return file_paths
+end
+
+--- @param path string
+function FilePicker:handle_file_selected(path)
+    if not self._on_file_selected then
+        return
+    end
+
+    local abs_path = self:resolve_path(path)
+    local stat = vim.uv.fs_stat(abs_path)
+    if not stat or stat.type ~= "file" then
+        return
+    end
+
+    self._on_file_selected(abs_path)
+end
+
 --- @param output string
 --- @param root string
+--- @param ensure_exists? boolean
 --- @return table[]
-function FilePicker:_build_file_items(output, root)
+function FilePicker:_build_file_items(output, root, ensure_exists)
     local files = {}
     local seen = {}
     local include_hidden = self:_include_hidden_files()
@@ -245,22 +359,28 @@ function FilePicker:_build_file_items(output, root)
     for line in output:gmatch("[^\n]+") do
         if line ~= "" then
             local abs_path = to_absolute_path(root, vim.trim(line))
-            local relative_path = to_root_relative_path(root, abs_path)
-            local relative_path_lc = relative_path:lower()
+            if not ensure_exists or vim.uv.fs_stat(abs_path) then
+                local relative_path = to_root_relative_path(root, abs_path)
+                local relative_path_lc = relative_path:lower()
 
-            if relative_path ~= "" then
-                if include_hidden or not has_hidden_segment(relative_path) then
-                    if not seen[relative_path] then
-                        seen[relative_path] = true
-                        table.insert(files, {
-                            word = "@" .. relative_path,
-                            menu = "File",
-                            kind = "@",
-                            icase = 1,
-                            _path_lc = relative_path_lc,
-                            _basename_lc = relative_path_lc:match("([^/]+)$")
-                                or relative_path_lc,
-                        })
+                if relative_path ~= "" then
+                    if
+                        include_hidden or not has_hidden_segment(relative_path)
+                    then
+                        if not seen[relative_path] then
+                            seen[relative_path] = true
+                            table.insert(files, {
+                                word = "@" .. relative_path,
+                                menu = "File",
+                                kind = "@",
+                                icase = 1,
+                                _path_lc = relative_path_lc,
+                                _basename_lc = relative_path_lc:match(
+                                    "([^/]+)$"
+                                )
+                                    or relative_path_lc,
+                            })
+                        end
                     end
                 end
             end
@@ -272,6 +392,12 @@ function FilePicker:_build_file_items(output, root)
     end)
 
     return files
+end
+
+--- @param cmd_parts table
+--- @return boolean
+local function command_needs_existing_file_filter(cmd_parts)
+    return cmd_parts[1] == "git"
 end
 
 --- @param query string
@@ -400,7 +526,10 @@ function FilePicker:request_completion_items(query, callback)
     if cache and (self:_cache_is_fresh(root) or cache.scanning) then
         if cache.scanning then
             self:_scan_files_async(root, function(files)
-                if not vim.api.nvim_buf_is_valid(self._bufnr) or self._root ~= root then
+                if
+                    not vim.api.nvim_buf_is_valid(self._bufnr)
+                    or self._root ~= root
+                then
                     return
                 end
 
@@ -439,7 +568,10 @@ function FilePicker:request_source_items(callback)
     if cache and (self:_cache_is_fresh(root) or cache.scanning) then
         if cache.scanning then
             self:_scan_files_async(root, function(files)
-                if not vim.api.nvim_buf_is_valid(self._bufnr) or self._root ~= root then
+                if
+                    not vim.api.nvim_buf_is_valid(self._bufnr)
+                    or self._root ~= root
+                then
                     return
                 end
 
@@ -478,7 +610,13 @@ function FilePicker:_run_scan_commands_async(commands, index, root, callback)
         vim.system(cmd_parts, { text = true }, function(result)
             vim.schedule(function()
                 if result.code == 0 and result.stdout ~= "" then
-                    callback(self:_build_file_items(result.stdout, root))
+                    callback(
+                        self:_build_file_items(
+                            result.stdout,
+                            root,
+                            command_needs_existing_file_filter(cmd_parts)
+                        )
+                    )
                     return
                 end
 
@@ -495,7 +633,13 @@ function FilePicker:_run_scan_commands_async(commands, index, root, callback)
 
     local output = vim.fn.system(cmd_parts)
     if vim.v.shell_error == 0 and output ~= "" then
-        callback(self:_build_file_items(output, root))
+        callback(
+            self:_build_file_items(
+                output,
+                root,
+                command_needs_existing_file_filter(cmd_parts)
+            )
+        )
         return
     end
 
@@ -561,7 +705,11 @@ function FilePicker:scan_files(root)
         )
 
         if vim.v.shell_error == 0 and output ~= "" then
-            local files = self:_build_file_items(output, root)
+            local files = self:_build_file_items(
+                output,
+                root,
+                command_needs_existing_file_filter(cmd_parts)
+            )
             self:_store_files(root, files)
             return files
         end

@@ -41,7 +41,6 @@ local function build_window_config(width, height)
         row = math.max(1, math.floor((vim.o.lines - height) / 2) - 1),
         col = math.max(1, math.floor((vim.o.columns - width) / 2)),
         zindex = 90,
-        title_pos = "center",
     }
 end
 
@@ -145,6 +144,7 @@ function Chooser.show(items, opts, on_choice)
     local win_config = build_window_config(width, height)
     if show_title then
         win_config.title = " " .. prompt .. " "
+        win_config.title_pos = "center"
     end
     local winid = vim.api.nvim_open_win(bufnr, true, win_config)
 

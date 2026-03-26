@@ -7,9 +7,21 @@
 --- @field name string
 --- @field version string
 
+--- @alias agentic.acp.Meta table<string, any>
+
 --- @class agentic.acp.ClientCapabilities
 --- @field fs agentic.acp.FileSystemCapability
 --- @field terminal boolean
+
+--- @class agentic.acp.McpCapabilities
+--- @field http boolean
+--- @field sse boolean
+
+--- @class agentic.acp.SessionListCapabilities
+--- @field _meta? agentic.acp.Meta|nil
+
+--- @class agentic.acp.SessionCapabilities
+--- @field list? agentic.acp.SessionListCapabilities|boolean|nil
 
 --- @class agentic.acp.InitializeParams
 --- @field protocolVersion number
@@ -22,7 +34,9 @@
 
 --- @class agentic.acp.AgentCapabilities
 --- @field loadSession boolean
+--- @field mcpCapabilities agentic.acp.McpCapabilities
 --- @field promptCapabilities agentic.acp.PromptCapabilities
+--- @field sessionCapabilities agentic.acp.SessionCapabilities
 
 --- @class agentic.acp.PromptCapabilities
 --- @field image boolean
@@ -38,6 +52,12 @@
 --- @field id string
 --- @field name string
 --- @field description? string
+
+--- @class agentic.acp.InitializeResponse
+--- @field protocolVersion number
+--- @field agentCapabilities agentic.acp.AgentCapabilities
+--- @field agentInfo? agentic.acp.AgentInfo|nil
+--- @field authMethods agentic.acp.AuthMethod[]
 
 --- @class agentic.acp.McpServer
 --- @field name string
@@ -90,20 +110,7 @@
 --- | "medium"
 --- | "low"
 
---- @class agentic.acp.RawInput
---- @field file_path? string
---- @field filePath? string OpenCode was sending it camelCase
---- @field new_string? string
---- @field newString? string OpenCode was sending it camelCase
---- @field old_string? string
---- @field oldString? string OpenCode was sending it camelCase
---- @field replace_all? boolean
---- @field description? string
---- @field command? string
---- @field url? string Usually from the fetch tool
---- @field prompt? string Usually accompanying the fetch tool, not the web_search
---- @field query? string Usually from the web_search tool
---- @field timeout? number
+--- @alias agentic.acp.RawInput table<string, any>
 
 --- @class agentic.acp.ToolCallRegularContent
 --- @field type "content"
@@ -115,9 +122,14 @@
 --- @field oldText? string
 --- @field newText string
 
+--- @class agentic.acp.ToolCallTerminalContent
+--- @field type "terminal"
+--- @field terminalId string
+
 --- @alias agentic.acp.ACPToolCallContent
 --- | agentic.acp.ToolCallRegularContent
 --- | agentic.acp.ToolCallDiffContent
+--- | agentic.acp.ToolCallTerminalContent
 
 --- @class agentic.acp.ToolCallLocation
 --- @field path string
@@ -133,51 +145,225 @@
 --- @field description string
 --- @field input? table<string, any>
 
---- @class agentic.acp.AgentMode
+--- @class agentic.acp.SessionMode
 --- @field id string
 --- @field name string
---- @field description? string
+--- @field description? string|nil
 
---- @class agentic.acp.Model
---- @field modelId string
---- @field name string
---- @field description string
-
---- @class agentic.acp.ModesInfo
---- @field availableModes agentic.acp.AgentMode[]
+--- @class agentic.acp.SessionModeState
+--- @field availableModes agentic.acp.SessionMode[]
 --- @field currentModeId string
 
---- @class agentic.acp.ModelsInfo
---- @field availableModels agentic.acp.Model[]
---- @field currentModelId string
+--- @class agentic.acp.SessionInfo
+--- @field sessionId string
+--- @field cwd string
+--- @field title? string|nil
+--- @field updatedAt? string|nil
 
 --- @class agentic.acp.ConfigOption.Option
 --- @field description string
 --- @field name string
 --- @field value string
 
+--- @class agentic.acp.ConfigOption.OptionGroup
+--- @field group string
+--- @field name string
+--- @field options agentic.acp.ConfigOption.Option[]
+
+--- @alias agentic.acp.ConfigOption.Options
+--- | agentic.acp.ConfigOption.Option[]
+--- | agentic.acp.ConfigOption.OptionGroup[]
+
 --- @alias agentic.acp.ConfigOption.Category
 --- | "mode"
 --- | "model"
 --- | "thought_level"
+--- | "other"
 
 --- @class agentic.acp.ConfigOption
 --- @field id string
---- @field category agentic.acp.ConfigOption.Category
+--- @field type? "select"|string|nil
+--- @field category agentic.acp.ConfigOption.Category|string
 --- @field currentValue string
 --- @field description string
 --- @field name string
---- @field options agentic.acp.ConfigOption.Option[]
+--- @field options agentic.acp.ConfigOption.Options
 
---- @class agentic.acp.SessionCreationResponse
+--- @class agentic.acp.NewSessionRequest
+--- @field cwd string
+--- @field mcpServers agentic.acp.McpServer[]
+
+--- @class agentic.acp.NewSessionResponse
 --- @field sessionId string
---- @field modes? agentic.acp.ModesInfo
---- @field models? agentic.acp.ModelsInfo
 --- @field configOptions? agentic.acp.ConfigOption[]
+--- @field modes? agentic.acp.SessionModeState|nil
+
+--- @alias agentic.acp.SessionCreationResponse agentic.acp.NewSessionResponse
+
+--- @class agentic.acp.ListSessionsRequest
+--- @field cursor? string|nil
+--- @field cwd? string|nil
+
+--- @class agentic.acp.ListSessionsResponse
+--- @field sessions agentic.acp.SessionInfo[]
+--- @field nextCursor? string|nil
+
+--- @class agentic.acp.LoadSessionRequest
+--- @field sessionId string
+--- @field cwd string
+--- @field mcpServers agentic.acp.McpServer[]
+
+--- @class agentic.acp.LoadSessionResponse
+--- @field configOptions? agentic.acp.ConfigOption[]
+--- @field modes? agentic.acp.SessionModeState|nil
+
+--- @class agentic.acp.PromptRequest
+--- @field sessionId string
+--- @field prompt agentic.acp.Content[]
+
+--- @class agentic.acp.PromptResponse
+--- @field stopReason agentic.acp.StopReason
+
+--- @class agentic.acp.CancelNotification
+--- @field sessionId string
+
+--- @class agentic.acp.SetSessionConfigOptionRequest
+--- @field sessionId string
+--- @field configId string
+--- @field value string
+
+--- @class agentic.acp.SetSessionConfigOptionResponse
+--- @field configOptions agentic.acp.ConfigOption[]
+
+--- @class agentic.acp.SetSessionModeRequest
+--- @field sessionId string
+--- @field modeId string
+
+--- @class agentic.acp.SetSessionModeResponse
+
+--- @class agentic.acp.ReadTextFileRequest
+--- @field sessionId string
+--- @field path string
+--- @field line? integer|nil
+--- @field limit? integer|nil
+
+--- @class agentic.acp.ReadTextFileResponse
+--- @field content string
+
+--- @class agentic.acp.WriteTextFileRequest
+--- @field sessionId string
+--- @field path string
+--- @field content string
+
+--- @class agentic.acp.WriteTextFileResponse
+
+--- @class agentic.acp.TerminalExitStatus
+--- @field exitCode integer|nil
+--- @field signal string|nil
+
+--- @class agentic.acp.CreateTerminalRequest
+--- @field sessionId string
+--- @field command string
+--- @field args? string[]|nil
+--- @field env? agentic.acp.EnvVariable[]|nil
+--- @field cwd? string|nil
+--- @field outputByteLimit? integer|nil
+
+--- @class agentic.acp.CreateTerminalResponse
+--- @field terminalId string
+
+--- @class agentic.acp.KillTerminalRequest
+--- @field sessionId string
+--- @field terminalId string
+
+--- @class agentic.acp.KillTerminalResponse
+
+--- @class agentic.acp.TerminalOutputRequest
+--- @field sessionId string
+--- @field terminalId string
+
+--- @class agentic.acp.TerminalOutputResponse
+--- @field output string
+--- @field truncated boolean
+--- @field exitStatus? agentic.acp.TerminalExitStatus|nil
+
+--- @class agentic.acp.ReleaseTerminalRequest
+--- @field sessionId string
+--- @field terminalId string
+
+--- @class agentic.acp.ReleaseTerminalResponse
+
+--- @class agentic.acp.WaitForTerminalExitRequest
+--- @field sessionId string
+--- @field terminalId string
+
+--- @class agentic.acp.WaitForTerminalExitResponse
+--- @field exitCode integer|nil
+--- @field signal string|nil
+
+--- @alias agentic.acp.AgentRequestMethod
+--- | "initialize"
+--- | "authenticate"
+--- | "session/new"
+--- | "session/list"
+--- | "session/load"
+--- | "session/prompt"
+--- | "session/set_config_option"
+--- | "session/set_mode"
+
+--- @alias agentic.acp.AgentNotificationMethod
+--- | "session/cancel"
+
+--- @alias agentic.acp.ClientRequestMethod
+--- | "fs/read_text_file"
+--- | "fs/write_text_file"
+--- | "session/request_permission"
+--- | "terminal/create"
+--- | "terminal/kill"
+--- | "terminal/output"
+--- | "terminal/release"
+--- | "terminal/wait_for_exit"
+
+--- @alias agentic.acp.ClientNotificationMethod
+--- | "session/update"
+
+--- @alias agentic.acp.JsonRpcMethod
+--- | agentic.acp.AgentRequestMethod
+--- | agentic.acp.AgentNotificationMethod
+--- | agentic.acp.ClientRequestMethod
+--- | agentic.acp.ClientNotificationMethod
+
+--- @class agentic.acp.JsonRpcRequest
+--- @field jsonrpc "2.0"
+--- @field id number
+--- @field method agentic.acp.JsonRpcMethod|string
+--- @field params table|nil
+
+--- @class agentic.acp.JsonRpcNotification
+--- @field jsonrpc "2.0"
+--- @field method agentic.acp.JsonRpcMethod|string
+--- @field params table|nil
+
+--- @class agentic.acp.JsonRpcSuccessResponse
+--- @field jsonrpc "2.0"
+--- @field id number
+--- @field result table|nil
+
+--- @class agentic.acp.JsonRpcErrorResponse
+--- @field jsonrpc "2.0"
+--- @field id number|nil
+--- @field error agentic.acp.ACPError
 
 --- @alias agentic.acp.ResponseRawParams
---- | { sessionId: string, update: agentic.acp.SessionUpdateMessage }
---- | agentic.acp.RequestPermission
+--- | agentic.acp.SessionNotification
+--- | agentic.acp.RequestPermissionRequest
+--- | agentic.acp.ReadTextFileRequest
+--- | agentic.acp.WriteTextFileRequest
+--- | agentic.acp.CreateTerminalRequest
+--- | agentic.acp.KillTerminalRequest
+--- | agentic.acp.TerminalOutputRequest
+--- | agentic.acp.ReleaseTerminalRequest
+--- | agentic.acp.WaitForTerminalExitRequest
 
 --- @class agentic.acp.ResponseRaw
 --- @field id? number
@@ -222,22 +408,27 @@
 --- @class agentic.acp.CurrentModeUpdate
 --- @field sessionUpdate "current_mode_update"
 --- @field currentModeId string
+--- @field _meta? table<string, any>|nil
 
 --- @class agentic.acp.UsageUpdate
 --- @field sessionUpdate "usage_update"
---- @field used number Tokens currently in context
---- @field size number Total context window size in tokens
---- @field cost? { amount: number, currency: string } Cumulative session cost
+--- @field used number
+--- @field size number
+--- @field cost? { amount: number, currency: string }
 
 --- @class agentic.acp.ConfigOptionsUpdate
 --- @field sessionUpdate "config_option_update"
 --- @field configOptions agentic.acp.ConfigOption[]
+
+--- @alias agentic.acp.ConfigOptionUpdate agentic.acp.ConfigOptionsUpdate
 
 --- @class agentic.acp.SessionInfoUpdate
 --- @field sessionUpdate "session_info_update"
 --- @field title? string|nil
 --- @field updatedAt? string|nil
 --- @field _meta? table<string, any>|nil
+
+--- @alias agentic.acp.SessionUpdate agentic.acp.SessionUpdateMessage
 
 --- @alias agentic.acp.SessionUpdateMessage
 --- | agentic.acp.UserMessageChunk
@@ -252,21 +443,37 @@
 --- | agentic.acp.ConfigOptionsUpdate
 --- | agentic.acp.SessionInfoUpdate
 
+--- @class agentic.acp.SessionNotification
+--- @field sessionId string
+--- @field update agentic.acp.SessionUpdate
+
 --- @class agentic.acp.PermissionOption
 --- @field optionId string
 --- @field name string
 --- @field kind "allow_once" | "allow_always" | "reject_once" | "reject_always"
 
---- Permission request (session/request_permission JSON-RPC request).
---- Per ACP spec, toolCall is a ToolCallUpdate (partial) — same shape used in tool_call_update.
---- @class agentic.acp.RequestPermission
+--- @class agentic.acp.RequestPermissionRequest
 --- @field sessionId string
 --- @field options agentic.acp.PermissionOption[]
 --- @field toolCall agentic.acp.ToolCallBase
 
---- @class agentic.acp.RequestPermissionOutcome
---- @field outcome "cancelled" | "selected"
---- @field optionId? string
+--- Permission request (session/request_permission JSON-RPC request).
+--- Per ACP spec, toolCall is a ToolCallUpdate (partial) — same shape used in tool_call_update.
+--- @alias agentic.acp.RequestPermission agentic.acp.RequestPermissionRequest
+
+--- @class agentic.acp.CancelledPermissionOutcome
+--- @field outcome "cancelled"
+
+--- @class agentic.acp.SelectedPermissionOutcome
+--- @field outcome "selected"
+--- @field optionId string
+
+--- @alias agentic.acp.RequestPermissionOutcome
+--- | agentic.acp.CancelledPermissionOutcome
+--- | agentic.acp.SelectedPermissionOutcome
+
+--- @class agentic.acp.RequestPermissionResponse
+--- @field outcome agentic.acp.RequestPermissionOutcome
 
 --- @alias agentic.acp.ClientConnectionState
 --- | "disconnected"
@@ -289,6 +496,8 @@
 --- @field lines string[] The selected code lines
 --- @field start_line integer Starting line number (1-indexed)
 --- @field end_line integer Ending line number (1-indexed, inclusive)
+--- @field start_col? integer Starting column number (1-indexed)
+--- @field end_col? integer Ending column number (1-indexed, inclusive)
 --- @field file_path string Relative file path
 --- @field file_type string File type/extension
 

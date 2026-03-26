@@ -41,6 +41,7 @@ ACPClient.__index = ACPClient
 
 --- ACP Error codes
 ACPClient.ERROR_CODES = {
+    METHOD_NOT_FOUND = -32601,
     TRANSPORT_ERROR = -32000,
     PROTOCOL_ERROR = -32001,
     TIMEOUT_ERROR = -32002,
@@ -222,6 +223,19 @@ function ACPClient:__send_result(id, result)
     self.transport:send(data)
 end
 
+--- @protected
+--- @param id number
+--- @param err agentic.acp.ACPError
+--- @return nil
+function ACPClient:__send_error(id, err)
+    local message = { jsonrpc = "2.0", id = id, error = err }
+
+    local data = vim.json.encode(message)
+    Logger.debug_to_file("request:", message)
+
+    self.transport:send(data)
+end
+
 --- Handles raw JSON-RPC message received from the transport
 --- @param message agentic.acp.ResponseRaw
 function ACPClient:_handle_message(message)
@@ -240,10 +254,16 @@ function ACPClient:_handle_message(message)
         Logger.debug_to_file(self.provider_config.name, "response: ", message)
     end
 
-    -- Check if this is a notification (has method but no id, or has both method and id for notifications)
     if message.method and not message.result and not message.error then
-        -- This is a notification
-        self:_handle_notification(message.id, message.method, message.params)
+        if message.id ~= nil then
+            self:_handle_request(
+                message.id,
+                message.method,
+                message.params or {}
+            )
+        else
+            self:_handle_notification(message.method, message.params or {})
+        end
     elseif message.id and (message.result or message.error) then
         local callback = self.callbacks[message.id]
         if callback then
@@ -262,22 +282,56 @@ function ACPClient:_handle_message(message)
     end
 end
 
---- @param message_id number
 --- @param method string
 --- @param params table
-function ACPClient:_handle_notification(message_id, method, params)
+function ACPClient:_handle_notification(method, params)
     if method == "session/update" then
         self:__handle_session_update(params)
-    elseif method == "session/request_permission" then
-        --- @diagnostic disable-next-line: param-type-mismatch
-        self:__handle_request_permission(message_id, params)
-    elseif method == "fs/read_text_file" or method == "fs/write_text_file" then
-        Logger.debug(
-            string.format("Received '%s' notification, ignoring it", method)
-        )
     else
         Logger.notify("Unknown notification method: " .. method)
     end
+end
+
+--- @param message_id number
+--- @param method string
+--- @param params table
+function ACPClient:_handle_request(message_id, method, params)
+    if method == "session/request_permission" then
+        --- @diagnostic disable-next-line: param-type-mismatch
+        self:__handle_request_permission(message_id, params)
+        return
+    end
+
+    if
+        method == "fs/read_text_file"
+        or method == "fs/write_text_file"
+        or method == "terminal/create"
+        or method == "terminal/kill"
+        or method == "terminal/output"
+        or method == "terminal/release"
+        or method == "terminal/wait_for_exit"
+    then
+        self:__send_error(
+            message_id,
+            self:__create_error(
+                self.ERROR_CODES.METHOD_NOT_FOUND,
+                string.format(
+                    "Unsupported ACP client request: %s",
+                    tostring(method)
+                )
+            )
+        )
+        return
+    end
+
+    Logger.notify("Unknown request method: " .. method)
+    self:__send_error(
+        message_id,
+        self:__create_error(
+            self.ERROR_CODES.METHOD_NOT_FOUND,
+            "Unknown ACP request method: " .. tostring(method)
+        )
+    )
 end
 
 --- @protected
@@ -365,6 +419,7 @@ function ACPClient:__build_tool_call_message(update)
     end
 
     if update.content then
+        message.content_items = vim.deepcopy(update.content)
         local body_parts = {}
         for _, content in ipairs(update.content) do
             if content then
@@ -390,6 +445,8 @@ function ACPClient:__build_tool_call_message(update)
                     if content.path then
                         message.file_path = content.path
                     end
+                elseif content.type == "terminal" then
+                    message.terminal_id = content.terminalId
                 end
             end
         end
@@ -401,33 +458,6 @@ function ACPClient:__build_tool_call_message(update)
                 vim.list_extend(merged, body_parts[i])
             end
             message.body = merged
-        end
-    end
-
-    -- Fallback: build diff from rawInput when content is missing (e.g. OpenCode)
-    local raw_input = update.rawInput
-
-    if not message.diff and update.kind == "edit" and raw_input then
-        local new_string = raw_input.new_string or raw_input.newString
-        local old_string = raw_input.old_string or raw_input.oldString
-
-        if new_string then
-            message.diff = {
-                new = self:safe_split(new_string),
-                old = self:safe_split(old_string),
-                all = raw_input.replace_all or false,
-            }
-        end
-    end
-
-    if not message.file_path and raw_input then
-        message.file_path = raw_input.file_path or raw_input.filePath
-    end
-
-    if not message.file_path and update.locations then
-        local first_location = update.locations[1]
-        if first_location and first_location.path then
-            message.file_path = first_location.path
         end
     end
 
@@ -464,7 +494,13 @@ end
 --- @param request agentic.acp.RequestPermission
 function ACPClient:__handle_request_permission(message_id, request)
     if not request.sessionId or not request.toolCall then
-        error("Invalid request_permission")
+        self:__send_error(
+            message_id,
+            self:__create_error(
+                self.ERROR_CODES.INVALID_REQUEST,
+                "Invalid request_permission"
+            )
+        )
         return
     end
 
@@ -476,10 +512,17 @@ function ACPClient:__handle_request_permission(message_id, request)
 
         subscriber.on_request_permission(request, function(option_id)
             --- @type agentic.acp.RequestPermissionOutcome
-            local outcome = {
-                outcome = "selected",
-                optionId = option_id,
-            }
+            local outcome
+            if option_id == nil then
+                outcome = {
+                    outcome = "cancelled",
+                }
+            else
+                outcome = {
+                    outcome = "selected",
+                    optionId = option_id,
+                }
+            end
 
             self:__send_result(message_id, {
                 outcome = outcome,
@@ -636,19 +679,6 @@ function ACPClient:send_prompt(session_id, prompt, callback)
     self:_send_request("session/prompt", params, callback)
 end
 
---- Set the agent mode for a session
---- @param session_id string
---- @param mode_id string
---- @param callback fun(result: table|nil, err: agentic.acp.ACPError|nil)
-function ACPClient:set_mode(session_id, mode_id, callback)
-    local params = {
-        sessionId = session_id,
-        modeId = mode_id,
-    }
-
-    self:_send_request("session/set_mode", params, callback)
-end
-
 --- Set a config option value for a session
 --- @param session_id string
 --- @param config_id string
@@ -667,19 +697,6 @@ function ACPClient:set_config_option(
     }
 
     self:_send_request("session/set_config_option", params, callback)
-end
-
---- Set the provided model to the session
---- @param session_id string
---- @param model_id string
---- @param callback fun(result: table|nil, err: agentic.acp.ACPError|nil)
-function ACPClient:set_model(session_id, model_id, callback)
-    local params = {
-        sessionId = session_id,
-        modelId = model_id,
-    }
-
-    self:_send_request("session/set_model", params, callback)
 end
 
 --- Stops current generation/tool execution, keeps session active for the next prompt

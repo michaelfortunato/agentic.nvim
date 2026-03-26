@@ -57,7 +57,7 @@ make test
 make test-verbose
 
 # Run specific test file
-make test-file FILE=lua/agentic/acp/agent_modes.test.lua
+make test-file FILE=lua/agentic/acp/agent_config_options.test.lua
 ```
 
 ### First Run

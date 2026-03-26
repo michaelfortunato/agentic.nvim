@@ -10,8 +10,8 @@
  *   bun run scripts/test-acp.ts "vibe-acp"
  *
  * Spawns the provider, sends initialize + session/new,
- * prints available models (configOptions + legacy), then tries
- * session/set_config_option and session/set_model to switch.
+ * prints available config options, then tries
+ * session/set_config_option to switch model-like settings.
  */
 
 import { spawn } from 'bun';
@@ -51,15 +51,6 @@ type ConfigOption = {
   type: string;
   currentValue?: string;
   options?: { value: string; name: string; description?: string }[];
-};
-
-type LegacyModels = {
-  availableModels: {
-    modelId: string;
-    name: string;
-    description?: string;
-  }[];
-  currentModelId: string;
 };
 
 console.log(`Spawning: ${command} ${args.join(' ')}`);
@@ -190,14 +181,6 @@ try {
   log('configOptions (mode)', modeConfig ?? 'NOT PRESENT');
   log('configOptions (thought_level)', thoughtConfig ?? 'NOT PRESENT');
 
-  // -- legacy models field --
-  const legacyModels = result.models as LegacyModels | undefined;
-  log('models (legacy field)', legacyModels ?? 'NOT PRESENT');
-
-  // -- legacy modes field --
-  const legacyModes = result.modes as Record<string, unknown> | undefined;
-  log('modes (legacy field)', legacyModes ?? 'NOT PRESENT');
-
   // 3) Try session/set_config_option with model category
   if (modelConfig?.options?.length) {
     console.log('\nconfigOptions model options:');
@@ -227,35 +210,6 @@ try {
     });
     const cfgResp = await waitFor(cfgId, 30_000, true);
     log('session/set_config_option response', cfgResp);
-  }
-
-  // 4) Try session/set_model (legacy/unstable)
-  if (legacyModels?.availableModels?.length) {
-    console.log('\nLegacy available models:');
-    for (const m of legacyModels.availableModels) {
-      const cur = m.modelId === legacyModels.currentModelId ? ' (current)' : '';
-      console.log(`  - ${m.modelId}: ${m.name}${cur}`);
-    }
-
-    const target = legacyModels.availableModels.find(
-      (m) => m.modelId !== legacyModels.currentModelId,
-    );
-    if (target) {
-      const setId = await send('session/set_model', {
-        sessionId,
-        modelId: target.modelId,
-      });
-      const setResp = await waitFor(setId);
-      log('session/set_model response', setResp);
-    }
-  } else {
-    console.log('\nNo legacy models. Trying session/set_model anyway...');
-    const setId = await send('session/set_model', {
-      sessionId,
-      modelId: 'test-model',
-    });
-    const setResp = await waitFor(setId, 30_000, true);
-    log('session/set_model response', setResp);
   }
 
   // Cleanup

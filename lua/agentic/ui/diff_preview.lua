@@ -14,11 +14,27 @@ local M = {}
 local NS_DIFF = HunkNavigation.NS_DIFF
 local NS_REVIEW = vim.api.nvim_create_namespace("agentic_diff_review")
 M.NS_REVIEW = NS_REVIEW
+local REVIEW_KEYMAPS = {
+    accept = "j",
+    reject = "k",
+    accept_all = "J",
+    reject_all = "K",
+}
 local HINT_KINDS = {
     edit = true,
     create = true,
     write = true,
 }
+
+--- @class agentic.ui.DiffPreview.ReviewActions
+--- @field on_accept fun()
+--- @field on_reject fun()
+
+--- @class agentic.ui.DiffPreview.ReviewKeymapState
+--- @field saved_keymaps { accept?: table, reject?: table, accept_all?: table, reject_all?: table }
+
+--- @type table<number, agentic.ui.DiffPreview.ReviewKeymapState>
+local review_keymap_state = {}
 
 --- Get diff preview buffer from tabpage
 --- @param tabpage number Tabpage ID
@@ -50,14 +66,16 @@ end
 
 --- @param file_path string
 --- @param hunk_count integer
+--- @param review_actions agentic.ui.DiffPreview.ReviewActions|nil
 --- @return table
-local function build_review_banner(file_path, hunk_count)
+local function build_review_banner(file_path, hunk_count, review_actions)
     local basename = vim.fs.basename(file_path)
     local hunk_label =
         string.format("%d hunk%s", hunk_count, hunk_count == 1 and "" or "s")
     local diff_keymaps = Config.keymaps.diff_preview
 
-    return {
+    --- @type table
+    local banner = {
         {
             { " Agentic Review ", Theme.HL_GROUPS.REVIEW_BANNER_ACCENT },
             { " " .. basename .. " ", Theme.HL_GROUPS.REVIEW_BANNER_ACCENT },
@@ -72,12 +90,36 @@ local function build_review_banner(file_path, hunk_count)
             },
         },
     }
+
+    if review_actions then
+        banner[#banner + 1] = {
+            { " ACP whole diff ", Theme.HL_GROUPS.REVIEW_BANNER_ACCENT },
+            {
+                string.format(
+                    " %s yes  %s no  %s yes-all  %s no-all ",
+                    REVIEW_KEYMAPS.accept,
+                    REVIEW_KEYMAPS.reject,
+                    REVIEW_KEYMAPS.accept_all,
+                    REVIEW_KEYMAPS.reject_all
+                ),
+                Theme.HL_GROUPS.REVIEW_BANNER,
+            },
+        }
+    end
+
+    return banner
 end
 
 --- @param bufnr integer
 --- @param file_path string
---- @param diff_blocks agentic.ui.ToolCallDiff.Block[]
-local function render_review_banner(bufnr, file_path, diff_blocks)
+--- @param diff_blocks agentic.ui.ToolCallDiff.DiffBlock[]
+--- @param review_actions agentic.ui.DiffPreview.ReviewActions|nil
+local function render_review_banner(
+    bufnr,
+    file_path,
+    diff_blocks,
+    review_actions
+)
     local first_block = diff_blocks[1]
     if not first_block then
         return
@@ -85,9 +127,113 @@ local function render_review_banner(bufnr, file_path, diff_blocks)
 
     local anchor_line = math.max(0, first_block.start_line - 1)
     vim.api.nvim_buf_set_extmark(bufnr, NS_REVIEW, anchor_line, 0, {
-        virt_lines = build_review_banner(file_path, #diff_blocks),
+        virt_lines = build_review_banner(
+            file_path,
+            #diff_blocks,
+            review_actions
+        ),
         virt_lines_above = true,
     })
+end
+
+--- @param bufnr integer
+--- @return agentic.ui.DiffPreview.ReviewKeymapState
+local function get_review_state(bufnr)
+    if not review_keymap_state[bufnr] then
+        review_keymap_state[bufnr] = {
+            saved_keymaps = {},
+        }
+    end
+
+    return review_keymap_state[bufnr]
+end
+
+--- @param bufnr integer
+--- @param key string
+--- @return table|nil
+local function save_buffer_keymap(bufnr, key)
+    local map_info
+    vim.api.nvim_buf_call(bufnr, function()
+        map_info = vim.fn.maparg(key, "n", false, true)
+    end)
+
+    if map_info and map_info.lhs and map_info.buffer == 1 then
+        return map_info
+    end
+
+    return nil
+end
+
+--- @param bufnr integer
+function M.restore_review_keymaps(bufnr)
+    pcall(vim.api.nvim_buf_del_keymap, bufnr, "n", REVIEW_KEYMAPS.accept)
+    pcall(vim.api.nvim_buf_del_keymap, bufnr, "n", REVIEW_KEYMAPS.reject)
+    pcall(vim.api.nvim_buf_del_keymap, bufnr, "n", REVIEW_KEYMAPS.accept_all)
+    pcall(vim.api.nvim_buf_del_keymap, bufnr, "n", REVIEW_KEYMAPS.reject_all)
+
+    local state = review_keymap_state[bufnr]
+    if state and state.saved_keymaps then
+        for _, saved_map in pairs(state.saved_keymaps) do
+            if saved_map and saved_map.lhs then
+                local opts = { buffer = bufnr }
+                if saved_map.noremap == 1 then
+                    opts.noremap = true
+                end
+                if saved_map.silent == 1 then
+                    opts.silent = true
+                end
+                if saved_map.expr == 1 then
+                    opts.expr = true
+                end
+                if saved_map.nowait == 1 then
+                    opts.nowait = true
+                end
+
+                pcall(
+                    BufHelpers.keymap_set,
+                    bufnr,
+                    "n",
+                    saved_map.lhs,
+                    saved_map.callback or saved_map.rhs,
+                    opts
+                )
+            end
+        end
+    end
+
+    review_keymap_state[bufnr] = nil
+end
+
+--- @param bufnr integer
+--- @param review_actions agentic.ui.DiffPreview.ReviewActions|nil
+local function setup_review_keymaps(bufnr, review_actions)
+    if not review_actions then
+        return
+    end
+
+    local state = get_review_state(bufnr)
+    state.saved_keymaps.accept = save_buffer_keymap(bufnr, REVIEW_KEYMAPS.accept)
+    state.saved_keymaps.reject = save_buffer_keymap(bufnr, REVIEW_KEYMAPS.reject)
+    state.saved_keymaps.accept_all =
+        save_buffer_keymap(bufnr, REVIEW_KEYMAPS.accept_all)
+    state.saved_keymaps.reject_all =
+        save_buffer_keymap(bufnr, REVIEW_KEYMAPS.reject_all)
+
+    BufHelpers.keymap_set(bufnr, "n", REVIEW_KEYMAPS.accept, function()
+        review_actions.on_accept()
+    end, { desc = "Agentic Review: Accept diff", nowait = true })
+
+    BufHelpers.keymap_set(bufnr, "n", REVIEW_KEYMAPS.reject, function()
+        review_actions.on_reject()
+    end, { desc = "Agentic Review: Reject diff", nowait = true })
+
+    BufHelpers.keymap_set(bufnr, "n", REVIEW_KEYMAPS.accept_all, function()
+        review_actions.on_accept()
+    end, { desc = "Agentic Review: Accept diff", nowait = true })
+
+    BufHelpers.keymap_set(bufnr, "n", REVIEW_KEYMAPS.reject_all, function()
+        review_actions.on_reject()
+    end, { desc = "Agentic Review: Reject diff", nowait = true })
 end
 
 --- Builds a highlight map for all lines parsed as a block
@@ -271,6 +417,7 @@ end
 --- @field file_path string
 --- @field diff agentic.ui.MessageWriter.ToolCallDiff
 --- @field get_winid fun(bufnr: number): number|nil Called when buffer is not already visible, should return a winid
+--- @field review_actions? agentic.ui.DiffPreview.ReviewActions|nil
 
 --- @param opts agentic.ui.DiffPreview.ShowOpts
 function M.show_diff(opts)
@@ -394,7 +541,12 @@ function M.show_diff(opts)
     end
 
     if #diff_blocks > 0 then
-        render_review_banner(bufnr, opts.file_path, diff_blocks)
+        render_review_banner(
+            bufnr,
+            opts.file_path,
+            diff_blocks,
+            opts.review_actions
+        )
     end
 
     -- Only reposition newly opened review windows. If the user already has the
@@ -411,6 +563,7 @@ function M.show_diff(opts)
         vim.bo[bufnr].modifiable = false
 
         HunkNavigation.setup_keymaps(bufnr)
+        setup_review_keymaps(bufnr, opts.review_actions)
 
         if opened_review_window then
             pcall(
@@ -445,6 +598,7 @@ function M.clear_diff(buf, is_rejection)
     end
 
     HunkNavigation.restore_keymaps(bufnr)
+    M.restore_review_keymaps(bufnr)
 
     pcall(vim.api.nvim_buf_clear_namespace, bufnr, NS_DIFF, 0, -1)
     pcall(vim.api.nvim_buf_clear_namespace, bufnr, NS_REVIEW, 0, -1)

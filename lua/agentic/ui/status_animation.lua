@@ -1,8 +1,4 @@
---- StatusAnimation module for displaying chat activity in AgenticChat.
----
---- This module renders a stable bottom-of-buffer activity line using extmarks
---- and a subdued timer-based accent. The state label is the source of truth;
---- animation is only a visual hint.
+--- StatusAnimation renders the session activity line in AgenticChat.
 ---
 --- ## Usage
 --- ```lua
@@ -171,9 +167,8 @@ function StatusAnimation:_render_frame()
     local line_num = math.max(0, #lines - 1)
 
     local virt_text = {
-        { "  ", "Normal" },
         { char, hl_group },
-        { "  " .. label, text_hl_group },
+        { " " .. label, text_hl_group },
     }
 
     local delay = TIMING[self._state] or TIMING.generating

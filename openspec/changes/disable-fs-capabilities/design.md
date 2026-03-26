@@ -96,8 +96,7 @@ and tests straightforward.
     changes always win. User's unsaved changes are discarded.
     This is acceptable because the agent is the active editor.
 - **Risk:** `FileSystem.read_file` / `write_file` used elsewhere
-  - **Resolution:** `chat_history.lua` uses both
-    `FileSystem.write_file` (line 195) and
-    `FileSystem.read_file` (line 209) for session persistence.
-    These methods MUST be kept. Only the `acp_client.lua`
+  - **Resolution:** `persisted_session.lua` uses both
+    `FileSystem.write_file` and `FileSystem.read_file` for session
+    persistence. These methods MUST be kept. Only the `acp_client.lua`
     call sites are removed.

@@ -80,7 +80,8 @@ local function compact_preview(text, max_width)
     local truncated = single_line
 
     while truncated ~= "" and vim.fn.strdisplaywidth(truncated) > limit do
-        truncated = vim.fn.strcharpart(truncated, 0, vim.fn.strchars(truncated) - 1)
+        truncated =
+            vim.fn.strcharpart(truncated, 0, vim.fn.strchars(truncated) - 1)
     end
 
     if truncated == "" then

@@ -1,5 +1,10 @@
 local FilePicker = require("agentic.ui.file_picker")
 
+--- @class agentic.ui.FilePickerBlinkSource.Context
+--- @field bufnr integer
+--- @field line string
+--- @field cursor integer[]
+
 local Source = {}
 Source.__index = Source
 
@@ -13,13 +18,16 @@ end
 
 --- @param item table
 --- @param index integer
---- @param context blink.cmp.Context
+--- @param context agentic.ui.FilePickerBlinkSource.Context
 --- @param mention_start_col integer
 --- @return lsp.CompletionItem
 local function to_completion_item(item, index, context, mention_start_col)
     local path = item.word:sub(2)
     return {
         label = path,
+        data = {
+            path = path,
+        },
         kind = vim.lsp.protocol.CompletionItemKind.File,
         filterText = path,
         sortText = string.format("%04d", index),
@@ -52,6 +60,8 @@ function Source:get_trigger_characters()
     return { "@" }
 end
 
+--- @param context agentic.ui.FilePickerBlinkSource.Context
+--- @param callback fun(response: table)
 function Source:get_completions(context, callback)
     local picker = FilePicker.get_instance(context.bufnr)
     if not picker then
@@ -59,7 +69,8 @@ function Source:get_completions(context, callback)
         return function() end
     end
 
-    local mention = FilePicker.get_active_mention(context.line, context.cursor[2])
+    local mention =
+        FilePicker.get_active_mention(context.line, context.cursor[2])
     if not mention then
         callback(empty_response())
         return function() end
@@ -88,6 +99,25 @@ function Source:get_completions(context, callback)
     return function()
         cancelled = true
     end
+end
+
+--- @param context agentic.ui.FilePickerBlinkSource.Context
+--- @param item {data?: {path?: string}|nil}
+--- @param callback fun()
+--- @param default_implementation fun()
+function Source:execute(context, item, callback, default_implementation)
+    local picker = FilePicker.get_instance(context.bufnr)
+    if picker then
+        picker:skip_next_auto_show()
+    end
+
+    default_implementation()
+
+    if picker and item.data and item.data.path then
+        picker:handle_file_selected(item.data.path)
+    end
+
+    callback()
 end
 
 return Source

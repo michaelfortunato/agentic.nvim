@@ -1,110 +1,50 @@
+local InteractionModel = require("agentic.session.interaction_model")
+
 local SessionReducer = {}
 
 --- @class agentic.session.State
---- @field session {id?: string|nil, title: string, timestamp: integer}
---- @field transcript {messages: agentic.ui.ChatHistory.Message[]}
+--- @field session {id?: string|nil, title: string, timestamp: integer, current_mode_id?: string|nil, config_options: agentic.acp.ConfigOption[], available_commands: agentic.acp.AvailableCommand[]}
+--- @field interaction {turns: agentic.session.InteractionTurn[]}
 --- @field permissions {queue: table[], current_request?: table|nil}
---- @field tools {by_id: table<string, table>, order: string[]}
 --- @field review {active_tool_call_id?: string|nil}
 
---- @param opts {session_id?: string|nil, title?: string|nil, timestamp?: integer|nil, messages?: agentic.ui.ChatHistory.Message[]|nil}|nil
+--- @param opts {session_id?: string|nil, title?: string|nil, timestamp?: integer|nil, current_mode_id?: string|nil, config_options?: agentic.acp.ConfigOption[]|nil, available_commands?: agentic.acp.AvailableCommand[]|nil, turns?: agentic.session.InteractionTurn[]|nil}|nil
 --- @return agentic.session.State
 function SessionReducer.initial_state(opts)
     opts = opts or {}
 
-    local messages = opts.messages or {}
-    local tools = { by_id = {}, order = {} }
-
-    for _, message in ipairs(messages) do
-        if message.type == "tool_call" and message.tool_call_id then
-            tools.by_id[message.tool_call_id] =
-                vim.tbl_deep_extend("force", {}, message)
-            tools.order[#tools.order + 1] = message.tool_call_id
-        end
-    end
+    local interaction = InteractionModel.from_persisted_session({
+        session_id = opts.session_id,
+        title = opts.title,
+        timestamp = opts.timestamp,
+        current_mode_id = opts.current_mode_id,
+        config_options = opts.config_options or {},
+        available_commands = opts.available_commands or {},
+        turns = opts.turns or {},
+    })
 
     return {
         session = {
             id = opts.session_id,
             title = opts.title or "",
             timestamp = opts.timestamp or os.time(),
+            current_mode_id = opts.current_mode_id,
+            config_options = vim.deepcopy(interaction.config_options or {}),
+            available_commands = vim.deepcopy(
+                interaction.available_commands or {}
+            ),
         },
-        transcript = {
-            messages = messages,
+        interaction = {
+            turns = interaction.turns,
         },
         permissions = {
             queue = {},
             current_request = nil,
         },
-        tools = tools,
         review = {
             active_tool_call_id = nil,
         },
     }
-end
-
-local function append_agent_text(messages, message)
-    local last = messages[#messages]
-    if last and last.type == message.type then
-        last.text = last.text .. message.text
-        return
-    end
-
-    table.insert(messages, message)
-end
-
---- @param existing table|nil
---- @param update table
---- @return table
-local function merge_tool_call(existing, update)
-    local merged = vim.tbl_deep_extend("force", existing or {}, update)
-
-    if
-        existing
-        and existing.body
-        and update.body
-        and not vim.deep_equal(existing.body, update.body)
-    then
-        local body = vim.list_extend({}, existing.body)
-        vim.list_extend(body, { "", "---", "" })
-        vim.list_extend(body, update.body)
-        merged.body = body
-    end
-
-    return merged
-end
-
---- @param state agentic.session.State
---- @param tool_call table
-local function upsert_tool_state(state, tool_call)
-    local tool_call_id = tool_call.tool_call_id
-    if not tool_call_id then
-        return
-    end
-
-    local existing = state.tools.by_id[tool_call_id]
-    state.tools.by_id[tool_call_id] = merge_tool_call(existing, tool_call)
-
-    if not existing then
-        state.tools.order[#state.tools.order + 1] = tool_call_id
-    end
-end
-
---- @param messages agentic.ui.ChatHistory.Message[]
---- @param tool_call agentic.ui.ChatHistory.ToolCall
-local function upsert_tool_call_message(messages, tool_call)
-    for i = #messages, 1, -1 do
-        local message = messages[i]
-        if
-            message.type == "tool_call"
-            and message.tool_call_id == tool_call.tool_call_id
-        then
-            messages[i] = merge_tool_call(message, tool_call)
-            return
-        end
-    end
-
-    table.insert(messages, tool_call)
 end
 
 --- @param queue table[]
@@ -143,9 +83,41 @@ function SessionReducer.reduce(state, event)
         return state
     end
 
-    if event.type == "session/restore_history" then
-        state.transcript.messages = vim.deepcopy(event.messages or {})
+    if event.type == "session/set_current_mode" then
+        state.session.current_mode_id = event.current_mode_id
+        return state
+    end
+
+    if event.type == "session/set_config_options" then
+        state.session.config_options = vim.deepcopy(event.config_options or {})
+        return state
+    end
+
+    if event.type == "session/set_available_commands" then
+        state.session.available_commands =
+            vim.deepcopy(event.available_commands or {})
+        return state
+    end
+
+    if event.type == "session/load_persisted_session" then
+        local interaction = InteractionModel.from_persisted_session({
+            session_id = event.session_id,
+            title = event.title,
+            timestamp = event.timestamp,
+            current_mode_id = event.current_mode_id,
+            config_options = event.config_options or {},
+            available_commands = event.available_commands or {},
+            turns = event.turns or {},
+        })
+        state.interaction.turns = interaction.turns
         state.session.title = event.title or ""
+        state.session.config_options =
+            vim.deepcopy(interaction.config_options or {})
+        state.session.available_commands =
+            vim.deepcopy(interaction.available_commands or {})
+        if not event.preserve_current_mode_id then
+            state.session.current_mode_id = event.current_mode_id
+        end
 
         if not event.preserve_session_id then
             state.session.id = event.session_id
@@ -160,31 +132,54 @@ function SessionReducer.reduce(state, event)
         return state
     end
 
-    if event.type == "transcript/add_message" then
-        table.insert(state.transcript.messages, event.message)
+    if event.type == "interaction/append_request" then
+        InteractionModel.append_request(state.interaction.turns, event.request)
         return state
     end
 
-    if event.type == "transcript/append_agent_text" then
-        append_agent_text(state.transcript.messages, event.message)
+    if event.type == "interaction/append_response" then
+        InteractionModel.append_response_content(
+            state.interaction.turns,
+            event.kind,
+            event.provider_name,
+            event.content
+        )
         return state
     end
 
-    if event.type == "transcript/upsert_tool_call" then
-        upsert_tool_call_message(state.transcript.messages, event.tool_call)
+    if event.type == "interaction/upsert_tool_call" then
+        InteractionModel.upsert_tool_call(
+            state.interaction.turns,
+            event.provider_name,
+            event.tool_call
+        )
         return state
     end
 
-    if event.type == "tools/upsert" then
-        upsert_tool_state(state, event.tool_call)
+    if event.type == "interaction/set_tool_permission_state" then
+        InteractionModel.set_tool_permission_state(
+            state.interaction.turns,
+            event.tool_call_id,
+            event.permission_state
+        )
         return state
     end
 
-    if event.type == "tools/set_permission_state" then
-        local tool = state.tools.by_id[event.tool_call_id]
-        if tool then
-            tool.permission_state = event.permission_state
-        end
+    if event.type == "interaction/upsert_plan" then
+        InteractionModel.upsert_plan(
+            state.interaction.turns,
+            event.provider_name,
+            event.entries
+        )
+        return state
+    end
+
+    if event.type == "interaction/set_turn_result" then
+        InteractionModel.set_turn_result(
+            state.interaction.turns,
+            event.result,
+            event.provider_name
+        )
         return state
     end
 

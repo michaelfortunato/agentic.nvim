@@ -1,68 +1,31 @@
-local ACPPayloads = require("agentic.acp.acp_payloads")
-local ChatHistory = require("agentic.ui.chat_history")
-
---- @param label string
---- @param value string
---- @return string
-local function build_meta_line(label, value)
-    return string.format("%s · %s", label, value)
-end
-
---- @param input_text string
---- @return string|nil
-local function parse_review_prompt(input_text)
-    local review_body = input_text:match("^/review%s*(.*)$")
-    if review_body == nil then
-        return nil
-    end
-
-    return review_body:match("^%s*(.-)%s*$")
-end
-
---- @param input_text string
---- @param timestamp string
---- @return string[]
-local function build_user_message_lines(input_text, timestamp)
-    local review_body = parse_review_prompt(input_text)
-    if review_body ~= nil then
-        local lines = {
-            build_meta_line("Review", timestamp),
-        }
-
-        if review_body ~= "" then
-            lines[#lines + 1] = review_body
-        end
-
-        return lines
-    end
-
-    return {
-        build_meta_line("User", timestamp),
-        input_text,
-    }
-end
+local PersistedSession = require("agentic.session.persisted_session")
 local Chooser = require("agentic.ui.chooser")
 local Logger = require("agentic.utils.logger")
+local SessionSelectors = require("agentic.session.session_selectors")
 local SessionRegistry = require("agentic.session_registry")
 
 --- @class agentic.SessionRestore
 local SessionRestore = {}
 
---- Checks if the current session has messages or we can safely restore into it if it's empty
+--- Checks if the current session already has interaction content.
 --- @param current_session agentic.SessionManager|nil
 --- @return boolean has_conflict
 local function check_conflict(current_session)
+    local state = current_session
+        and current_session.session_state
+        and current_session.session_state:get_state()
+
     return current_session ~= nil
         and current_session.session_id ~= nil
-        and current_session.chat_history ~= nil
-        and #current_session.chat_history.messages > 0
+        and state ~= nil
+        and SessionSelectors.has_interaction_content(state)
 end
 
 --- @param session_id string
 --- @param tab_page_id integer
 --- @param has_conflict boolean
 local function do_restore(session_id, tab_page_id, has_conflict)
-    ChatHistory.load(session_id, function(history, err)
+    PersistedSession.load(session_id, function(history, err)
         if err or not history then
             Logger.notify(
                 "Failed to load session: " .. (err or "unknown error"),
@@ -79,7 +42,7 @@ local function do_restore(session_id, tab_page_id, has_conflict)
                 end
             end
 
-            session:restore_from_history(
+            session:restore_session_data(
                 history,
                 { reuse_session = not has_conflict }
             )
@@ -102,7 +65,7 @@ local function restore_with_conflict_check(
             "Cancel",
             "Clear current session and restore",
         }, {
-            prompt = "Current session has messages. What would you like to do?",
+            prompt = "Current session has content. What would you like to do?",
         }, function(choice)
             if choice == "Clear current session and restore" then
                 do_restore(session_id, tab_page_id, has_conflict)
@@ -117,7 +80,7 @@ end
 --- @param tab_page_id integer
 --- @param current_session agentic.SessionManager|nil
 function SessionRestore.show_picker(tab_page_id, current_session)
-    ChatHistory.list_sessions(function(sessions)
+    PersistedSession.list_sessions(function(sessions)
         if #sessions == 0 then
             Logger.notify("No saved sessions found", vim.log.levels.INFO)
             return
@@ -149,49 +112,6 @@ function SessionRestore.show_picker(tab_page_id, current_session)
             end
         end)
     end)
-end
-
---- Replay stored messages to the UI
---- @param writer agentic.ui.MessageWriter
---- @param messages agentic.ui.ChatHistory.Message[]
-function SessionRestore.replay_messages(writer, messages)
-    for _, msg in ipairs(messages) do
-        if msg.type == "user" then
-            writer:begin_turn()
-            -- Format user message for display with original timestamp
-            local timestamp_str = msg.timestamp
-                    and os.date("%Y-%m-%d %H:%M:%S", msg.timestamp)
-                or os.date("%Y-%m-%d %H:%M:%S")
-            local message_lines = build_user_message_lines(msg.text, timestamp_str)
-            local user_message =
-                ACPPayloads.generate_user_message(message_lines)
-            writer:write_message(user_message)
-        elseif msg.type == "agent" then
-            local agent_message = ACPPayloads.generate_agent_message(msg.text)
-            agent_message.is_agent_reply = true
-            agent_message.provider_name = msg.provider_name or "Unknown provider"
-            writer:write_message(agent_message)
-        elseif msg.type == "thought" then
-            --- @type agentic.acp.AgentThoughtChunk
-            local thought_chunk = {
-                sessionUpdate = "agent_thought_chunk",
-                content = { type = "text", text = msg.text },
-            }
-            writer:write_message_chunk(thought_chunk)
-        elseif msg.type == "tool_call" then
-            --- @type agentic.ui.MessageWriter.ToolCallBlock
-            local tool_block = {
-                tool_call_id = msg.tool_call_id,
-                kind = msg.kind,
-                argument = msg.argument or "",
-                status = msg.status,
-                body = msg.body,
-                diff = msg.diff,
-                file_path = msg.file_path,
-            }
-            writer:write_tool_call_block(tool_block)
-        end
-    end
 end
 
 return SessionRestore

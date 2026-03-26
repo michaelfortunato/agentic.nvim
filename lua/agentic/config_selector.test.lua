@@ -3,7 +3,6 @@ local spy = require("tests.helpers.spy")
 
 local AgentConfigOptions = require("agentic.acp.agent_config_options")
 local Logger = require("agentic.utils.logger")
-local SessionManager = require("agentic.session_manager")
 
 describe("config selector", function()
     --- @type TestStub
@@ -126,79 +125,6 @@ describe("config selector", function()
             )
             assert.same({ "  Approval Preset: Read Only" }, steering_render)
         end)
-    end)
-
-    describe("AgentModels (legacy provider integration)", function()
-        it("marks initial legacy model and updates after success", function()
-            -- Setup minimal session that uses the REAL _handle_model_change logic
-            ---@type any
-            local session = {
-                session_id = "s1",
-                config_options = AgentConfigOptions:new(
-                    {},
-                    function() end,
-                    function() end
-                ),
-                chat_history = { title = "" },
-                widget = {
-                    render_header = function() end,
-                },
-                agent = {
-                    set_model = function(_self, _id, _model, callback)
-                        callback({}, nil) -- Success
-                    end,
-                },
-                ---@diagnostic disable-next-line: invisible
-                _handle_model_change = SessionManager._handle_model_change,
-                _render_window_headers = SessionManager._render_window_headers,
-            }
-
-            session.config_options:set_legacy_models({
-                availableModels = {
-                    { modelId = "m1", name = "M1", description = "D1" },
-                    { modelId = "m2", name = "M2", description = "D2" },
-                },
-                currentModelId = "m2",
-            })
-
-            -- Verify initial state
-            local first_render = {}
-            select_stub:invokes(function(items, opts, on_choice)
-                first_render = format_all(items, opts)
-                on_choice(nil)
-            end)
-            session.config_options:show_model_selector(function() end)
-
-            assert.same({ "● M2: D2", "  M1: D1" }, first_render)
-
-            -- Call the REAL _handle_model_change
-            ---@diagnostic disable-next-line: invisible
-            session:_handle_model_change("m1", true)
-
-            -- Verify the fix: legacy_agent_models state should be updated via SessionManager callback
-            assert.equal(
-                "m1",
-                session.config_options.legacy_agent_models.current_model_id
-            )
-
-            -- Verify UI also reflects it when re-opening
-            local second_render = {}
-            select_stub:invokes(function(items, opts, on_choice)
-                second_render = format_all(items, opts)
-                on_choice(nil)
-            end)
-
-            -- Selection logic triggers model change handler
-            session.config_options:show_model_selector(
-                function(model_id, is_legacy)
-                    ---@diagnostic disable-next-line: invisible
-                    session:_handle_model_change(model_id, is_legacy)
-                end
-            )
-
-            assert.same({ "● M1: D1", "  M2: D2" }, second_render)
-        end)
-
         it(
             "preserves provider config option ordering in the config selector",
             function()

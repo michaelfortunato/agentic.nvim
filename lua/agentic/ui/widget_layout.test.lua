@@ -261,12 +261,7 @@ describe("WidgetLayout", function()
             local win_nrs = { queue = queue_winid }
 
             assert.is_true(
-                WidgetLayout.resize_dynamic_window(
-                    buf_nrs,
-                    win_nrs,
-                    "queue",
-                    8
-                )
+                WidgetLayout.resize_dynamic_window(buf_nrs, win_nrs, "queue", 8)
             )
             local one_line_height = vim.api.nvim_win_get_height(queue_winid)
 
@@ -279,15 +274,12 @@ describe("WidgetLayout", function()
             )
 
             assert.is_true(
-                WidgetLayout.resize_dynamic_window(
-                    buf_nrs,
-                    win_nrs,
-                    "queue",
-                    8
-                )
+                WidgetLayout.resize_dynamic_window(buf_nrs, win_nrs, "queue", 8)
             )
 
-            assert.is_true(vim.api.nvim_win_get_height(queue_winid) > one_line_height)
+            assert.is_true(
+                vim.api.nvim_win_get_height(queue_winid) > one_line_height
+            )
 
             pcall(vim.api.nvim_win_close, queue_winid, true)
             pcall(vim.api.nvim_win_close, chat_winid, true)

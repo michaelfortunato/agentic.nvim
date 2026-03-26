@@ -12,17 +12,39 @@ local DIFF_PREVIEW_KINDS = {
 --- @class agentic.ui.ReviewController
 --- @field session_state agentic.session.SessionState
 --- @field widget agentic.ui.ChatWidget
+--- @field permission_manager agentic.ui.PermissionManager|nil
 --- @field _state_listener_id? integer
 local ReviewController = {}
 ReviewController.__index = ReviewController
 
+--- @param tracker table|nil
+--- @return agentic.ui.MessageWriter.ToolCallDiff|nil
+local function get_review_diff(tracker)
+    if not tracker or not tracker.content_nodes then
+        return nil
+    end
+
+    for _, content_node in ipairs(tracker.content_nodes) do
+        if content_node.type == "diff_output" then
+            return {
+                old = vim.deepcopy(content_node.old_lines or {}),
+                new = vim.deepcopy(content_node.new_lines or {}),
+            }
+        end
+    end
+
+    return nil
+end
+
 --- @param session_state agentic.session.SessionState
 --- @param widget agentic.ui.ChatWidget
+--- @param permission_manager agentic.ui.PermissionManager|nil
 --- @return agentic.ui.ReviewController
-function ReviewController:new(session_state, widget)
+function ReviewController:new(session_state, widget, permission_manager)
     local instance = setmetatable({
         session_state = session_state,
         widget = widget,
+        permission_manager = permission_manager,
         _state_listener_id = nil,
     }, self)
 
@@ -33,12 +55,31 @@ function ReviewController:new(session_state, widget)
     return instance
 end
 
+--- @param options agentic.acp.PermissionOption[]|nil
+--- @param preferred_kinds string[]
+--- @return string|nil
+local function find_permission_option_id(options, preferred_kinds)
+    if not options then
+        return nil
+    end
+
+    for _, kind in ipairs(preferred_kinds) do
+        for _, option in ipairs(options) do
+            if option.kind == kind then
+                return option.optionId
+            end
+        end
+    end
+
+    return nil
+end
+
 --- @param tracker table|nil
 --- @return boolean
 function ReviewController._is_reviewable(tracker)
     return tracker ~= nil
         and DIFF_PREVIEW_KINDS[tracker.kind] == true
-        and tracker.diff ~= nil
+        and get_review_diff(tracker) ~= nil
         and tracker.file_path ~= nil
 end
 
@@ -54,7 +95,7 @@ function ReviewController:_handle_state_event(state, event)
         return
     end
 
-    if event.type == "tools/upsert" then
+    if event.type == "interaction/upsert_tool_call" then
         local active_tool_call_id =
             SessionSelectors.get_active_review_tool_call_id(state)
         if
@@ -89,9 +130,42 @@ function ReviewController:_show_active_review(state)
         return
     end
 
+    local current_permission = SessionSelectors.get_current_permission(state)
+    local review_actions = nil
+    if
+        current_permission
+        and current_permission.toolCallId == tracker.tool_call_id
+        and self.permission_manager
+    then
+        local accept_option_id = find_permission_option_id(
+            current_permission.request and current_permission.request.options or nil,
+            { "allow_once", "allow_always" }
+        )
+        local reject_option_id = find_permission_option_id(
+            current_permission.request and current_permission.request.options or nil,
+            { "reject_once", "reject_always" }
+        )
+
+        if accept_option_id and reject_option_id then
+            review_actions = {
+                on_accept = function()
+                    self.permission_manager:complete_current_request(
+                        accept_option_id
+                    )
+                end,
+                on_reject = function()
+                    self.permission_manager:complete_current_request(
+                        reject_option_id
+                    )
+                end,
+            }
+        end
+    end
+
     DiffPreview.show_diff({
         file_path = tracker.file_path,
-        diff = tracker.diff,
+        diff = get_review_diff(tracker),
+        review_actions = review_actions,
         get_winid = function(bufnr)
             local winid = self.widget:find_first_non_widget_window()
             if not winid then
@@ -110,6 +184,26 @@ function ReviewController:_show_active_review(state)
             return winid
         end,
     })
+end
+
+--- @param current_request agentic.ui.PermissionManager.PermissionRequest
+--- @return boolean
+function ReviewController:activate_diff_review(current_request)
+    local state = self.session_state:get_state()
+    local tracker = SessionSelectors.get_tool_call(state, current_request.toolCallId)
+    if not self._is_reviewable(tracker) then
+        return false
+    end
+
+    if
+        not Config.diff_preview.enabled
+        or vim.api.nvim_get_current_tabpage() ~= self.widget.tab_page_id
+    then
+        return false
+    end
+
+    self:_show_active_review(state)
+    return true
 end
 
 --- @param state agentic.session.State

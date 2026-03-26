@@ -33,5 +33,5 @@ to trigger buffer reloads when file-related tool calls complete.
   - `lua/agentic/session_manager.lua` — add checktime call
     on completed file-related tool calls
   - `lua/agentic/utils/file_system.lua` — `read_file` and
-    `write_file` kept (used by `chat_history.lua`); only
+    `write_file` kept (used by `persisted_session.lua`); only
     `acp_client.lua` call sites removed

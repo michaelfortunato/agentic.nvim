@@ -2,6 +2,7 @@
 local assert = require("tests.helpers.assert")
 local spy = require("tests.helpers.spy")
 local Config = require("agentic.config")
+local Theme = require("agentic.theme")
 
 describe("agentic.ui.MessageWriter", function()
     --- @type agentic.ui.MessageWriter
@@ -111,36 +112,280 @@ describe("agentic.ui.MessageWriter", function()
         vim.api.nvim_win_set_cursor(winid, { cursor_line, 0 })
     end
 
-    --- @param text string
-    --- @return agentic.acp.SessionUpdateMessage
-    local function make_message_update(text)
+    --- @param turns agentic.session.InteractionTurn[]
+    --- @param opts? table
+    --- @return agentic.session.InteractionSession
+    local function make_interaction_session(turns, opts)
+        opts = opts or {}
         return {
-            sessionUpdate = "agent_message_chunk",
-            content = { type = "text", text = text },
+            session_id = opts.session_id or "session-1",
+            title = opts.title or "Test Session",
+            timestamp = opts.timestamp or os.time(),
+            current_mode_id = opts.current_mode_id,
+            config_options = opts.config_options or {},
+            available_commands = opts.available_commands or {},
+            turns = turns or {},
+        }
+    end
+
+    --- @param opts? table
+    --- @return agentic.session.InteractionTurn
+    local function make_turn(opts)
+        opts = opts or {}
+        local request_text = opts.request_text or ""
+        local request_content = opts.request_content
+        if not request_content then
+            request_content = request_text ~= ""
+                    and { { type = "text", text = request_text } }
+                or {}
+        end
+
+        --- @param text string
+        --- @return agentic.session.InteractionTextContentNode
+        local function make_text_content_node(text)
+            local trimmed = vim.trim(text)
+            local lines = vim.split(trimmed, "\n", { plain = true })
+            local open_tag = #lines >= 2
+                    and vim.trim(lines[1]):match("^<([%a_][%w_%-]*)>$")
+                or nil
+            local close_tag = #lines >= 2
+                    and vim.trim(lines[#lines]):match("^</([%a_][%w_%-]*)>$")
+                or nil
+            local xml_root_tag = open_tag == close_tag and open_tag or nil
+
+            return {
+                type = "text_content",
+                text = text,
+                text_structure = xml_root_tag and "xml_wrapped" or "plain",
+                xml_root_tag = xml_root_tag,
+                content = { type = "text", text = text },
+            }
+        end
+
+        local request_content_nodes = vim.tbl_map(function(content)
+            if content.type == "text" then
+                local node = make_text_content_node(content.text or "")
+                node.content = vim.deepcopy(content)
+                return node
+            end
+
+            if content.type == "resource_link" then
+                return {
+                    type = "resource_link_content",
+                    uri = content.uri,
+                    name = content.name,
+                    title = content.title,
+                    description = content.description,
+                    mime_type = content.mimeType,
+                    size = content.size,
+                    content = vim.deepcopy(content),
+                }
+            end
+
+            if content.type == "resource" and content.resource then
+                return {
+                    type = "resource_content",
+                    uri = content.resource.uri,
+                    mime_type = content.resource.mimeType,
+                    text = content.resource.text,
+                    blob = content.resource.blob,
+                    content = vim.deepcopy(content),
+                }
+            end
+
+            if content.type == "image" then
+                return {
+                    type = "image_content",
+                    mime_type = content.mimeType,
+                    uri = content.uri,
+                    content = vim.deepcopy(content),
+                }
+            end
+
+            if content.type == "audio" then
+                return {
+                    type = "audio_content",
+                    mime_type = content.mimeType,
+                    content = vim.deepcopy(content),
+                }
+            end
+
+            return {
+                type = "unknown_content",
+                content = vim.deepcopy(content),
+            }
+        end, request_content)
+
+        local request_nodes = {}
+        local rendered_primary_text = false
+        for index, content_node in ipairs(request_content_nodes) do
+            if
+                not rendered_primary_text
+                and request_text ~= ""
+                and content_node.type == "text_content"
+                and content_node.text == request_text
+            then
+                request_nodes[#request_nodes + 1] = {
+                    type = "request_text",
+                    text = content_node.text,
+                    content_index = index,
+                    content_node = vim.deepcopy(content_node),
+                }
+                rendered_primary_text = true
+            else
+                request_nodes[#request_nodes + 1] = {
+                    type = "request_content",
+                    content_index = index,
+                    content_node = vim.deepcopy(content_node),
+                }
+            end
+        end
+
+        if #request_nodes == 0 and request_text ~= "" then
+            request_nodes[#request_nodes + 1] = {
+                type = "request_text",
+                text = request_text,
+                content_index = 1,
+                content_node = {
+                    type = "text_content",
+                    text = request_text,
+                    text_structure = "plain",
+                    content = { type = "text", text = request_text },
+                },
+            }
+        end
+
+        return {
+            index = opts.index or 1,
+            request = {
+                kind = opts.request_kind or "user",
+                text = request_text,
+                timestamp = opts.request_timestamp,
+                content = request_content,
+                content_nodes = request_content_nodes,
+                nodes = request_nodes,
+            },
+            response = {
+                provider_name = opts.provider_name or "Codex ACP",
+                nodes = opts.nodes or {},
+            },
+            result = opts.result,
         }
     end
 
     --- @param text string
-    --- @return agentic.acp.SessionUpdateMessage
-    local function make_thought_update(text)
+    --- @param provider_name? string
+    --- @return agentic.session.InteractionMessageNode
+    local function make_message_node(text, provider_name)
         return {
-            sessionUpdate = "agent_thought_chunk",
-            content = { type = "text", text = text },
+            type = "message",
+            text = text,
+            provider_name = provider_name or "Codex ACP",
+            content = { { type = "text", text = text } },
+            content_nodes = {
+                make_turn({
+                    request_text = text,
+                }).request.content_nodes[1],
+            },
         }
     end
 
-    --- @param id string
-    --- @param status agentic.acp.ToolCallStatus
-    --- @param body? string[]
-    --- @return agentic.ui.MessageWriter.ToolCallBlock
-    local function make_tool_call_block(id, status, body)
+    --- @param chunks string[]
+    --- @param provider_name? string
+    --- @return agentic.session.InteractionMessageNode
+    local function make_chunked_message_node(chunks, provider_name)
+        local content = vim.tbl_map(function(chunk)
+            return {
+                type = "text",
+                text = chunk,
+            }
+        end, chunks)
+
+        local content_nodes = vim.tbl_map(function(chunk)
+            return make_turn({
+                request_text = chunk,
+            }).request.content_nodes[1]
+        end, chunks)
+
         return {
-            tool_call_id = id,
-            status = status,
-            kind = "execute",
-            argument = "ls",
-            body = body or { "output" },
+            type = "message",
+            text = table.concat(chunks, ""),
+            provider_name = provider_name or "Codex ACP",
+            content = content,
+            content_nodes = content_nodes,
         }
+    end
+
+    --- @param text string
+    --- @param provider_name? string
+    --- @return agentic.session.InteractionThoughtNode
+    local function make_thought_node(text, provider_name)
+        return {
+            type = "thought",
+            text = text,
+            provider_name = provider_name or "Codex ACP",
+            content = { { type = "text", text = text } },
+            content_nodes = {
+                make_turn({
+                    request_text = text,
+                }).request.content_nodes[1],
+            },
+        }
+    end
+
+    --- @param opts table
+    --- @return agentic.session.InteractionToolCallNode
+    local function make_tool_node(opts)
+        opts = opts or {}
+        local body_lines = opts.body_lines or {}
+        local body_text = opts.body_text
+        if body_text == nil and #body_lines > 0 then
+            body_text = table.concat(body_lines, "\n")
+        end
+
+        local content_nodes = opts.content_nodes
+        if not content_nodes and body_text and body_text ~= "" then
+            content_nodes = {
+                {
+                    type = "content_output",
+                    content_node = make_turn({
+                        request_text = body_text,
+                    }).request.content_nodes[1],
+                },
+            }
+        end
+
+        return {
+            type = "tool_call",
+            tool_call_id = opts.tool_call_id or "tool-1",
+            title = opts.title or opts.argument or "tool",
+            kind = opts.kind or "execute",
+            status = opts.status or "completed",
+            file_path = opts.file_path,
+            permission_state = opts.permission_state,
+            terminal_id = opts.terminal_id,
+            content_nodes = content_nodes or {},
+        }
+    end
+
+    --- @param turns agentic.session.InteractionTurn[]
+    --- @param opts? table
+    local function render_session(turns, opts)
+        local render_opts = opts
+                and opts.welcome_lines
+                and { welcome_lines = opts.welcome_lines }
+            or nil
+        writer:render_interaction_session(
+            make_interaction_session(turns, opts),
+            render_opts
+        )
+    end
+
+    --- @param lines string[]
+    --- @param target string
+    --- @return integer
+    local function find_line_index(lines, target)
+        return vim.fn.index(lines, target)
     end
 
     describe("_check_auto_scroll", function()
@@ -280,9 +525,9 @@ describe("agentic.ui.MessageWriter", function()
         )
     end)
 
-    describe("auto-scroll with public write methods", function()
+    describe("interaction tree rendering", function()
         it(
-            "write_message schedules scrolling when follow mode is enabled",
+            "schedules scrolling when follow mode is enabled during tree render",
             function()
                 writer._should_auto_scroll_fn = function()
                     return true
@@ -293,9 +538,13 @@ describe("agentic.ui.MessageWriter", function()
                     long_text[i] = "message line " .. i
                 end
 
-                writer:write_message(
-                    make_message_update(table.concat(long_text, "\n"))
-                )
+                render_session({
+                    make_turn({
+                        nodes = {
+                            make_message_node(table.concat(long_text, "\n")),
+                        },
+                    }),
+                })
 
                 assert.is_true(writer._scroll_scheduled)
                 assert.equal(1, #fake_timer.start_calls)
@@ -303,179 +552,578 @@ describe("agentic.ui.MessageWriter", function()
         )
 
         it(
-            "write_tool_call_block schedules scrolling when follow mode is enabled",
-            function()
-                writer._should_auto_scroll_fn = function()
-                    return true
-                end
-
-                local body = {}
-                for i = 1, 20 do
-                    body[i] = "file" .. i .. ".lua"
-                end
-
-                --- @type agentic.ui.MessageWriter.ToolCallBlock
-                local block = {
-                    tool_call_id = "test-1",
-                    status = "pending",
-                    kind = "execute",
-                    argument = "ls -la",
-                    body = body,
-                }
-                writer:write_tool_call_block(block)
-
-                assert.is_true(writer._scroll_scheduled)
-                assert.equal(1, #fake_timer.start_calls)
-                assert.is_true(vim.api.nvim_buf_line_count(bufnr) > 0)
-                assert.is_true(vim.tbl_contains(
-                    vim.api.nvim_buf_get_lines(bufnr, 0, -1, false),
-                    "▸ Run ls -la"
-                ))
-            end
-        )
-
-        it(
-            "write_message does not schedule scrolling when follow mode is disabled",
+            "does not schedule scrolling when follow mode is disabled",
             function()
                 writer._should_auto_scroll_fn = function()
                     return false
                 end
 
-                writer:write_message(
-                    make_message_update("new content\nmore content")
-                )
+                render_session({
+                    make_turn({
+                        nodes = {
+                            make_message_node("new content\nmore content"),
+                        },
+                    }),
+                })
 
                 assert.is_false(writer._scroll_scheduled)
                 assert.equal(0, #fake_timer.start_calls)
             end
         )
-    end)
-
-    describe("thought chunk rendering", function()
-        it("renders thought chunks as their own separated block", function()
-            writer:write_message_chunk(make_message_update("Working on it."))
-            writer:write_message_chunk(make_thought_update("Checking the file"))
-            writer:write_message_chunk(make_message_update("Done."))
-
-            local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-
-            assert.same({
-                "Working on it.",
-                "",
-                "Checking the file",
-                "",
-                "Done.",
-            }, lines)
-        end)
 
         it(
-            "continues consecutive thought chunks inside the same block",
+            "renders response nodes under the agent header without a blank gap",
             function()
-                writer:write_message_chunk(make_thought_update("First thought"))
-                writer:write_message_chunk(make_thought_update("\nSecond line"))
+                render_session({
+                    make_turn({
+                        request_text = "hi",
+                        request_timestamp = os.time({
+                            year = 2026,
+                            month = 3,
+                            day = 25,
+                            hour = 23,
+                            min = 41,
+                            sec = 39,
+                        }),
+                        nodes = {
+                            make_message_node("hi"),
+                        },
+                    }),
+                })
+
+                local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+                assert.same({
+                    "User · 2026-03-25 23:41:39",
+                    "  hi",
+                    "",
+                    "Agent · Codex ACP",
+                    "  hi",
+                }, lines)
+            end
+        )
+
+        it(
+            "coalesces adjacent agent text chunks before rendering lines",
+            function()
+                render_session({
+                    make_turn({
+                        request_text = "hi",
+                        request_timestamp = os.time({
+                            year = 2026,
+                            month = 3,
+                            day = 25,
+                            hour = 23,
+                            min = 41,
+                            sec = 39,
+                        }),
+                        nodes = {
+                            make_chunked_message_node({
+                                "This",
+                                " is",
+                                " strong.",
+                                "\nThe",
+                                " main",
+                                " point is clarity.",
+                            }),
+                        },
+                    }),
+                })
+
+                local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+                assert.same({
+                    "User · 2026-03-25 23:41:39",
+                    "  hi",
+                    "",
+                    "Agent · Codex ACP",
+                    "  This is strong.",
+                    "  The main point is clarity.",
+                }, lines)
+            end
+        )
+
+        it(
+            "applies transcript meta highlights to both user and agent headers",
+            function()
+                render_session({
+                    make_turn({
+                        request_text = "hi",
+                        request_timestamp = os.time({
+                            year = 2026,
+                            month = 3,
+                            day = 25,
+                            hour = 23,
+                            min = 41,
+                            sec = 39,
+                        }),
+                        nodes = {
+                            make_message_node("hi"),
+                        },
+                    }),
+                })
+
+                local ns = vim.api.nvim_get_namespaces().agentic_transcript_meta
+                local extmarks = vim.api.nvim_buf_get_extmarks(
+                    bufnr,
+                    ns,
+                    0,
+                    -1,
+                    { details = true }
+                )
+
+                assert.is_true(vim.iter(extmarks):any(function(mark)
+                    return mark[2] == 0
+                        and mark[4]
+                        and mark[4].hl_group == Theme.HL_GROUPS.TRANSCRIPT_REQUEST_META
+                        and mark[4].end_col == #"User · "
+                end))
+
+                assert.is_true(vim.iter(extmarks):any(function(mark)
+                    return mark[2] == 3
+                        and mark[4]
+                        and mark[4].hl_group == Theme.HL_GROUPS.TRANSCRIPT_RESPONSE_META
+                        and mark[4].end_col == #"Agent · "
+                end))
+            end
+        )
+
+        it(
+            "renders thought nodes as separate children of the same response",
+            function()
+                render_session({
+                    make_turn({
+                        request_timestamp = os.time({
+                            year = 2026,
+                            month = 3,
+                            day = 26,
+                            hour = 10,
+                            min = 58,
+                            sec = 30,
+                        }),
+                        nodes = {
+                            make_message_node("Working on it."),
+                            make_thought_node("Checking the file"),
+                            make_message_node("Done."),
+                        },
+                    }),
+                })
 
                 local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 
                 assert.same({
-                    "First thought",
-                    "Second line",
+                    "User · 2026-03-26 10:58:30",
+                    "",
+                    "Agent · Codex ACP",
+                    "  Working on it.",
+                    "",
+                    "  Checking the file",
+                    "",
+                    "  Done.",
                 }, lines)
             end
         )
-    end)
 
-    describe("agent reply formatting", function()
-        it("inserts the agent header on the first reply chunk without an extra blank line", function()
-            writer:begin_turn()
-            writer:write_message({
-                sessionUpdate = "user_message_chunk",
-                content = {
-                    type = "text",
-                    text = "User · 2026-03-25 23:41:39\nhi",
-                },
-            })
-
-            writer:write_message_chunk({
-                sessionUpdate = "agent_message_chunk",
-                content = { type = "text", text = "hi" },
-                is_agent_reply = true,
-                provider_name = "Codex ACP",
+        it("renders tool cards as children of the agent response", function()
+            render_session({
+                make_turn({
+                    nodes = {
+                        make_message_node("I am checking the queue."),
+                        make_tool_node({
+                            tool_call_id = "agent-child-tool",
+                            kind = "read",
+                            title = "Read lua/agentic/session/persisted_session.lua",
+                            file_path = "lua/agentic/session/persisted_session.lua",
+                            body_lines = {
+                                'local Config = require("agentic.config")',
+                                'local Logger = require("agentic.utils.logger")',
+                            },
+                        }),
+                    },
+                }),
             })
 
             local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 
-            assert.same({
-                "User · 2026-03-25 23:41:39",
-                "hi",
-                "",
-                "Agent · Codex ACP",
-                "hi",
-            }, lines)
-        end)
-
-        it("applies transcript meta highlights to both user and agent headers", function()
-            writer:begin_turn()
-            writer:write_message({
-                sessionUpdate = "user_message_chunk",
-                content = {
-                    type = "text",
-                    text = "User · 2026-03-25 23:41:39\nhi",
-                },
-            })
-
-            writer:write_message_chunk({
-                sessionUpdate = "agent_message_chunk",
-                content = { type = "text", text = "hi" },
-                is_agent_reply = true,
-                provider_name = "Codex ACP",
-            })
-
-            local ns = vim.api.nvim_get_namespaces().agentic_transcript_meta
-            local extmarks = vim.api.nvim_buf_get_extmarks(
-                bufnr,
-                ns,
-                0,
-                -1,
-                { details = true }
+            assert.is_true(vim.tbl_contains(lines, "Agent · Codex ACP"))
+            assert.is_true(
+                vim.tbl_contains(lines, "  I am checking the queue.")
             )
-
-            assert.is_true(vim.iter(extmarks):any(function(mark)
-                return mark[2] == 0
-                    and mark[4]
-                    and mark[4].hl_group == "Comment"
-                    and mark[4].end_col == #"User · "
-            end))
-
-            assert.is_true(vim.iter(extmarks):any(function(mark)
-                return mark[2] == 3
-                    and mark[4]
-                    and mark[4].hl_group == "Comment"
-                    and mark[4].end_col == #"Agent · "
-            end))
+            assert.is_true(
+                vim.tbl_contains(
+                    lines,
+                    "  ▸ Read lua/agentic/session/persisted_session.lua"
+                )
+            )
+            assert.is_true(
+                vim.tbl_contains(lines, "    2 lines loaded into context")
+            )
         end)
 
-        it("reuses the same agent reply block for subsequent chunks", function()
-            writer:begin_turn()
-            writer:write_message_chunk({
-                sessionUpdate = "agent_message_chunk",
-                content = { type = "text", text = "Hel" },
-                is_agent_reply = true,
-                provider_name = "Codex ACP",
-            })
-            writer:write_message_chunk({
-                sessionUpdate = "agent_message_chunk",
-                content = { type = "text", text = "lo" },
-                is_agent_reply = true,
-                provider_name = "Codex ACP",
+        it(
+            "renders request content semantically from ACP content blocks",
+            function()
+                render_session({
+                    make_turn({
+                        request_text = "Explain this file.",
+                        request_timestamp = os.time({
+                            year = 2026,
+                            month = 3,
+                            day = 26,
+                            hour = 11,
+                            min = 14,
+                            sec = 0,
+                        }),
+                        request_content = {
+                            { type = "text", text = "Explain this file." },
+                            {
+                                type = "resource_link",
+                                uri = "file:///tmp/persisted_session.lua",
+                                name = "persisted_session.lua",
+                            },
+                        },
+                        nodes = {
+                            make_message_node("I am reading it now."),
+                        },
+                    }),
+                })
+
+                local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+
+                assert.is_true(vim.tbl_contains(lines, "  Explain this file."))
+                assert.is_true(vim.tbl_contains(lines, "  ▸ resource_link"))
+                assert.is_true(
+                    vim.tbl_contains(lines, "    persisted_session.lua")
+                )
+                assert.is_false(
+                    vim.tbl_contains(
+                        lines,
+                        "    uri: file:///tmp/persisted_session.lua"
+                    )
+                )
+
+                local line_index = find_line_index(lines, "  ▸ resource_link")
+                assert.is_true(line_index >= 0)
+                assert.is_true(writer:toggle_tool_block_at_line(line_index))
+
+                local expanded_lines =
+                    vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+                assert.is_true(
+                    vim.tbl_contains(
+                        expanded_lines,
+                        "    uri: file:///tmp/persisted_session.lua"
+                    )
+                )
+                assert.is_true(
+                    vim.tbl_contains(
+                        expanded_lines,
+                        "    name: persisted_session.lua"
+                    )
+                )
+            end
+        )
+
+        it(
+            "collapses auxiliary plain text request blocks by ACP type",
+            function()
+                render_session({
+                    make_turn({
+                        request_text = "Review this change.",
+                        request_timestamp = os.time({
+                            year = 2026,
+                            month = 3,
+                            day = 26,
+                            hour = 11,
+                            min = 14,
+                            sec = 0,
+                        }),
+                        request_content = {
+                            { type = "text", text = "Review this change." },
+                            {
+                                type = "text",
+                                text = table.concat({
+                                    "Follow repo conventions.",
+                                    "Keep diffs small.",
+                                }, "\n"),
+                            },
+                        },
+                    }),
+                })
+
+                local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+
+                assert.is_true(vim.tbl_contains(lines, "  Review this change."))
+                assert.is_true(vim.tbl_contains(lines, "  ▸ text"))
+                assert.is_true(
+                    vim.tbl_contains(
+                        lines,
+                        "    Follow repo conventions. Keep diffs small. · 2 lines"
+                    )
+                )
+                assert.is_false(
+                    vim.tbl_contains(lines, "    Follow repo conventions.")
+                )
+
+                local line_index = find_line_index(lines, "  ▸ text")
+                assert.is_true(line_index >= 0)
+                assert.is_true(writer:toggle_tool_block_at_line(line_index))
+
+                local expanded_lines =
+                    vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+                assert.is_true(
+                    vim.tbl_contains(
+                        expanded_lines,
+                        "    Follow repo conventions."
+                    )
+                )
+                assert.is_true(
+                    vim.tbl_contains(expanded_lines, "    Keep diffs small.")
+                )
+            end
+        )
+
+        it("marks XML-like request text as structured text", function()
+            render_session({
+                make_turn({
+                    request_text = "Explain this selection.",
+                    request_timestamp = os.time({
+                        year = 2026,
+                        month = 3,
+                        day = 26,
+                        hour = 11,
+                        min = 14,
+                        sec = 0,
+                    }),
+                    request_content = {
+                        { type = "text", text = "Explain this selection." },
+                        {
+                            type = "text",
+                            text = table.concat({
+                                "<selected_code>",
+                                "<path>/tmp/test.lua</path>",
+                                "<snippet>",
+                                "print('hi')",
+                                "</snippet>",
+                                "</selected_code>",
+                            }, "\n"),
+                        },
+                    },
+                }),
             })
 
             local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 
-            assert.same({
-                "Agent · Codex ACP",
-                "Hello",
-            }, lines)
+            assert.is_true(vim.tbl_contains(lines, "  ▸ text"))
+            assert.is_true(
+                vim.tbl_contains(
+                    lines,
+                    "    structured text · selected_code · 6 lines"
+                )
+            )
+            assert.is_false(vim.tbl_contains(lines, "    <selected_code>"))
+
+            local line_index = find_line_index(lines, "  ▸ text")
+            assert.is_true(line_index >= 0)
+            assert.is_true(writer:toggle_tool_block_at_line(line_index))
+
+            local expanded_lines =
+                vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+            assert.is_true(
+                vim.tbl_contains(expanded_lines, "    <selected_code>")
+            )
         end)
+
+        it("renders environment info as attached embedded context", function()
+            render_session({
+                make_turn({
+                    request_text = "What should I know before editing?",
+                    request_timestamp = os.time({
+                        year = 2026,
+                        month = 3,
+                        day = 26,
+                        hour = 11,
+                        min = 14,
+                        sec = 0,
+                    }),
+                    request_content = {
+                        {
+                            type = "text",
+                            text = "What should I know before editing?",
+                        },
+                        {
+                            type = "resource",
+                            resource = {
+                                uri = "agentic://environment_info",
+                                text = table.concat({
+                                    "- Platform: test-os",
+                                    "- Project root: /tmp/project",
+                                }, "\n"),
+                                mimeType = "text/plain",
+                            },
+                        },
+                    },
+                    nodes = {
+                        make_message_node("I will use the attached context."),
+                    },
+                }),
+            })
+
+            local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+
+            assert.is_true(vim.tbl_contains(lines, "  ▸ resource"))
+            assert.is_true(
+                vim.tbl_contains(
+                    lines,
+                    "    environment_info · 2 lines · text/plain"
+                )
+            )
+            assert.is_false(vim.tbl_contains(lines, "  - Platform: test-os"))
+
+            local line_index = find_line_index(lines, "  ▸ resource")
+            assert.is_true(line_index >= 0)
+            assert.is_true(writer:toggle_tool_block_at_line(line_index))
+
+            local expanded_lines =
+                vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+            assert.is_true(
+                vim.tbl_contains(
+                    expanded_lines,
+                    "    uri: agentic://environment_info"
+                )
+            )
+            assert.is_true(
+                vim.tbl_contains(expanded_lines, "      - Platform: test-os")
+            )
+        end)
+
+        it(
+            "renders tool content semantically from ACP content blocks",
+            function()
+                render_session({
+                    make_turn({
+                        nodes = {
+                            make_tool_node({
+                                tool_call_id = "resource-link-tool",
+                                kind = "search",
+                                title = "Search chat history",
+                                status = "completed",
+                                content_nodes = {
+                                    {
+                                        type = "content_output",
+                                        content_node = {
+                                            type = "resource_link_content",
+                                            uri = "file:///tmp/persisted_session.lua",
+                                            name = "persisted_session.lua",
+                                            content = {
+                                                type = "resource_link",
+                                                uri = "file:///tmp/persisted_session.lua",
+                                                name = "persisted_session.lua",
+                                            },
+                                        },
+                                    },
+                                },
+                            }),
+                        },
+                    }),
+                })
+
+                local collapsed_lines =
+                    vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+                assert.is_true(
+                    vim.tbl_contains(collapsed_lines, "    1 linked resource")
+                )
+
+                local tracker = writer.tool_call_blocks["resource-link-tool"]
+                local tool_ns =
+                    vim.api.nvim_get_namespaces().agentic_tool_blocks
+                local pos = vim.api.nvim_buf_get_extmark_by_id(
+                    bufnr,
+                    tool_ns,
+                    tracker.extmark_id,
+                    { details = true }
+                )
+
+                assert.is_true(writer:toggle_tool_block_at_line(pos[1]))
+
+                local expanded_lines =
+                    vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+                assert.is_true(
+                    vim.tbl_contains(
+                        expanded_lines,
+                        "    @persisted_session.lua"
+                    )
+                )
+            end
+        )
+
+        it(
+            "coalesces adjacent text chunks inside tool content output",
+            function()
+                render_session({
+                    make_turn({
+                        nodes = {
+                            make_tool_node({
+                                tool_call_id = "chunked-tool-output",
+                                kind = "search",
+                                title = "Search log",
+                                status = "completed",
+                                content_nodes = {
+                                    {
+                                        type = "content_output",
+                                        content_node = {
+                                            type = "text_content",
+                                            text = "match",
+                                            content = {
+                                                type = "text",
+                                                text = "match",
+                                            },
+                                        },
+                                    },
+                                    {
+                                        type = "content_output",
+                                        content_node = {
+                                            type = "text_content",
+                                            text = " found\nsecond result",
+                                            content = {
+                                                type = "text",
+                                                text = " found\nsecond result",
+                                            },
+                                        },
+                                    },
+                                },
+                            }),
+                        },
+                    }),
+                })
+
+                local collapsed_lines =
+                    vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+                assert.is_true(
+                    vim.tbl_contains(collapsed_lines, "    2 result lines")
+                )
+                assert.is_false(vim.tbl_contains(collapsed_lines, "    match"))
+
+                local tracker = writer.tool_call_blocks["chunked-tool-output"]
+                local tool_ns =
+                    vim.api.nvim_get_namespaces().agentic_tool_blocks
+                local pos = vim.api.nvim_buf_get_extmark_by_id(
+                    bufnr,
+                    tool_ns,
+                    tracker.extmark_id,
+                    { details = true }
+                )
+
+                assert.is_true(writer:toggle_tool_block_at_line(pos[1]))
+
+                local expanded_lines =
+                    vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+                assert.is_true(
+                    vim.tbl_contains(expanded_lines, "    match found")
+                )
+                assert.is_true(
+                    vim.tbl_contains(expanded_lines, "    second result")
+                )
+                assert.is_false(vim.tbl_contains(expanded_lines, "    match"))
+            end
+        )
     end)
 
     describe("destroy", function()
@@ -501,40 +1149,32 @@ describe("agentic.ui.MessageWriter", function()
         end)
 
         it(
-            "fires listeners for each write method that produces content",
+            "fires listeners when interaction-tree content is rendered",
             function()
-                local block = make_tool_call_block("cb-setup", "pending")
-                writer:write_tool_call_block(block)
-
                 local callback_spy = spy.new(function() end)
                 writer:add_content_changed_listener(
                     callback_spy --[[@as function]]
                 )
 
-                writer:write_message(make_message_update("hello"))
-                writer:write_message_chunk(make_message_update("chunk"))
-                writer:write_tool_call_block(
-                    make_tool_call_block("cb-1", "pending")
-                )
-                writer:update_tool_call_block({
-                    tool_call_id = "cb-setup",
-                    status = "completed",
-                    body = { "done" },
+                render_session({
+                    make_turn({
+                        nodes = {
+                            make_message_node("hello"),
+                            make_tool_node({
+                                tool_call_id = "cb-1",
+                                kind = "execute",
+                                title = "rg -n queue lua/agentic",
+                                body_lines = {
+                                    "lua/agentic/ui/queue_list.lua:45",
+                                },
+                            }),
+                        },
+                    }),
                 })
 
-                assert.spy(callback_spy).was.called(4)
+                assert.spy(callback_spy).was.called(1)
             end
         )
-
-        it("does not fire listeners when content is empty", function()
-            local callback_spy = spy.new(function() end)
-            writer:add_content_changed_listener(callback_spy --[[@as function]])
-
-            writer:write_message(make_message_update(""))
-            writer:write_message_chunk(make_message_update(""))
-
-            assert.spy(callback_spy).was.called(0)
-        end)
 
         it("removes only the targeted additional listener", function()
             local first_spy = spy.new(function() end)
@@ -597,14 +1237,14 @@ describe("agentic.ui.MessageWriter", function()
 
             local found_inserted = false
             for _, line in ipairs(lines) do
-                if line == "    + inserted" then
+                if line == "      + inserted" then
                     found_inserted = true
                     break
                 end
             end
             assert.is_true(found_inserted)
             assert.is_true(
-                vim.tbl_contains(lines, "  @@ insert near line 2 @@")
+                vim.tbl_contains(lines, "    @@ insert near line 2 @@")
             )
 
             local new_ranges = vim.tbl_filter(function(r)
@@ -612,21 +1252,22 @@ describe("agentic.ui.MessageWriter", function()
             end, highlight_ranges)
             assert.is_true(#new_ranges > 0)
             assert.equal("inserted", new_ranges[1].new_line)
-            assert.equal(6, new_ranges[1].display_prefix_len)
+            assert.equal(8, new_ranges[1].display_prefix_len)
         end)
 
-        it("renders read cards as compact context summaries", function()
+        it("renders read cards as folded context summaries", function()
             --- @type agentic.ui.MessageWriter.ToolCallBlock
             local block = {
                 tool_call_id = "read-summary",
                 status = "completed",
                 kind = "read",
-                argument = "Read lua/agentic/ui/chat_history.lua",
-                file_path = "lua/agentic/ui/chat_history.lua",
+                collapsed = true,
+                argument = "Read lua/agentic/session/persisted_session.lua",
+                file_path = "lua/agentic/session/persisted_session.lua",
                 body = {
-                    "local Config = require(\"agentic.config\")",
-                    "local Logger = require(\"agentic.utils.logger\")",
-                    "local FileSystem = require(\"agentic.utils.file_system\")",
+                    'local Config = require("agentic.config")',
+                    'local Logger = require("agentic.utils.logger")',
+                    'local FileSystem = require("agentic.utils.file_system")',
                 },
             }
 
@@ -635,16 +1276,25 @@ describe("agentic.ui.MessageWriter", function()
             assert.is_true(
                 vim.tbl_contains(
                     lines,
-                    "Read lua/agentic/ui/chat_history.lua"
+                    "  ▸ Read lua/agentic/session/persisted_session.lua"
                 )
             )
             assert.is_true(
-                vim.tbl_contains(lines, "  3 lines loaded into context")
+                vim.tbl_contains(lines, "    3 lines loaded into context")
             )
-            assert.is_false(vim.tbl_contains(lines, block.body[1]))
+            assert.is_true(
+                vim.tbl_contains(lines, "    Details hidden · <CR> expand")
+            )
+            assert.is_false(
+                vim.tbl_contains(
+                    lines,
+                    '    local Config = require("agentic.config")'
+                )
+            )
+            assert.is_false(vim.tbl_contains(lines, block.body[3]))
         end)
 
-        it("renders execute cards as summary-first previews", function()
+        it("renders execute cards as folded summary-first cards", function()
             --- @type agentic.ui.MessageWriter.ToolCallBlock
             local block = {
                 tool_call_id = "execute-summary",
@@ -662,17 +1312,17 @@ describe("agentic.ui.MessageWriter", function()
             local lines = writer:_prepare_block_lines(block)
 
             assert.is_true(
-                vim.tbl_contains(lines, "▸ Run rg -n queue lua/agentic")
+                vim.tbl_contains(lines, "  ▸ Run rg -n queue lua/agentic")
             )
-            assert.is_true(vim.tbl_contains(lines, "  3 output lines"))
+            assert.is_true(vim.tbl_contains(lines, "    3 output lines"))
             assert.is_true(
+                vim.tbl_contains(lines, "    Details hidden · <CR> expand")
+            )
+            assert.is_false(
                 vim.tbl_contains(
                     lines,
-                    "  lua/agentic/ui/queue_list.lua:45:Queued messages"
+                    "    lua/agentic/ui/queue_list.lua:45:Queued messages"
                 )
-            )
-            assert.is_true(
-                vim.tbl_contains(lines, "  1 more line · <CR> expand")
             )
             assert.is_false(
                 vim.tbl_contains(
@@ -680,45 +1330,56 @@ describe("agentic.ui.MessageWriter", function()
                     "lua/agentic/ui/window_decoration.lua:35:Queue"
                 )
             )
+
+            local expand_prompts = vim.tbl_filter(function(line)
+                return line:find("<CR> expand", 1, true) ~= nil
+            end, lines)
+            assert.equal(1, #expand_prompts)
         end)
 
-        it("normalizes wrapped execute titles into action-first headers", function()
-            --- @type agentic.ui.MessageWriter.ToolCallBlock
-            local block = {
-                tool_call_id = "execute-normalized",
-                status = "completed",
-                kind = "execute",
-                collapsed = true,
-                argument = "execute(ls -la)",
-                body = { "file-a", "file-b" },
-            }
+        it(
+            "normalizes wrapped execute titles into action-first headers",
+            function()
+                --- @type agentic.ui.MessageWriter.ToolCallBlock
+                local block = {
+                    tool_call_id = "execute-normalized",
+                    status = "completed",
+                    kind = "execute",
+                    collapsed = true,
+                    argument = "execute(ls -la)",
+                    body = { "file-a", "file-b" },
+                }
 
-            local lines = writer:_prepare_block_lines(block)
+                local lines = writer:_prepare_block_lines(block)
 
-            assert.is_true(vim.tbl_contains(lines, "▸ Run ls -la"))
-        end)
+                assert.is_true(vim.tbl_contains(lines, "  ▸ Run ls -la"))
+            end
+        )
 
-        it("renders failed tool status inline instead of as overlay chrome", function()
-            --- @type agentic.ui.MessageWriter.ToolCallBlock
-            local block = {
-                tool_call_id = "execute-failed",
-                status = "failed",
-                kind = "execute",
-                collapsed = true,
-                argument = "rg -n queue lua/agentic",
-                body = {
-                    "ripgrep: README.md: IO error",
-                },
-            }
+        it(
+            "renders failed tool status inline instead of as overlay chrome",
+            function()
+                --- @type agentic.ui.MessageWriter.ToolCallBlock
+                local block = {
+                    tool_call_id = "execute-failed",
+                    status = "failed",
+                    kind = "execute",
+                    collapsed = true,
+                    argument = "rg -n queue lua/agentic",
+                    body = {
+                        "ripgrep: README.md: IO error",
+                    },
+                }
 
-            local lines = writer:_prepare_block_lines(block)
+                local lines = writer:_prepare_block_lines(block)
 
-            assert.is_true(
-                vim.tbl_contains(lines, "▸ Run rg -n queue lua/agentic")
-            )
-            assert.is_true(vim.tbl_contains(lines, "  1 error line"))
-            assert.is_true(vim.tbl_contains(lines, "  failed"))
-        end)
+                assert.is_true(
+                    vim.tbl_contains(lines, "  ▸ Run rg -n queue lua/agentic")
+                )
+                assert.is_true(vim.tbl_contains(lines, "    1 error line"))
+                assert.is_true(vim.tbl_contains(lines, "    failed"))
+            end
+        )
 
         it("renders modifications as explicit old/new line pairs", function()
             Config.diff_preview.enabled = false
@@ -740,10 +1401,10 @@ describe("agentic.ui.MessageWriter", function()
 
             local lines, highlight_ranges = writer:_prepare_block_lines(block)
 
-            local old_line_index = vim.fn.index(lines, "    - old value")
-            local new_line_index = vim.fn.index(lines, "    + new value")
+            local old_line_index = vim.fn.index(lines, "      - old value")
+            local new_line_index = vim.fn.index(lines, "      + new value")
 
-            assert.is_true(vim.tbl_contains(lines, "  @@ line 1 @@"))
+            assert.is_true(vim.tbl_contains(lines, "    @@ line 1 @@"))
             assert.is_true(old_line_index >= 0)
             assert.is_true(new_line_index > old_line_index)
 
@@ -758,8 +1419,8 @@ describe("agentic.ui.MessageWriter", function()
             assert.equal("new value", old_ranges[1].new_line)
             assert.equal("old value", new_ranges[1].old_line)
             assert.equal("new value", new_ranges[1].new_line)
-            assert.equal(6, old_ranges[1].display_prefix_len)
-            assert.equal(6, new_ranges[1].display_prefix_len)
+            assert.equal(8, old_ranges[1].display_prefix_len)
+            assert.equal(8, new_ranges[1].display_prefix_len)
         end)
 
         it(
@@ -789,12 +1450,12 @@ describe("agentic.ui.MessageWriter", function()
 
                 local lines = writer:_prepare_block_lines(block)
                 local title_index =
-                    vim.fn.index(lines, "▸ Edited /test.lua +6 -6")
+                    vim.fn.index(lines, "  ▸ Edited /test.lua +6 -6")
                 local summary_index =
-                    vim.fn.index(lines, "  1 hunk · 6 modified lines")
+                    vim.fn.index(lines, "    1 hunk · 6 modified lines")
                 local hint_index = vim.fn.index(
                     lines,
-                    "  Review in buffer: ]c next, [c prev · <CR> expand"
+                    "    Review in buffer: ]c next, [c prev · <CR> expand"
                 )
 
                 assert.is_true(title_index >= 0)
@@ -841,17 +1502,22 @@ describe("agentic.ui.MessageWriter", function()
                 local lines = writer:_prepare_block_lines(block)
 
                 assert.is_true(
-                    vim.tbl_contains(lines, "▸ Edited /test.lua +6 -6")
+                    vim.tbl_contains(lines, "  ▸ Edited /test.lua +6 -6")
                 )
                 assert.is_true(
-                    vim.tbl_contains(lines, "  1 hunk · 6 modified lines")
+                    vim.tbl_contains(lines, "    1 hunk · 6 modified lines")
                 )
                 assert.is_true(
-                    vim.tbl_contains(lines, "  Details hidden · <CR> expand")
+                    vim.tbl_contains(lines, "    Details hidden · <CR> expand")
                 )
                 assert.is_false(vim.tbl_contains(lines, "@@ lines 1-6 @@"))
                 assert.is_false(vim.tbl_contains(lines, "- a1"))
                 assert.is_false(vim.tbl_contains(lines, "+ b1"))
+
+                local expand_prompts = vim.tbl_filter(function(line)
+                    return line:find("<CR> expand", 1, true) ~= nil
+                end, lines)
+                assert.equal(1, #expand_prompts)
             end
         )
 
@@ -882,21 +1548,24 @@ describe("agentic.ui.MessageWriter", function()
 
             local lines = writer:_prepare_block_lines(block)
             local title_index =
-                vim.fn.index(lines, "▾ Edited /test.lua +6 -6")
+                vim.fn.index(lines, "  ▾ Edited /test.lua +6 -6")
             local summary_index =
-                vim.fn.index(lines, "  1 hunk · 6 modified lines")
-            local hunk_index = vim.fn.index(lines, "  @@ lines 1-6 @@")
+                vim.fn.index(lines, "    1 hunk · 6 modified lines")
+            local hunk_index = vim.fn.index(lines, "    @@ lines 1-6 @@")
 
             assert.is_true(title_index >= 0)
             assert.is_true(summary_index >= 0)
             assert.is_true(hunk_index > summary_index)
             assert.is_true(
-                vim.tbl_contains(lines, "  ... 2 more changes in buffer review")
+                vim.tbl_contains(
+                    lines,
+                    "    ... 2 more changes in buffer review"
+                )
             )
-            assert.is_true(vim.tbl_contains(lines, "    - a4"))
-            assert.is_true(vim.tbl_contains(lines, "    + b4"))
-            assert.is_false(vim.tbl_contains(lines, "    - a5"))
-            assert.is_false(vim.tbl_contains(lines, "    + b5"))
+            assert.is_true(vim.tbl_contains(lines, "      - a4"))
+            assert.is_true(vim.tbl_contains(lines, "      + b4"))
+            assert.is_false(vim.tbl_contains(lines, "      - a5"))
+            assert.is_false(vim.tbl_contains(lines, "      + b5"))
         end)
 
         it("limits transcript samples when a diff spans many hunks", function()
@@ -927,13 +1596,16 @@ describe("agentic.ui.MessageWriter", function()
             local lines = writer:_prepare_block_lines(block)
 
             assert.is_true(
-                vim.tbl_contains(lines, "  3 hunks · 3 modified lines")
+                vim.tbl_contains(lines, "    3 hunks · 3 modified lines")
             )
-            assert.is_true(vim.tbl_contains(lines, "  @@ line 1 @@"))
-            assert.is_true(vim.tbl_contains(lines, "  @@ line 3 @@"))
-            assert.is_false(vim.tbl_contains(lines, "  @@ line 5 @@"))
+            assert.is_true(vim.tbl_contains(lines, "    @@ line 1 @@"))
+            assert.is_true(vim.tbl_contains(lines, "    @@ line 3 @@"))
+            assert.is_false(vim.tbl_contains(lines, "    @@ line 5 @@"))
             assert.is_true(
-                vim.tbl_contains(lines, "  ... 1 more change in buffer review")
+                vim.tbl_contains(
+                    lines,
+                    "    ... 1 more change in buffer review"
+                )
             )
         end)
 
@@ -941,27 +1613,38 @@ describe("agentic.ui.MessageWriter", function()
             Config.diff_preview.enabled = false
             read_stub:returns({ "old value" })
 
-            local block = {
-                tool_call_id = "toggle-diff",
-                status = "pending",
-                kind = "edit",
-                argument = "/test.lua",
-                file_path = "/test.lua",
-                diff = {
-                    old = { "old value" },
-                    new = { "new value" },
-                },
-            }
-
-            writer:write_tool_call_block(block)
+            render_session({
+                make_turn({
+                    nodes = {
+                        make_tool_node({
+                            tool_call_id = "toggle-diff",
+                            status = "pending",
+                            kind = "edit",
+                            title = "/test.lua",
+                            file_path = "/test.lua",
+                            content_nodes = {
+                                {
+                                    type = "diff_output",
+                                    file_path = "/test.lua",
+                                    old_lines = { "old value" },
+                                    new_lines = { "new value" },
+                                },
+                            },
+                        }),
+                    },
+                }),
+            })
 
             local collapsed_lines =
                 vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
             assert.is_true(
-                vim.tbl_contains(collapsed_lines, "▸ Edited /test.lua +1 -1")
+                vim.tbl_contains(
+                    collapsed_lines,
+                    "  ▸ Edited /test.lua +1 -1"
+                )
             )
             assert.is_false(
-                vim.tbl_contains(collapsed_lines, "    - old value")
+                vim.tbl_contains(collapsed_lines, "      - old value")
             )
 
             local tracker = writer.tool_call_blocks["toggle-diff"]
@@ -973,42 +1656,51 @@ describe("agentic.ui.MessageWriter", function()
                 { details = true }
             )
 
-            assert.is_true(writer:toggle_diff_block_at_line(pos[1]))
+            assert.is_true(writer:toggle_tool_block_at_line(pos[1]))
 
             local expanded_lines =
                 vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
             assert.is_true(
-                vim.tbl_contains(expanded_lines, "▾ Edited /test.lua +1 -1")
+                vim.tbl_contains(expanded_lines, "  ▾ Edited /test.lua +1 -1")
             )
             assert.is_true(
-                vim.tbl_contains(expanded_lines, "    - old value")
+                vim.tbl_contains(expanded_lines, "      - old value")
             )
             assert.is_true(
-                vim.tbl_contains(expanded_lines, "    + new value")
+                vim.tbl_contains(expanded_lines, "      + new value")
             )
         end)
 
         it("toggles execute previews from collapsed to expanded", function()
-            local block = {
-                tool_call_id = "toggle-execute",
-                status = "completed",
-                kind = "execute",
-                argument = "rg -n queue lua/agentic",
-                body = {
-                    "lua/agentic/ui/queue_list.lua:45:Queued messages",
-                    "lua/agentic/session_manager.lua:643:Queue: 3",
-                    "lua/agentic/ui/window_decoration.lua:35:Queue",
-                },
-            }
-
-            writer:write_tool_call_block(block)
+            render_session({
+                make_turn({
+                    nodes = {
+                        make_tool_node({
+                            tool_call_id = "toggle-execute",
+                            kind = "execute",
+                            title = "rg -n queue lua/agentic",
+                            body_lines = {
+                                "lua/agentic/ui/queue_list.lua:45:Queued messages",
+                                "lua/agentic/session_manager.lua:643:Queue: 3",
+                                "lua/agentic/ui/window_decoration.lua:35:Queue",
+                            },
+                        }),
+                    },
+                }),
+            })
 
             local collapsed_lines =
                 vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
             assert.is_true(
                 vim.tbl_contains(
                     collapsed_lines,
-                    "▸ Run rg -n queue lua/agentic"
+                    "  ▸ Run rg -n queue lua/agentic"
+                )
+            )
+            assert.is_false(
+                vim.tbl_contains(
+                    collapsed_lines,
+                    "    lua/agentic/ui/queue_list.lua:45:Queued messages"
                 )
             )
             assert.is_false(
@@ -1027,118 +1719,281 @@ describe("agentic.ui.MessageWriter", function()
                 { details = true }
             )
 
-            assert.is_true(writer:toggle_diff_block_at_line(pos[1]))
+            assert.is_true(writer:toggle_tool_block_at_line(pos[1]))
 
             local expanded_lines =
                 vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
             assert.is_true(
                 vim.tbl_contains(
                     expanded_lines,
-                    "▾ Run rg -n queue lua/agentic"
+                    "  ▾ Run rg -n queue lua/agentic"
                 )
             )
             assert.is_true(
                 vim.tbl_contains(
                     expanded_lines,
-                    "  lua/agentic/ui/window_decoration.lua:35:Queue"
+                    "    lua/agentic/ui/window_decoration.lua:35:Queue"
                 )
             )
             assert.is_true(
-                vim.tbl_contains(expanded_lines, "  <CR> collapse")
+                vim.tbl_contains(expanded_lines, "    <CR> collapse")
             )
         end)
 
-        it("groups multiple diff edits for the same file within one turn", function()
-            Config.diff_preview.enabled = false
-            read_stub:returns({ "keep1", "keep2", "keep3", "keep4" })
-
-            writer:begin_turn()
-            writer:write_tool_call_block({
-                tool_call_id = "edit-1",
-                status = "completed",
-                kind = "edit",
-                collapsed = false,
-                argument = "/test.lua",
-                file_path = "/test.lua",
-                diff = {
-                    old = { "keep1", "old one", "keep2", "keep3", "keep4" },
-                    new = { "keep1", "new one", "keep2", "keep3", "keep4" },
-                },
-            })
-            writer:write_tool_call_block({
-                tool_call_id = "edit-2",
-                status = "completed",
-                kind = "edit",
-                collapsed = false,
-                argument = "/test.lua",
-                file_path = "/test.lua",
-                diff = {
-                    old = { "keep1", "new one", "keep2", "keep3", "old two", "keep4" },
-                    new = { "keep1", "new one", "keep2", "keep3", "new two", "keep4" },
-                },
+        it("toggles read previews from collapsed to expanded", function()
+            render_session({
+                make_turn({
+                    nodes = {
+                        make_tool_node({
+                            tool_call_id = "toggle-read",
+                            kind = "read",
+                            title = "Read lua/agentic/session/persisted_session.lua",
+                            file_path = "lua/agentic/session/persisted_session.lua",
+                            body_lines = {
+                                'local Config = require("agentic.config")',
+                                'local Logger = require("agentic.utils.logger")',
+                                'local FileSystem = require("agentic.utils.file_system")',
+                            },
+                        }),
+                    },
+                }),
             })
 
-            local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-
-            assert.equal(
-                writer.tool_call_blocks["edit-1"],
-                writer.tool_call_blocks["edit-2"]
+            local collapsed_lines =
+                vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+            assert.is_true(
+                vim.tbl_contains(
+                    collapsed_lines,
+                    "  ▸ Read lua/agentic/session/persisted_session.lua"
+                )
             )
-            assert.equal(
-                1,
-                vim.tbl_count(vim.tbl_filter(function(line)
-                    return line == "▾ Edited /test.lua +2 -2"
-                end, lines))
+            assert.is_false(
+                vim.tbl_contains(
+                    collapsed_lines,
+                    '    local Config = require("agentic.config")'
+                )
+            )
+            assert.is_false(
+                vim.tbl_contains(
+                    collapsed_lines,
+                    '    local FileSystem = require("agentic.utils.file_system")'
+                )
+            )
+
+            local tracker = writer.tool_call_blocks["toggle-read"]
+            local tool_ns = vim.api.nvim_get_namespaces().agentic_tool_blocks
+            local pos = vim.api.nvim_buf_get_extmark_by_id(
+                bufnr,
+                tool_ns,
+                tracker.extmark_id,
+                { details = true }
+            )
+
+            assert.is_true(writer:toggle_tool_block_at_line(pos[1]))
+
+            local expanded_lines =
+                vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+            assert.is_true(
+                vim.tbl_contains(
+                    expanded_lines,
+                    "  ▾ Read lua/agentic/session/persisted_session.lua"
+                )
             )
             assert.is_true(
-                vim.tbl_contains(lines, "  2 edits · 2 hunks · 2 modified lines")
+                vim.tbl_contains(
+                    expanded_lines,
+                    '    local FileSystem = require("agentic.utils.file_system")'
+                )
             )
-            assert.is_true(vim.tbl_contains(lines, "  @@ line 2 @@"))
-            assert.is_true(vim.tbl_contains(lines, "  @@ line 5 @@"))
-        end)
-
-        it("starts a new file card for the same file in a later turn", function()
-            Config.diff_preview.enabled = false
-            read_stub:returns({ "old value" })
-
-            writer:begin_turn()
-            writer:write_tool_call_block({
-                tool_call_id = "turn-one",
-                status = "completed",
-                kind = "edit",
-                argument = "/test.lua",
-                file_path = "/test.lua",
-                diff = {
-                    old = { "old value" },
-                    new = { "new value" },
-                },
-            })
-
-            writer:begin_turn()
-            writer:write_tool_call_block({
-                tool_call_id = "turn-two",
-                status = "completed",
-                kind = "edit",
-                argument = "/test.lua",
-                file_path = "/test.lua",
-                diff = {
-                    old = { "new value" },
-                    new = { "newest value" },
-                },
-            })
-
-            local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-
             assert.is_true(
-                writer.tool_call_blocks["turn-one"]
-                    ~= writer.tool_call_blocks["turn-two"]
-            )
-            assert.equal(
-                2,
-                vim.tbl_count(vim.tbl_filter(function(line)
-                    return line == "▸ Edited /test.lua +1 -1"
-                end, lines))
+                vim.tbl_contains(expanded_lines, "    <CR> collapse")
             )
         end)
+
+        it(
+            "renders only one expand affordance for collapsed read cards",
+            function()
+                local block = {
+                    tool_call_id = "single-read-expand",
+                    status = "completed",
+                    kind = "read",
+                    collapsed = true,
+                    argument = "Read lua/agentic/session/persisted_session.lua",
+                    file_path = "lua/agentic/session/persisted_session.lua",
+                    body = {
+                        'local Config = require("agentic.config")',
+                        'local Logger = require("agentic.utils.logger")',
+                        'local FileSystem = require("agentic.utils.file_system")',
+                    },
+                }
+
+                local lines = writer:_prepare_block_lines(block)
+                local expand_prompts = vim.tbl_filter(function(line)
+                    return line:find("<CR> expand", 1, true) ~= nil
+                end, lines)
+
+                assert.equal(1, #expand_prompts)
+            end
+        )
+
+        it(
+            "groups multiple diff edits for the same file within one turn",
+            function()
+                Config.diff_preview.enabled = false
+                read_stub:returns({ "keep1", "keep2", "keep3", "keep4" })
+
+                local turns = {
+                    make_turn({
+                        nodes = {
+                            make_tool_node({
+                                tool_call_id = "edit-1",
+                                kind = "edit",
+                                status = "completed",
+                                title = "/test.lua",
+                                file_path = "/test.lua",
+                                content_nodes = {
+                                    {
+                                        type = "diff_output",
+                                        file_path = "/test.lua",
+                                        old_lines = {
+                                            "keep1",
+                                            "old one",
+                                            "keep2",
+                                            "keep3",
+                                            "keep4",
+                                        },
+                                        new_lines = {
+                                            "keep1",
+                                            "new one",
+                                            "keep2",
+                                            "keep3",
+                                            "keep4",
+                                        },
+                                    },
+                                },
+                            }),
+                            make_tool_node({
+                                tool_call_id = "edit-2",
+                                kind = "edit",
+                                status = "completed",
+                                title = "/test.lua",
+                                file_path = "/test.lua",
+                                content_nodes = {
+                                    {
+                                        type = "diff_output",
+                                        file_path = "/test.lua",
+                                        old_lines = {
+                                            "keep1",
+                                            "new one",
+                                            "keep2",
+                                            "keep3",
+                                            "old two",
+                                            "keep4",
+                                        },
+                                        new_lines = {
+                                            "keep1",
+                                            "new one",
+                                            "keep2",
+                                            "keep3",
+                                            "new two",
+                                            "keep4",
+                                        },
+                                    },
+                                },
+                            }),
+                        },
+                    }),
+                }
+
+                render_session(turns)
+                writer.tool_call_blocks["edit-1"].collapsed = false
+                render_session(turns)
+
+                local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+
+                assert.equal(
+                    writer.tool_call_blocks["edit-1"],
+                    writer.tool_call_blocks["edit-2"]
+                )
+                assert.equal(
+                    1,
+                    vim.tbl_count(vim.tbl_filter(function(line)
+                        return line == "  ▾ Edited /test.lua +2 -2"
+                    end, lines))
+                )
+                assert.is_true(
+                    vim.tbl_contains(
+                        lines,
+                        "    2 edits · 2 hunks · 2 modified lines"
+                    )
+                )
+                assert.is_true(vim.tbl_contains(lines, "    @@ line 2 @@"))
+                assert.is_true(vim.tbl_contains(lines, "    @@ line 5 @@"))
+            end
+        )
+
+        it(
+            "starts a new file card for the same file in a later turn",
+            function()
+                Config.diff_preview.enabled = false
+                read_stub:returns({ "old value" })
+
+                render_session({
+                    make_turn({
+                        index = 1,
+                        nodes = {
+                            make_tool_node({
+                                tool_call_id = "turn-one",
+                                kind = "edit",
+                                status = "completed",
+                                title = "/test.lua",
+                                file_path = "/test.lua",
+                                content_nodes = {
+                                    {
+                                        type = "diff_output",
+                                        file_path = "/test.lua",
+                                        old_lines = { "old value" },
+                                        new_lines = { "new value" },
+                                    },
+                                },
+                            }),
+                        },
+                    }),
+                    make_turn({
+                        index = 2,
+                        nodes = {
+                            make_tool_node({
+                                tool_call_id = "turn-two",
+                                kind = "edit",
+                                status = "completed",
+                                title = "/test.lua",
+                                file_path = "/test.lua",
+                                content_nodes = {
+                                    {
+                                        type = "diff_output",
+                                        file_path = "/test.lua",
+                                        old_lines = { "new value" },
+                                        new_lines = { "newest value" },
+                                    },
+                                },
+                            }),
+                        },
+                    }),
+                })
+
+                local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+
+                assert.is_true(
+                    writer.tool_call_blocks["turn-one"]
+                        ~= writer.tool_call_blocks["turn-two"]
+                )
+                assert.equal(
+                    2,
+                    vim.tbl_count(vim.tbl_filter(function(line)
+                        return line == "  ▸ Edited /test.lua +1 -1"
+                    end, lines))
+                )
+            end
+        )
     end)
 end)

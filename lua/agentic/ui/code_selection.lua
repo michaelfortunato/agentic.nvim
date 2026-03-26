@@ -120,6 +120,47 @@ function CodeSelection:is_empty()
     return #self._selections == 0
 end
 
+--- @param bufnr integer|nil
+--- @param start_line integer
+--- @param end_line integer
+--- @param start_col integer|nil
+--- @param end_col integer|nil
+--- @return agentic.Selection|nil
+function CodeSelection.get_buffer_selection(
+    bufnr,
+    start_line,
+    end_line,
+    start_col,
+    end_col
+)
+    bufnr = bufnr or 0
+    if not vim.api.nvim_buf_is_valid(bufnr) then
+        return nil
+    end
+
+    if start_line > end_line then
+        start_line, end_line = end_line, start_line
+        start_col, end_col = end_col, start_col
+    end
+
+    local lines =
+        vim.api.nvim_buf_get_lines(bufnr, start_line - 1, end_line, false)
+    local buf_name = vim.api.nvim_buf_get_name(bufnr)
+
+    --- @type agentic.Selection
+    local selection = {
+        lines = lines,
+        start_line = start_line,
+        end_line = end_line,
+        start_col = start_col,
+        end_col = end_col,
+        file_path = FileSystem.to_smart_path(buf_name),
+        file_type = Theme.get_language_from_path(buf_name),
+    }
+
+    return selection
+end
+
 --- @private
 --- @return TSNode|nil root
 function CodeSelection:_get_tree_root()
@@ -176,39 +217,24 @@ end
 function CodeSelection.get_selected_text()
     local mode = vim.fn.mode()
 
-    if mode == "v" or mode == "V" then
+    if mode == "v" or mode == "V" or mode == "\22" then
         local start_pos = vim.fn.getpos("v")
         local end_pos = vim.fn.getpos(".")
         local start_line = start_pos[2]
         local end_line = end_pos[2]
-
-        -- Ensure start_line is always smaller than end_line (handle backward selection)
-        if start_line > end_line then
-            start_line, end_line = end_line, start_line
-        end
-
-        local lines = vim.api.nvim_buf_get_lines(
-            0,
-            start_line - 1, -- 0-indexed
-            end_line, -- exclusive
-            false
-        )
+        local start_col = start_pos[3]
+        local end_col = end_pos[3]
 
         -- exit visual mode to avoid issues with the input buffer
         BufHelpers.feed_ESC_key()
 
-        local buf_name = vim.api.nvim_buf_get_name(0)
-
-        --- @class agentic.Selection
-        local selection = {
-            lines = lines,
-            start_line = start_line,
-            end_line = end_line,
-            file_path = FileSystem.to_smart_path(buf_name),
-            file_type = Theme.get_language_from_path(buf_name),
-        }
-
-        return selection
+        return CodeSelection.get_buffer_selection(
+            0,
+            start_line,
+            end_line,
+            start_col,
+            end_col
+        )
     end
 end
 
@@ -219,7 +245,10 @@ function CodeSelection:_setup_keybindings()
         local line = cursor[1]
 
         self:remove_at_cursor(line)
-    end, { nowait = true })
+    end, {
+        desc = "Agentic code: remove block at cursor",
+        nowait = true,
+    })
 
     BufHelpers.keymap_set(self._bufnr, "v", "d", function()
         local start_pos = vim.fn.getpos("v")
@@ -236,7 +265,10 @@ function CodeSelection:_setup_keybindings()
 
         -- Exit visual mode
         BufHelpers.feed_ESC_key()
-    end, { nowait = true })
+    end, {
+        desc = "Agentic code: remove selected blocks",
+        nowait = true,
+    })
 end
 
 return CodeSelection

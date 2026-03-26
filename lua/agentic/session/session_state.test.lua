@@ -2,97 +2,125 @@ local assert = require("tests.helpers.assert")
 local spy = require("tests.helpers.spy")
 
 describe("agentic.session.SessionState", function()
-    --- @type agentic.session.session_state
     local SessionState
-    --- @type agentic.session.session_events
     local SessionEvents
+    local SessionSelectors
 
     before_each(function()
         package.loaded["agentic.session.session_state"] = nil
         package.loaded["agentic.session.session_events"] = nil
+        package.loaded["agentic.session.session_selectors"] = nil
 
         SessionState = require("agentic.session.session_state")
         SessionEvents = require("agentic.session.session_events")
+        SessionSelectors = require("agentic.session.session_selectors")
+    end)
+
+    it("exposes session metadata as persisted session data", function()
+        local store = SessionState:new()
+
+        store:dispatch(SessionEvents.set_session_meta({
+            session_id = "session-1",
+            title = "A title",
+            timestamp = 123,
+        }))
+        store:dispatch(SessionEvents.set_current_mode("plan"))
+
+        store:dispatch(SessionEvents.append_interaction_request({
+            kind = "user",
+            text = "hello",
+            timestamp = 123,
+            content = {
+                { type = "text", text = "hello" },
+            },
+        }))
+
+        local persisted = store:get_persisted_session_data()
+
+        assert.equal("session-1", persisted.session_id)
+        assert.equal("A title", persisted.title)
+        assert.equal(123, persisted.timestamp)
+        assert.equal("plan", persisted.current_mode_id)
+        assert.equal(1, #persisted.turns)
+        assert.equal("hello", persisted.turns[1].request.text)
     end)
 
     it(
-        "syncs session metadata and transcript messages into chat history",
+        "appends agent chunks onto the last persisted response message",
         function()
             local store = SessionState:new()
 
-            store:dispatch(SessionEvents.set_session_meta({
-                session_id = "session-1",
-                title = "A title",
-                timestamp = 123,
-            }))
+            store:dispatch(
+                SessionEvents.append_interaction_response(
+                    "message",
+                    "codex-acp",
+                    { type = "text", text = "hello" }
+                )
+            )
+            store:dispatch(
+                SessionEvents.append_interaction_response(
+                    "message",
+                    "codex-acp",
+                    { type = "text", text = " world" }
+                )
+            )
 
-            store:dispatch(SessionEvents.add_transcript_message({
-                type = "user",
-                text = "hello",
-                timestamp = 123,
-                provider_name = "codex-acp",
-            }))
-
-            local history = store:get_history()
-
-            assert.equal("session-1", history.session_id)
-            assert.equal("A title", history.title)
-            assert.equal(123, history.timestamp)
-            assert.equal(1, #history.messages)
-            assert.equal("hello", history.messages[1].text)
+            local turns = store:get_persisted_session_data().turns
+            assert.equal(1, #turns)
+            assert.equal("hello world", turns[1].response.nodes[1].text)
         end
     )
 
     it(
-        "appends agent chunks onto the last matching transcript message",
-        function()
-            local store = SessionState:new()
-
-            store:dispatch(SessionEvents.append_agent_text({
-                type = "agent",
-                text = "hello",
-                provider_name = "codex-acp",
-            }))
-            store:dispatch(SessionEvents.append_agent_text({
-                type = "agent",
-                text = " world",
-                provider_name = "codex-acp",
-            }))
-
-            local messages = store:get_history().messages
-            assert.equal(1, #messages)
-            assert.equal("hello world", messages[1].text)
-        end
-    )
-
-    it(
-        "restores history while preserving runtime session metadata when requested",
+        "loads persisted session data while preserving runtime session metadata when requested",
         function()
             local store = SessionState:new()
             store:dispatch(SessionEvents.set_session_meta({
                 session_id = "active-session",
                 timestamp = 999,
             }))
+            store:dispatch(SessionEvents.set_current_mode("code"))
 
-            local loaded_history = {
+            local loaded_session = {
                 session_id = "saved-session",
                 title = "Saved title",
                 timestamp = 111,
-                messages = {
-                    { type = "user", text = "restored" },
+                current_mode_id = "plan",
+                turns = {
+                    {
+                        index = 1,
+                        request = {
+                            kind = "user",
+                            text = "restored",
+                            timestamp = 111,
+                            content = {
+                                { type = "text", text = "restored" },
+                            },
+                            content_nodes = {},
+                        },
+                        response = {
+                            provider_name = nil,
+                            nodes = {},
+                        },
+                        result = nil,
+                    },
                 },
             }
 
-            store:dispatch(SessionEvents.restore_history(loaded_history, {
-                preserve_session_id = true,
-                preserve_timestamp = true,
-            }))
+            store:dispatch(
+                SessionEvents.load_persisted_session(loaded_session, {
+                    preserve_session_id = true,
+                    preserve_timestamp = true,
+                    preserve_current_mode_id = true,
+                })
+            )
 
-            local history = store:get_history()
-            assert.equal("active-session", history.session_id)
-            assert.equal(999, history.timestamp)
-            assert.equal("Saved title", history.title)
-            assert.equal("restored", history.messages[1].text)
+            local persisted = store:get_persisted_session_data()
+            assert.equal("active-session", persisted.session_id)
+            assert.equal(999, persisted.timestamp)
+            assert.equal("Saved title", persisted.title)
+            assert.equal("code", persisted.current_mode_id)
+            assert.equal("restored", persisted.turns[1].request.text)
         end
     )
 
@@ -126,7 +154,7 @@ describe("agentic.session.SessionState", function()
     it("tracks tool lifecycle and active review state", function()
         local store = SessionState:new()
 
-        store:dispatch(SessionEvents.upsert_tool_call({
+        store:dispatch(SessionEvents.upsert_interaction_tool_call("Codex ACP", {
             tool_call_id = "tc-3",
             kind = "edit",
             status = "pending",
@@ -134,12 +162,18 @@ describe("agentic.session.SessionState", function()
             diff = { old = { "a" }, new = { "b" } },
         }))
         store:dispatch(
-            SessionEvents.set_tool_permission_state("tc-3", "requested")
+            SessionEvents.set_interaction_tool_permission_state(
+                "tc-3",
+                "requested"
+            )
         )
         store:dispatch(SessionEvents.set_review_target("tc-3"))
 
         local state = store:get_state()
-        assert.equal("requested", state.tools.by_id["tc-3"].permission_state)
+        assert.equal(
+            "requested",
+            SessionSelectors.get_tool_call(state, "tc-3").permission_state
+        )
         assert.equal("tc-3", state.review.active_tool_call_id)
 
         store:dispatch(SessionEvents.clear_review_target("tc-3", true))

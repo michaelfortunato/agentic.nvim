@@ -2,102 +2,15 @@
 local assert = require("tests.helpers.assert")
 local spy = require("tests.helpers.spy")
 
-local AgentModes = require("agentic.acp.agent_modes")
 local Config = require("agentic.config")
 local Logger = require("agentic.utils.logger")
+local PromptBuilder = require("agentic.session.prompt_builder")
 local SessionEvents = require("agentic.session.session_events")
 local SessionState = require("agentic.session.session_state")
+local SubmissionQueue = require("agentic.session.submission_queue")
 local SessionManager = require("agentic.session_manager")
 
---- @param mode_id string
---- @return agentic.acp.CurrentModeUpdate
-local function mode_update(mode_id)
-    return { sessionUpdate = "current_mode_update", currentModeId = mode_id }
-end
-
 describe("agentic.SessionManager", function()
-    describe("_on_session_update: current_mode_update", function()
-        --- @type TestStub
-        local notify_stub
-        --- @type TestSpy
-        local render_header_spy
-        --- @type agentic.SessionManager
-        local session
-        --- @type integer
-        local test_bufnr
-
-        before_each(function()
-            notify_stub = spy.stub(Logger, "notify")
-            render_header_spy = spy.new(function() end)
-            test_bufnr = vim.api.nvim_create_buf(false, true)
-
-            local legacy_modes = AgentModes:new()
-            legacy_modes:set_modes({
-                availableModes = {
-                    { id = "plan", name = "Plan", description = "Planning" },
-                    { id = "code", name = "Code", description = "Coding" },
-                },
-                currentModeId = "plan",
-            })
-
-            session = {
-                config_options = {
-                    legacy_agent_modes = legacy_modes,
-                    get_header_context = function()
-                        local current_mode =
-                            legacy_modes:get_mode(legacy_modes.current_mode_id)
-                        return current_mode and ("Mode: " .. current_mode.name)
-                            or nil
-                    end,
-                },
-                chat_history = { title = "" },
-                widget = {
-                    render_header = render_header_spy,
-                    buf_nrs = { chat = test_bufnr },
-                },
-                _on_session_update = SessionManager._on_session_update,
-                _render_window_headers = SessionManager._render_window_headers,
-            } --[[@as agentic.SessionManager]]
-        end)
-
-        after_each(function()
-            notify_stub:revert()
-            vim.api.nvim_buf_delete(test_bufnr, { force = true })
-        end)
-
-        it("updates state, re-renders header, notifies user", function()
-            session:_on_session_update(mode_update("code"))
-
-            assert.equal(
-                "code",
-                session.config_options.legacy_agent_modes.current_mode_id
-            )
-
-            assert.spy(render_header_spy).was.called(2)
-            assert.equal("chat", render_header_spy.calls[1][2])
-            assert.equal("Mode: Code", render_header_spy.calls[1][3])
-            assert.equal("input", render_header_spy.calls[2][2])
-            assert.equal("", render_header_spy.calls[2][3])
-
-            assert.spy(notify_stub).was.called(1)
-            assert.equal("Mode changed to: code", notify_stub.calls[1][1])
-            assert.equal(vim.log.levels.INFO, notify_stub.calls[1][2])
-        end)
-
-        it("rejects invalid mode and keeps current state", function()
-            session:_on_session_update(mode_update("nonexistent"))
-
-            assert.equal(
-                "plan",
-                session.config_options.legacy_agent_modes.current_mode_id
-            )
-            assert.spy(render_header_spy).was.called(0)
-
-            assert.spy(notify_stub).was.called(1)
-            assert.equal(vim.log.levels.WARN, notify_stub.calls[1][2])
-        end)
-    end)
-
     describe("_on_session_update: config_option_update", function()
         --- @type TestSpy
         local render_header_spy
@@ -109,6 +22,7 @@ describe("agentic.SessionManager", function()
         before_each(function()
             render_header_spy = spy.new(function() end)
             test_bufnr = vim.api.nvim_create_buf(false, true)
+            local session_state = SessionState:new()
 
             local AgentConfigOptions =
                 require("agentic.acp.agent_config_options")
@@ -124,8 +38,8 @@ describe("agentic.SessionManager", function()
             keymap_stub:revert()
 
             session = {
+                session_state = session_state,
                 config_options = config_opts,
-                chat_history = { title = "" },
                 widget = {
                     render_header = render_header_spy,
                     buf_nrs = { chat = test_bufnr },
@@ -233,7 +147,6 @@ describe("agentic.SessionManager", function()
             session_state:dispatch(SessionEvents.set_session_title("Old title"))
             session = {
                 session_state = session_state,
-                chat_history = session_state:get_history(),
                 config_options = {
                     get_header_context = function()
                         return "Mode: Code"
@@ -255,9 +168,156 @@ describe("agentic.SessionManager", function()
                     title = "New session title",
                 })
 
-                assert.equal("New session title", session.chat_history.title)
+                assert.equal(
+                    "New session title",
+                    session.session_state:get_state().session.title
+                )
             end
         )
+    end)
+
+    describe("_on_session_update: current_mode_update", function()
+        local session
+        local test_bufnr
+
+        before_each(function()
+            test_bufnr = vim.api.nvim_create_buf(false, true)
+
+            local AgentConfigOptions =
+                require("agentic.acp.agent_config_options")
+            local BufHelpers = require("agentic.utils.buf_helpers")
+            local keymap_stub = spy.stub(BufHelpers, "multi_keymap_set")
+            local config_opts = AgentConfigOptions:new(
+                { chat = test_bufnr },
+                function() end,
+                function() end
+            )
+            keymap_stub:revert()
+
+            config_opts:set_options({
+                {
+                    id = "mode-1",
+                    category = "mode",
+                    currentValue = "plan",
+                    description = "Mode",
+                    name = "Mode",
+                    options = {
+                        { value = "plan", name = "Plan", description = "" },
+                        { value = "code", name = "Code", description = "" },
+                    },
+                },
+            })
+
+            local session_state = SessionState:new()
+            session = {
+                session_state = session_state,
+                config_options = config_opts,
+                widget = {
+                    render_header = function() end,
+                },
+                _on_session_update = SessionManager._on_session_update,
+                _render_window_headers = SessionManager._render_window_headers,
+            } --[[@as agentic.SessionManager]]
+        end)
+
+        after_each(function()
+            vim.api.nvim_buf_delete(test_bufnr, { force = true })
+        end)
+
+        it(
+            "updates the tracked current mode when the agent switches modes",
+            function()
+                session:_on_session_update({
+                    sessionUpdate = "current_mode_update",
+                    currentModeId = "code",
+                })
+
+                assert.equal(
+                    "code",
+                    session.session_state:get_state().session.current_mode_id
+                )
+                assert.equal("code", session.config_options.mode.currentValue)
+            end
+        )
+    end)
+
+    describe("_on_session_update: usage_update", function()
+        it("accepts usage telemetry without warning", function()
+            local notify_stub = spy.stub(Logger, "notify")
+
+            local session = {
+                session_state = SessionState:new(),
+                _on_session_update = SessionManager._on_session_update,
+            } --[[@as agentic.SessionManager]]
+
+            --- @type agentic.acp.UsageUpdate
+            local update = {
+                sessionUpdate = "usage_update",
+                used = 2048,
+                size = 128000,
+                cost = {
+                    amount = 0.03,
+                    currency = "USD",
+                },
+            }
+
+            session:_on_session_update(update)
+
+            assert.stub(notify_stub).was.called(0)
+            notify_stub:revert()
+        end)
+    end)
+
+    describe("_setup_prompt_completion", function()
+        --- @type integer
+        local test_bufnr
+        --- @type TestStub
+        local file_picker_new_stub
+        --- @type TestStub
+        local setup_completion_stub
+        --- @type table
+        local mock_picker
+        --- @type agentic.SessionManager
+        local session
+
+        before_each(function()
+            local FilePicker = require("agentic.ui.file_picker")
+            local SlashCommands = require("agentic.acp.slash_commands")
+
+            test_bufnr = vim.api.nvim_create_buf(false, true)
+            mock_picker = { _bufnr = test_bufnr }
+            file_picker_new_stub = spy.stub(FilePicker, "new")
+            file_picker_new_stub:returns(mock_picker)
+            setup_completion_stub = spy.stub(SlashCommands, "setup_completion")
+
+            session = {
+                widget = {
+                    buf_nrs = { input = test_bufnr },
+                },
+                _get_workspace_root = function()
+                    return "/tmp/agentic-workspace"
+                end,
+                _setup_prompt_completion = SessionManager._setup_prompt_completion,
+            } --[[@as agentic.SessionManager]]
+        end)
+
+        after_each(function()
+            file_picker_new_stub:revert()
+            setup_completion_stub:revert()
+            vim.api.nvim_buf_delete(test_bufnr, { force = true })
+        end)
+
+        it("keeps a strong file picker reference on the session", function()
+            session:_setup_prompt_completion()
+
+            assert.equal(mock_picker, session.file_picker)
+            assert.equal(test_bufnr, file_picker_new_stub.calls[1][2])
+            assert.equal(
+                "/tmp/agentic-workspace",
+                file_picker_new_stub.calls[1][3].resolve_root()
+            )
+            assert.equal(test_bufnr, setup_completion_stub.calls[1][1])
+        end)
     end)
 
     describe("_handle_mode_change", function()
@@ -329,11 +389,11 @@ describe("agentic.SessionManager", function()
 
             session = {
                 session_id = "sess-1",
+                session_state = SessionState:new(),
                 agent = {
                     set_config_option = set_config_option_spy,
                 },
                 config_options = config_opts,
-                chat_history = { title = "" },
                 widget = {
                     render_header = spy.new(function() end),
                     buf_nrs = { chat = test_bufnr },
@@ -350,7 +410,7 @@ describe("agentic.SessionManager", function()
         end)
 
         it("uses the provider-advertised config option id", function()
-            session:_handle_mode_change("code", false)
+            session:_handle_mode_change("code")
 
             assert.equal("sess-1", set_config_option_spy.calls[1][2])
             assert.equal("mode-1", set_config_option_spy.calls[1][3])
@@ -422,11 +482,11 @@ describe("agentic.SessionManager", function()
 
             session = {
                 session_id = "sess-2",
+                session_state = SessionState:new(),
                 agent = {
                     set_config_option = set_config_option_spy,
                 },
                 config_options = config_opts,
-                chat_history = { title = "" },
                 widget = {
                     render_header = function() end,
                 },
@@ -470,41 +530,49 @@ describe("agentic.SessionManager", function()
             end
         )
 
-        it("keeps provider config option labels unchanged in notifications", function()
-            session.agent.set_config_option =
-                function(_agent, _session_id, _config_id, _value, callback)
+        it(
+            "keeps provider config option labels unchanged in notifications",
+            function()
+                session.agent.set_config_option = function(
+                    _agent,
+                    _session_id,
+                    _config_id,
+                    _value,
+                    callback
+                )
                     callback({}, nil)
                 end
 
-            session.config_options:set_options({
-                {
-                    id = "approval-1",
-                    category = "unknown",
-                    currentValue = "read_only",
-                    description = "Approval Preset",
-                    name = "Approval Preset",
-                    options = {
-                        {
-                            value = "read_only",
-                            name = "Read Only",
-                            description = "",
-                        },
-                        {
-                            value = "default",
-                            name = "Default",
-                            description = "",
+                session.config_options:set_options({
+                    {
+                        id = "approval-1",
+                        category = "unknown",
+                        currentValue = "read_only",
+                        description = "Approval Preset",
+                        name = "Approval Preset",
+                        options = {
+                            {
+                                value = "read_only",
+                                name = "Read Only",
+                                description = "",
+                            },
+                            {
+                                value = "default",
+                                name = "Default",
+                                description = "",
+                            },
                         },
                     },
-                },
-            })
+                })
 
-            session:_handle_config_option_change("approval-1", "default")
+                session:_handle_config_option_change("approval-1", "default")
 
-            assert.equal(
-                "Approval Preset changed to: Default",
-                notify_stub.calls[1][1]
-            )
-        end)
+                assert.equal(
+                    "Approval Preset changed to: Default",
+                    notify_stub.calls[1][1]
+                )
+            end
+        )
     end)
 
     describe("queued submissions", function()
@@ -530,10 +598,8 @@ describe("agentic.SessionManager", function()
             local session = {
                 session_id = "sess-queue-1",
                 is_generating = true,
-                _queued_submissions = {},
-                _next_queue_id = 0,
+                submission_queue = SubmissionQueue:new(),
                 session_state = session_state,
-                chat_history = session_state:get_history(),
                 agent = {
                     provider_config = { name = "Codex" },
                     send_prompt = send_prompt_spy,
@@ -569,6 +635,7 @@ describe("agentic.SessionManager", function()
                     },
                 },
                 _is_first_message = false,
+                _prepare_submission = SessionManager._prepare_submission,
                 _render_window_headers = SessionManager._render_window_headers,
                 _sync_queue_panel = function() end,
                 _enqueue_submission = SessionManager._enqueue_submission,
@@ -578,8 +645,11 @@ describe("agentic.SessionManager", function()
             session:_handle_input_submit("follow up")
 
             assert.spy(send_prompt_spy).was.called(0)
-            assert.equal(1, #session._queued_submissions)
-            assert.equal("follow up", session._queued_submissions[1].input_text)
+            assert.equal(1, session.submission_queue:count())
+            assert.equal(
+                "follow up",
+                session.submission_queue:list()[1].input_text
+            )
             assert.equal(
                 "Queued follow-up. It will be sent when the agent is ready.",
                 notify_stub.calls[1][1]
@@ -596,135 +666,152 @@ describe("agentic.SessionManager", function()
                     prompt = {
                         { type = "text", text = "queued prompt" },
                     },
-                    message_lines = { "queued prompt" },
-                    user_msg = {
-                        type = "user",
+                    request = {
+                        kind = "user",
                         text = "queued prompt",
                         timestamp = 1,
-                        provider_name = "Codex",
+                        content = {
+                            { type = "text", text = "queued prompt" },
+                        },
                     },
                 }
 
                 local session = {
                     is_generating = false,
-                    _queued_submissions = { queued_submission },
-                    _interrupt_submission = nil,
+                    submission_queue = SubmissionQueue:new(),
                     _sync_queue_panel = function() end,
                     _dispatch_submission = dispatch_spy,
-                    _pop_next_queued_submission = SessionManager._pop_next_queued_submission,
                     _drain_queued_submissions = SessionManager._drain_queued_submissions,
                 } --[[@as agentic.SessionManager]]
+                session.submission_queue:enqueue(queued_submission)
 
                 session:_drain_queued_submissions()
 
-                assert.equal(0, #session._queued_submissions)
+                assert.equal(0, session.submission_queue:count())
                 assert.spy(dispatch_spy).was.called(1)
                 assert.equal(queued_submission, dispatch_spy.calls[1][2])
             end
         )
 
-        it("formats /review prompts as review requests in the transcript", function()
-            local session_state = SessionState:new()
-            local dispatch_spy = spy.new(function() end)
+        it(
+            "formats /review prompts as review requests in the transcript",
+            function()
+                local session_state = SessionState:new()
+                local dispatch_spy = spy.new(function() end)
 
-            local session = {
-                session_id = "sess-review-1",
-                is_generating = false,
-                _queued_submissions = {},
-                _next_queue_id = 0,
-                session_state = session_state,
-                chat_history = session_state:get_history(),
-                agent = {
-                    provider_config = { name = "Codex" },
-                },
-                todo_list = { close_if_all_completed = function() end },
-                code_selection = {
-                    is_empty = function()
-                        return true
-                    end,
-                },
-                file_list = {
-                    is_empty = function()
-                        return true
-                    end,
-                },
-                diagnostics_list = {
-                    is_empty = function()
-                        return true
-                    end,
-                },
-                config_options = {
-                    get_header_context = function()
-                        return nil
-                    end,
-                },
-                widget = {
-                    render_header = function() end,
-                    win_nrs = {},
-                    buf_nrs = {
-                        chat = test_bufnr,
-                        input = test_bufnr,
-                        queue = test_bufnr,
+                local session = {
+                    session_id = "sess-review-1",
+                    is_generating = false,
+                    submission_queue = SubmissionQueue:new(),
+                    session_state = session_state,
+                    agent = {
+                        provider_config = { name = "Codex" },
                     },
-                },
-                _is_first_message = false,
-                _dispatch_submission = dispatch_spy,
-                _render_window_headers = function() end,
-                _handle_input_submit = SessionManager._handle_input_submit,
-            } --[[@as agentic.SessionManager]]
+                    todo_list = { close_if_all_completed = function() end },
+                    code_selection = {
+                        is_empty = function()
+                            return true
+                        end,
+                    },
+                    file_list = {
+                        is_empty = function()
+                            return true
+                        end,
+                    },
+                    diagnostics_list = {
+                        is_empty = function()
+                            return true
+                        end,
+                    },
+                    config_options = {
+                        get_header_context = function()
+                            return nil
+                        end,
+                    },
+                    widget = {
+                        render_header = function() end,
+                        win_nrs = {},
+                        buf_nrs = {
+                            chat = test_bufnr,
+                            input = test_bufnr,
+                            queue = test_bufnr,
+                        },
+                    },
+                    _is_first_message = false,
+                    _prepare_submission = SessionManager._prepare_submission,
+                    _dispatch_submission = dispatch_spy,
+                    _render_window_headers = function() end,
+                    _handle_input_submit = SessionManager._handle_input_submit,
+                } --[[@as agentic.SessionManager]]
 
-            session:_handle_input_submit("/review focus on chat_history.lua")
+                session:_handle_input_submit(
+                    "/review focus on persisted_session.lua"
+                )
 
-            assert.spy(dispatch_spy).was.called(1)
+                assert.spy(dispatch_spy).was.called(1)
 
-            local submission = dispatch_spy.calls[1][2]
-            assert.truthy(vim.startswith(submission.message_lines[1], "Review · "))
-            assert.equal("focus on chat_history.lua", submission.message_lines[2])
-            assert.equal(2, #submission.message_lines)
-        end)
+                local submission = dispatch_spy.calls[1][2]
+                assert.equal(
+                    "/review focus on persisted_session.lua",
+                    submission.input_text
+                )
+                assert.equal(
+                    "/review focus on persisted_session.lua",
+                    submission.request.text
+                )
+                assert.equal(1, #submission.request.content)
+                assert.equal("text", submission.request.content[1].type)
+                assert.equal(
+                    "/review focus on persisted_session.lua",
+                    submission.request.content[1].text
+                )
+            end
+        )
 
-        it("resizes the queue panel when queued count changes while visible", function()
-            local resize_spy = spy.new(function()
-                return true
-            end)
-            local set_items_spy = spy.new(function() end)
-            local render_header_spy = spy.new(function() end)
-            local refresh_layout_spy = spy.new(function() end)
+        it(
+            "resizes the queue panel when queued count changes while visible",
+            function()
+                local resize_spy = spy.new(function()
+                    return true
+                end)
+                local set_items_spy = spy.new(function() end)
+                local render_header_spy = spy.new(function() end)
+                local refresh_layout_spy = spy.new(function() end)
 
-            local session = {
-                _queued_submissions = {
-                    { id = 1, input_text = "first" },
-                    { id = 2, input_text = "second" },
-                },
-                queue_list = {
-                    set_items = set_items_spy,
-                },
-                widget = {
-                    win_nrs = {},
-                    is_open = function()
-                        return true
-                    end,
-                    render_header = render_header_spy,
-                    resize_optional_window = resize_spy,
-                    refresh_layout = refresh_layout_spy,
-                },
-                _render_window_headers = function() end,
-                _sync_queue_panel = SessionManager._sync_queue_panel,
-            } --[[@as agentic.SessionManager]]
+                local session = {
+                    submission_queue = SubmissionQueue:new(),
+                    queue_list = {
+                        set_items = set_items_spy,
+                    },
+                    widget = {
+                        win_nrs = {},
+                        is_open = function()
+                            return true
+                        end,
+                        render_header = render_header_spy,
+                        resize_optional_window = resize_spy,
+                        refresh_layout = refresh_layout_spy,
+                    },
+                    _render_window_headers = function() end,
+                    _sync_queue_panel = SessionManager._sync_queue_panel,
+                } --[[@as agentic.SessionManager]]
+                session.submission_queue:enqueue({ input_text = "first" })
+                session.submission_queue:enqueue({ input_text = "second" })
 
-            session:_sync_queue_panel(true)
+                session:_sync_queue_panel(true)
 
-            assert.spy(set_items_spy).was.called(1)
-            assert.equal("queue", render_header_spy.calls[1][2])
-            assert.equal("2", render_header_spy.calls[1][3])
-            assert.spy(resize_spy).was.called(1)
-            assert.equal("queue", resize_spy.calls[1][2])
-            assert.equal(
-                Config.windows.queue.max_height,
-                resize_spy.calls[1][3]
-            )
-            assert.spy(refresh_layout_spy).was.called(0)
-        end)
+                assert.spy(set_items_spy).was.called(1)
+                assert.equal("queue", render_header_spy.calls[1][2])
+                assert.equal("2", render_header_spy.calls[1][3])
+                assert.spy(resize_spy).was.called(1)
+                assert.equal("queue", resize_spy.calls[1][2])
+                assert.equal(
+                    Config.windows.queue.max_height,
+                    resize_spy.calls[1][3]
+                )
+                assert.spy(refresh_layout_spy).was.called(0)
+            end
+        )
 
         it("rebuilds layout if direct queue resize does not take", function()
             local resize_spy = spy.new(function()
@@ -733,11 +820,7 @@ describe("agentic.SessionManager", function()
             local refresh_layout_spy = spy.new(function() end)
 
             local session = {
-                _queued_submissions = {
-                    { id = 1, input_text = "first" },
-                    { id = 2, input_text = "second" },
-                    { id = 3, input_text = "third" },
-                },
+                submission_queue = SubmissionQueue:new(),
                 queue_list = {
                     set_items = function() end,
                 },
@@ -753,6 +836,9 @@ describe("agentic.SessionManager", function()
                 _render_window_headers = function() end,
                 _sync_queue_panel = SessionManager._sync_queue_panel,
             } --[[@as agentic.SessionManager]]
+            session.submission_queue:enqueue({ input_text = "first" })
+            session.submission_queue:enqueue({ input_text = "second" })
+            session.submission_queue:enqueue({ input_text = "third" })
 
             session:_sync_queue_panel(true)
 
@@ -761,49 +847,69 @@ describe("agentic.SessionManager", function()
         end)
     end)
 
-    describe("_generate_welcome_header", function()
+    describe("_build_chat_welcome_lines", function()
         it(
-            "returns header with provider name, session id, and timestamp",
+            "returns welcome lines with provider name, session id, and timestamp",
             function()
-                local header = SessionManager._generate_welcome_header(
-                    "Claude ACP",
-                    "abc123"
-                )
+                local session = {
+                    agent = {
+                        provider_config = { name = "Claude ACP" },
+                        agent_info = {},
+                    },
+                    _build_chat_welcome_lines = SessionManager._build_chat_welcome_lines,
+                } --[[@as agentic.SessionManager]]
 
-                assert.truthy(header:match("^Agentic · Claude ACP\n"))
-                assert.truthy(header:match("\nSession · abc123\n"))
-                assert.truthy(header:match("\nStarted · %d%d%d%d%-%d%d%-%d%d"))
+                local lines = session:_build_chat_welcome_lines({
+                    session = {
+                        id = "abc123",
+                        timestamp = 1711410099,
+                    },
+                })
+
+                assert.equal("Agentic · Claude ACP", lines[1])
+                assert.equal("Session · abc123", lines[2])
+                assert.truthy(
+                    lines[3]:match("^Started · %d%d%d%d%-%d%d%-%d%d")
+                )
             end
         )
 
-        it("uses 'unknown' when session_id is nil", function()
-            local header =
-                SessionManager._generate_welcome_header("Claude ACP", nil)
+        it("returns empty lines when session is missing", function()
+            local session = {
+                agent = {
+                    provider_config = { name = "Claude ACP" },
+                    agent_info = {},
+                },
+                _build_chat_welcome_lines = SessionManager._build_chat_welcome_lines,
+            } --[[@as agentic.SessionManager]]
 
-            assert.truthy(header:match("^Agentic · Claude ACP\n"))
-            assert.truthy(header:match("\nSession · unknown\n"))
+            local lines = session:_build_chat_welcome_lines({
+                session = {
+                    id = nil,
+                    timestamp = 1711410099,
+                },
+            })
+
+            assert.same({}, lines)
         end)
 
         it("includes version when provided", function()
-            local header = SessionManager._generate_welcome_header(
-                "Claude ACP",
-                "abc123",
-                "1.2.3"
-            )
+            local session = {
+                agent = {
+                    provider_config = { name = "Claude ACP" },
+                    agent_info = { version = "1.2.3" },
+                },
+                _build_chat_welcome_lines = SessionManager._build_chat_welcome_lines,
+            } --[[@as agentic.SessionManager]]
 
-            assert.truthy(header:match("^Agentic · Claude ACP v1%.2%.3\n"))
-            assert.truthy(header:match("\nSession · abc123\n"))
-        end)
+            local lines = session:_build_chat_welcome_lines({
+                session = {
+                    id = "abc123",
+                    timestamp = 1711410099,
+                },
+            })
 
-        it("omits version when nil", function()
-            local header = SessionManager._generate_welcome_header(
-                "Claude ACP",
-                "abc123",
-                nil
-            )
-
-            assert.truthy(header:match("^Agentic · Claude ACP\n"))
-            assert.is_nil(header:match(" v"))
+            assert.equal("Agentic · Claude ACP v1.2.3", lines[1])
         end)
     end)
 
@@ -816,15 +922,18 @@ describe("agentic.SessionManager", function()
                 local add_request_spy = spy.new(function() end)
                 local observed_queue_length = nil
 
-                session_state:dispatch(SessionEvents.upsert_tool_call({
-                    tool_call_id = "tc-perm-1",
-                    kind = "edit",
-                    status = "pending",
-                    file_path = "/tmp/demo.lua",
-                    diff = { old = { "a" }, new = { "b" } },
-                }))
+                session_state:dispatch(
+                    SessionEvents.upsert_interaction_tool_call("Codex ACP", {
+                        tool_call_id = "tc-perm-1",
+                        kind = "edit",
+                        status = "pending",
+                        file_path = "/tmp/demo.lua",
+                        diff = { old = { "a" }, new = { "b" } },
+                    })
+                )
 
                 local session = {
+                    agent = { provider_config = { name = "Codex ACP" } },
                     session_state = session_state,
                     is_generating = true,
                     status_animation = { start = start_spy },
@@ -863,16 +972,18 @@ describe("agentic.SessionManager", function()
                 }, function() end)
 
                 assert.equal(0, observed_queue_length)
-                assert.spy(start_spy).was.called_with(
-                    session.status_animation,
-                    "waiting"
-                )
+                assert
+                    .spy(start_spy).was
+                    .called_with(session.status_animation, "waiting", { detail = nil })
                 assert.spy(add_request_spy).was.called(1)
 
                 local state = session_state:get_state()
                 assert.equal(
                     "requested",
-                    state.tools.by_id["tc-perm-1"].permission_state
+                    require("agentic.session.session_selectors").get_tool_call(
+                        state,
+                        "tc-perm-1"
+                    ).permission_state
                 )
                 assert.equal("tc-perm-1", state.review.active_tool_call_id)
             end
@@ -902,10 +1013,9 @@ describe("agentic.SessionManager", function()
             })
 
             assert.equal("thinking", session._agent_phase)
-            assert.spy(start_spy).was.called_with(
-                session.status_animation,
-                "thinking"
-            )
+            assert
+                .spy(start_spy).was
+                .called_with(session.status_animation, "thinking", { detail = nil })
 
             session:_on_session_update({
                 sessionUpdate = "agent_message_chunk",
@@ -913,26 +1023,21 @@ describe("agentic.SessionManager", function()
             })
 
             assert.equal("generating", session._agent_phase)
-            assert.spy(start_spy).was.called_with(
-                session.status_animation,
-                "generating"
-            )
+            assert
+                .spy(start_spy).was
+                .called_with(session.status_animation, "generating", { detail = nil })
         end)
 
         it("shows tool activity while a read tool is in progress", function()
             local start_spy = spy.new(function() end)
             local session = {
+                agent = { provider_config = { name = "Codex ACP" } },
                 is_generating = true,
                 _agent_phase = "thinking",
                 session_state = SessionState:new(),
                 status_animation = { start = start_spy, stop = function() end },
                 permission_manager = {
                     remove_request_by_tool_call_id = spy.new(function() end),
-                },
-                message_writer = {
-                    tool_call_blocks = {},
-                    update_tool_call_block = spy.new(function() end),
-                    write_tool_call_block = spy.new(function() end),
                 },
                 _set_chat_activity = SessionManager._set_chat_activity,
                 _clear_chat_activity = SessionManager._clear_chat_activity,
@@ -946,12 +1051,16 @@ describe("agentic.SessionManager", function()
                 tool_call_id = "tc-read",
                 kind = "read",
                 status = "in_progress",
+                file_path = "/Users/michaelfortunato/projects/neovim-plugins/agentic.nvim/README.md",
             })
 
-            assert.spy(start_spy).was.called_with(
-                session.status_animation,
-                "searching"
-            )
+            assert
+                .spy(start_spy).was
+                .called_with(
+                    session.status_animation,
+                    "searching",
+                    { detail = "README.md" }
+                )
 
             session:_on_tool_call_update({
                 tool_call_id = "tc-read",
@@ -959,10 +1068,9 @@ describe("agentic.SessionManager", function()
                 status = "completed",
             })
 
-            assert.spy(start_spy).was.called_with(
-                session.status_animation,
-                "thinking"
-            )
+            assert
+                .spy(start_spy).was
+                .called_with(session.status_animation, "thinking", { detail = nil })
         end)
     end)
 
@@ -1031,9 +1139,27 @@ describe("agentic.SessionManager", function()
 
                 local new_session_spy = spy.new(function() end)
 
-                local original_messages = { { type = "user", text = "hello" } }
-                local mock_chat_history = {
-                    messages = original_messages,
+                local original_turns = {
+                    {
+                        index = 1,
+                        request = {
+                            kind = "user",
+                            text = "hello",
+                            timestamp = 1,
+                            content = {
+                                { type = "text", text = "hello" },
+                            },
+                            content_nodes = {},
+                        },
+                        response = {
+                            provider_name = "Codex ACP",
+                            nodes = {},
+                        },
+                        result = nil,
+                    },
+                }
+                local saved_persisted_session = {
+                    turns = original_turns,
                     session_id = "old-session",
                 }
 
@@ -1050,12 +1176,14 @@ describe("agentic.SessionManager", function()
                     permission_manager = { clear = permission_clear_spy },
                     status_animation = { stop = status_stop_spy },
                     todo_list = { clear = todo_clear_spy },
+                    session_state = SessionState:new({
+                        persisted_session = saved_persisted_session,
+                    }),
                     widget = { clear = widget_clear_spy },
                     file_list = { clear = file_list_clear_spy },
                     code_selection = { clear = code_selection_clear_spy },
-                    chat_history = mock_chat_history,
                     _is_first_message = false,
-                    _history_to_send = nil,
+                    _restored_turns_to_send = nil,
                     new_session = new_session_spy,
                     switch_provider = SessionManager.switch_provider,
                 } --[[@as agentic.SessionManager]]
@@ -1082,7 +1210,7 @@ describe("agentic.SessionManager", function()
         )
 
         it(
-            "schedules history resend and sets _is_first_message in on_created",
+            "schedules restored-message resend and sets _is_first_message in on_created",
             function()
                 local AgentInstance = require("agentic.acp.agent_instance")
                 local mock_new_agent = {
@@ -1100,9 +1228,27 @@ describe("agentic.SessionManager", function()
                     captured_on_created = opts.on_created
                 end)
 
-                local original_messages = { { type = "user", text = "hello" } }
-                local saved_history = {
-                    messages = original_messages,
+                local original_turns = {
+                    {
+                        index = 1,
+                        request = {
+                            kind = "user",
+                            text = "hello",
+                            timestamp = 1,
+                            content = {
+                                { type = "text", text = "hello" },
+                            },
+                            content_nodes = {},
+                        },
+                        response = {
+                            provider_name = "Codex ACP",
+                            nodes = {},
+                        },
+                        result = nil,
+                    },
+                }
+                local saved_persisted_session = {
+                    turns = original_turns,
                     session_id = "old",
                 }
 
@@ -1120,11 +1266,11 @@ describe("agentic.SessionManager", function()
                     status_animation = { stop = function() end },
                     todo_list = { clear = function() end },
                     session_state = SessionState:new({
-                        chat_history = saved_history,
+                        persisted_session = saved_persisted_session,
                     }),
-                    chat_history = saved_history,
                     _is_first_message = false,
-                    _history_to_send = nil,
+                    _restored_turns_to_send = nil,
+                    _render_window_headers = function() end,
                     new_session = new_session_spy,
                     switch_provider = SessionManager.switch_provider,
                 } --[[@as agentic.SessionManager]]
@@ -1134,17 +1280,18 @@ describe("agentic.SessionManager", function()
                 assert.is_not_nil(captured_on_created)
 
                 local new_timestamp = os.time()
-                session.chat_history = {
-                    messages = {},
+                session.session_state:dispatch(SessionEvents.set_session_meta({
                     session_id = "new",
                     timestamp = new_timestamp,
-                }
+                }))
                 captured_on_created()
 
-                assert.same(original_messages, session.chat_history.messages)
-                assert.equal("new", session.chat_history.session_id)
-                assert.equal(new_timestamp, session.chat_history.timestamp)
-                assert.same(original_messages, session._history_to_send)
+                local persisted =
+                    session.session_state:get_persisted_session_data()
+                assert.same(original_turns, persisted.turns)
+                assert.equal("new", persisted.session_id)
+                assert.equal(new_timestamp, persisted.timestamp)
+                assert.same(original_turns, session._restored_turns_to_send)
                 assert.is_true(session._is_first_message)
             end
         )
@@ -1172,9 +1319,9 @@ describe("agentic.SessionManager", function()
                 permission_manager = { clear = spy.new(function() end) },
                 status_animation = { stop = spy.new(function() end) },
                 todo_list = { clear = spy.new(function() end) },
-                chat_history = { messages = {} },
+                session_state = SessionState:new(),
                 _is_first_message = false,
-                _history_to_send = nil,
+                _restored_turns_to_send = nil,
                 new_session = spy.new(function() end),
                 switch_provider = SessionManager.switch_provider,
             } --[[@as agentic.SessionManager]]
@@ -1221,18 +1368,29 @@ describe("agentic.SessionManager", function()
         --- @param tool_call_blocks table<string, table>
         --- @return agentic.SessionManager
         local function make_session(tool_call_blocks)
+            local session_state = SessionState:new()
+            for tool_call_id, tool_call in pairs(tool_call_blocks) do
+                session_state:dispatch(
+                    SessionEvents.upsert_interaction_tool_call("Codex ACP", {
+                        tool_call_id = tool_call_id,
+                        kind = tool_call.kind,
+                        status = tool_call.status,
+                        file_path = tool_call.file_path,
+                        body = tool_call.body,
+                        diff = tool_call.diff,
+                        content_items = tool_call.content_items,
+                    })
+                )
+            end
+
             return {
-                session_state = SessionState:new(),
+                agent = { provider_config = { name = "Codex ACP" } },
+                session_state = session_state,
                 permission_manager = {
                     remove_request_by_tool_call_id = spy.new(function() end),
                 },
                 status_animation = {
                     start = spy.new(function() end),
-                },
-                message_writer = {
-                    tool_call_blocks = tool_call_blocks,
-                    update_tool_call_block = spy.new(function() end),
-                    write_tool_call_block = spy.new(function() end),
                 },
             } --[[@as agentic.SessionManager]]
         end
@@ -1310,6 +1468,58 @@ describe("agentic.SessionManager", function()
 
             assert.spy(checktime_stub).was.called(0)
             debug_stub:revert()
+        end)
+    end)
+
+    describe("_submit_inline_request", function()
+        it("builds inline submissions with explicit selections", function()
+            local begin_request_spy = spy.new(function() end)
+            local dispatch_spy = spy.new(function() end)
+
+            local session = {
+                session_id = "sess-inline-1",
+                is_generating = false,
+                _session_starting = false,
+                _restored_turns_to_send = nil,
+                _is_first_message = false,
+                session_state = SessionState:new(),
+                agent = {
+                    provider_config = { name = "Codex" },
+                },
+                inline_chat = {
+                    begin_request = begin_request_spy,
+                },
+                _render_window_headers = function() end,
+                _dispatch_submission = dispatch_spy,
+                _submit_inline_request = SessionManager._submit_inline_request,
+            } --[[@as agentic.SessionManager]]
+
+            local accepted = session:_submit_inline_request({
+                prompt = "Refactor the selection",
+                selection = {
+                    lines = { "local value = 1", "return value" },
+                    start_line = 4,
+                    end_line = 5,
+                    file_path = "/tmp/example.lua",
+                    file_type = "lua",
+                },
+                source_bufnr = 10,
+                source_winid = 11,
+            })
+
+            assert.is_true(accepted)
+            assert.spy(begin_request_spy).was.called(1)
+            assert.spy(dispatch_spy).was.called(1)
+
+            local submission = dispatch_spy.calls[1][2]
+            assert.equal("Refactor the selection", submission.input_text)
+            assert.is_not_nil(submission.inline_request)
+            assert.equal("Refactor the selection", submission.prompt[1].text)
+            assert.equal(
+                PromptBuilder.build_inline_instructions(),
+                submission.prompt[2].text
+            )
+            assert.truthy(submission.prompt[4].text:match("<selected_code>"))
         end)
     end)
 end)

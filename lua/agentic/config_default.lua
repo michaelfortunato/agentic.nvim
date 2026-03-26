@@ -51,6 +51,7 @@
 --- @class agentic.UserConfig.Keymaps
 --- @field widget table<string, agentic.UserConfig.KeymapValue>
 --- @field prompt table<string, agentic.UserConfig.KeymapValue>
+--- @field inline table<string, agentic.UserConfig.KeymapValue>
 --- @field diff_preview table<string, string>
 
 --- Window options passed to nvim_set_option_value
@@ -153,6 +154,15 @@
 --- @field on_response_complete? fun(data: agentic.UserConfig.ResponseCompleteData): nil
 --- @field on_session_update? fun(data: agentic.UserConfig.SessionUpdateData): nil
 
+--- @class agentic.UserConfig.Inline
+--- @field enabled boolean
+--- @field prompt_width integer
+--- @field prompt_height integer
+--- @field show_thoughts boolean
+--- @field max_thought_lines integer
+--- @field result_ttl_ms integer
+--- @field progress boolean
+
 --- Control various behaviors and features of the plugin
 --- @class agentic.UserConfig.Settings
 --- @field move_cursor_to_chat_on_submit boolean Automatically move cursor to chat window after submitting a prompt
@@ -175,6 +185,7 @@
 --- @field image_paste? agentic.UserConfig.ImagePaste
 --- @field auto_scroll? agentic.UserConfig.AutoScroll
 --- @field diff_preview? agentic.UserConfig.DiffPreview
+--- @field inline? agentic.UserConfig.Inline
 --- @field hooks? agentic.UserConfig.Hooks
 --- @field headers? agentic.UserConfig.Headers
 --- @field settings? agentic.UserConfig.Settings
@@ -194,6 +205,7 @@
 --- @field image_paste agentic.UserConfig.ImagePaste
 --- @field auto_scroll agentic.UserConfig.AutoScroll
 --- @field diff_preview agentic.UserConfig.DiffPreview
+--- @field inline agentic.UserConfig.Inline
 --- @field hooks agentic.UserConfig.Hooks
 --- @field headers agentic.UserConfig.Headers
 --- @field settings agentic.UserConfig.Settings
@@ -335,7 +347,10 @@ local ConfigDefault = {
         --- Keys bindings for the prompt buffer
         prompt = {
             submit = {
-                "<CR>",
+                {
+                    "<CR>",
+                    mode = { "i", "n" },
+                },
                 {
                     "<C-s>",
                     mode = { "i", "n", "v" },
@@ -346,6 +361,15 @@ local ConfigDefault = {
                 {
                     "<C-v>", -- Same as Claude-code in insert mode
                     mode = { "i" },
+                },
+            },
+        },
+
+        inline = {
+            open = {
+                {
+                    "<C-S-k>",
+                    mode = { "x" },
                 },
             },
         },
@@ -409,6 +433,16 @@ local ConfigDefault = {
         split_width_ratio = 0.36,
         split_min_width = 44,
         split_max_width = 88,
+    },
+
+    inline = {
+        enabled = true,
+        prompt_width = 56,
+        prompt_height = 1,
+        show_thoughts = true,
+        max_thought_lines = 6,
+        result_ttl_ms = 8000,
+        progress = true,
     },
 
     hooks = {

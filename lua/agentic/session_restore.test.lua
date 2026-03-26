@@ -4,14 +4,15 @@ local spy = require("tests.helpers.spy")
 describe("SessionRestore", function()
     --- @type agentic.SessionRestore
     local SessionRestore
-    local ChatHistory
+    local PersistedSession
+    local InteractionModel
     local SessionRegistry
     local Logger
 
     --- @type TestStub
-    local chat_history_load_stub
+    local persisted_session_load_stub
     --- @type TestStub
-    local chat_history_list_stub
+    local persisted_session_list_stub
     --- @type TestStub
     local session_registry_stub
     --- @type TestStub
@@ -32,34 +33,61 @@ describe("SessionRestore", function()
         },
     }
 
-    local mock_history = {
+    local mock_persisted_session = {
         session_id = "restored-session",
-        messages = { { type = "user", text = "Previous chat" } },
+        turns = {
+            {
+                index = 1,
+                request = {
+                    kind = "user",
+                    text = "Previous chat",
+                    timestamp = 1,
+                    content = {
+                        { type = "text", text = "Previous chat" },
+                    },
+                    content_nodes = {},
+                },
+                response = {
+                    provider_name = "Codex ACP",
+                    nodes = {},
+                },
+                result = nil,
+            },
+        },
     }
 
     local function create_mock_session(opts)
         opts = opts or {}
+        local turns = opts.turns or {}
         return {
             session_id = opts.session_id or "current-session",
-            chat_history = opts.chat_history or { messages = {} },
+            session_state = {
+                get_state = function()
+                    return {
+                        interaction = {
+                            turns = vim.deepcopy(turns),
+                        },
+                    }
+                end,
+            },
             agent = { cancel_session = spy.new(function() end) },
             widget = {
                 clear = spy.new(function() end),
                 show = spy.new(function() end),
             },
-            restore_from_history = spy.new(function() end),
+            restore_session_data = spy.new(function() end),
         }
     end
 
     local function setup_list_stub(sessions)
-        chat_history_list_stub:invokes(function(callback)
+        persisted_session_list_stub:invokes(function(callback)
             callback(sessions or test_sessions)
         end)
     end
 
-    local function setup_load_stub(history, err)
-        chat_history_load_stub:invokes(function(_sid, callback)
-            callback(history, err)
+    local function setup_load_stub(persisted_session, err)
+        persisted_session_load_stub:invokes(function(_sid, callback)
+            callback(persisted_session, err)
         end)
     end
 
@@ -77,17 +105,20 @@ describe("SessionRestore", function()
 
     before_each(function()
         package.loaded["agentic.session_restore"] = nil
-        package.loaded["agentic.ui.chat_history"] = nil
+        package.loaded["agentic.session.persisted_session"] = nil
+        package.loaded["agentic.session.interaction_model"] = nil
         package.loaded["agentic.session_registry"] = nil
         package.loaded["agentic.utils.logger"] = nil
 
         SessionRestore = require("agentic.session_restore")
-        ChatHistory = require("agentic.ui.chat_history")
+        PersistedSession = require("agentic.session.persisted_session")
+        InteractionModel = require("agentic.session.interaction_model")
         SessionRegistry = require("agentic.session_registry")
         Logger = require("agentic.utils.logger")
 
-        chat_history_load_stub = spy.stub(ChatHistory, "load")
-        chat_history_list_stub = spy.stub(ChatHistory, "list_sessions")
+        persisted_session_load_stub = spy.stub(PersistedSession, "load")
+        persisted_session_list_stub =
+            spy.stub(PersistedSession, "list_sessions")
         session_registry_stub =
             spy.stub(SessionRegistry, "get_session_for_tab_page")
         logger_notify_stub = spy.stub(Logger, "notify")
@@ -95,8 +126,8 @@ describe("SessionRestore", function()
     end)
 
     after_each(function()
-        chat_history_load_stub:revert()
-        chat_history_list_stub:revert()
+        persisted_session_load_stub:revert()
+        persisted_session_list_stub:revert()
         session_registry_stub:revert()
         logger_notify_stub:revert()
         vim_ui_select_stub:revert()
@@ -149,7 +180,7 @@ describe("SessionRestore", function()
             local callback = select_session(1)
             callback(nil)
 
-            assert.spy(chat_history_load_stub).was.called(0)
+            assert.spy(persisted_session_load_stub).was.called(0)
         end)
     end)
 
@@ -157,7 +188,7 @@ describe("SessionRestore", function()
         it("restores directly with reuse_session=true", function()
             local mock_session = create_mock_session()
             setup_list_stub()
-            setup_load_stub(mock_history)
+            setup_load_stub(mock_persisted_session)
             setup_registry_stub(mock_session)
 
             SessionRestore.show_picker(1, nil)
@@ -167,24 +198,24 @@ describe("SessionRestore", function()
 
             assert.spy(mock_session.agent.cancel_session).was.called(0)
             assert.spy(mock_session.widget.clear).was.called(0)
-            assert.spy(mock_session.restore_from_history).was.called(1)
+            assert.spy(mock_session.restore_session_data).was.called(1)
 
-            local restore_call = mock_session.restore_from_history.calls[1]
-            assert.equal(mock_history, restore_call[2])
+            local restore_call = mock_session.restore_session_data.calls[1]
+            assert.equal(mock_persisted_session, restore_call[2])
             assert.is_true(restore_call[3].reuse_session)
             assert.spy(mock_session.widget.show).was.called(1)
         end)
     end)
 
     describe("restore with conflict", function()
-        local function session_with_messages()
+        local function session_with_content()
             return create_mock_session({
-                chat_history = { messages = { { type = "user" } } },
+                turns = vim.deepcopy(mock_persisted_session.turns),
             })
         end
 
-        it("prompts user when current session has messages", function()
-            local mock_session = session_with_messages()
+        it("prompts user when current session has content", function()
+            local mock_session = session_with_content()
             setup_list_stub()
 
             SessionRestore.show_picker(
@@ -199,12 +230,12 @@ describe("SessionRestore", function()
 
             local conflict_opts = vim_ui_select_stub.calls[2][2]
             assert.truthy(
-                conflict_opts.prompt:match("Current session has messages")
+                conflict_opts.prompt:match("Current session has content")
             )
         end)
 
         it("cancels restore when user chooses Cancel", function()
-            local mock_session = session_with_messages()
+            local mock_session = session_with_content()
             setup_list_stub()
 
             SessionRestore.show_picker(
@@ -218,15 +249,15 @@ describe("SessionRestore", function()
             local conflict_callback = vim_ui_select_stub.calls[2][3]
             conflict_callback("Cancel")
 
-            assert.spy(chat_history_load_stub).was.called(0)
+            assert.spy(persisted_session_load_stub).was.called(0)
         end)
 
         it(
             "clears session and restores with reuse_session=false when confirmed",
             function()
-                local mock_session = session_with_messages()
+                local mock_session = session_with_content()
                 setup_list_stub()
-                setup_load_stub(mock_history)
+                setup_load_stub(mock_persisted_session)
                 setup_registry_stub(mock_session)
 
                 SessionRestore.show_picker(
@@ -243,7 +274,7 @@ describe("SessionRestore", function()
                 assert.spy(mock_session.agent.cancel_session).was.called(1)
                 assert.spy(mock_session.widget.clear).was.called(1)
 
-                local restore_call = mock_session.restore_from_history.calls[1]
+                local restore_call = mock_session.restore_session_data.calls[1]
                 assert.is_false(restore_call[3].reuse_session)
             end
         )
@@ -297,7 +328,17 @@ describe("SessionRestore", function()
         it("detects no conflict when session_id is nil", function()
             local session = {
                 session_id = nil,
-                chat_history = { messages = { { type = "user" } } },
+                session_state = {
+                    get_state = function()
+                        return {
+                            interaction = {
+                                turns = vim.deepcopy(
+                                    mock_persisted_session.turns
+                                ),
+                            },
+                        }
+                    end,
+                },
             }
             setup_list_stub()
 
@@ -312,8 +353,8 @@ describe("SessionRestore", function()
             assert.spy(vim_ui_select_stub).was.called(1)
         end)
 
-        it("detects no conflict when chat_history is nil", function()
-            local session = { session_id = "current", chat_history = nil }
+        it("detects no conflict when session_state is nil", function()
+            local session = { session_id = "current", session_state = nil }
             setup_list_stub()
 
             SessionRestore.show_picker(
@@ -327,59 +368,22 @@ describe("SessionRestore", function()
             assert.spy(vim_ui_select_stub).was.called(1)
         end)
 
-        it("detects no conflict when messages array is empty", function()
-            local session =
-                { session_id = "current", chat_history = { messages = {} } }
-            setup_list_stub()
-
-            SessionRestore.show_picker(
-                1,
-                session --[[@as agentic.SessionManager]]
-            )
-
-            local callback = select_session(1)
-            callback({ session_id = "session-1" })
-
-            assert.spy(vim_ui_select_stub).was.called(1)
-        end)
-    end)
-
-    describe("replay_messages", function()
-        it("replays user and agent messages as separate transcript blocks", function()
-            local writer = {
-                begin_turn = spy.new(function() end),
-                write_message = spy.new(function() end),
-                write_message_chunk = spy.new(function() end),
-                write_tool_call_block = spy.new(function() end),
-            }
-
-            SessionRestore.replay_messages(writer, {
-                {
-                    type = "user",
-                    text = "hi",
-                    timestamp = 1711410099,
-                    provider_name = "Codex ACP",
-                },
-                {
-                    type = "agent",
-                    text = "hello",
-                    provider_name = "Codex ACP",
-                },
+        it("detects no conflict when turns array is empty", function()
+            local session = create_mock_session({
+                session_id = "current",
+                turns = {},
             })
+            setup_list_stub()
 
-            assert.spy(writer.begin_turn).was.called(1)
+            SessionRestore.show_picker(
+                1,
+                session --[[@as agentic.SessionManager]]
+            )
 
-            local user_message = writer.write_message.calls[1][2]
-            local user_lines =
-                vim.split(user_message.content.text, "\n", { plain = true })
-            assert.truthy(vim.startswith(user_lines[1], "User · "))
-            assert.equal("hi", user_lines[2])
-            assert.equal(2, #user_lines)
+            local callback = select_session(1)
+            callback({ session_id = "session-1" })
 
-            local agent_message = writer.write_message.calls[2][2]
-            assert.equal("hello", agent_message.content.text)
-            assert.is_true(agent_message.is_agent_reply)
-            assert.equal("Codex ACP", agent_message.provider_name)
+            assert.spy(vim_ui_select_stub).was.called(1)
         end)
     end)
 end)

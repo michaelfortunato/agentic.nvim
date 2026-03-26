@@ -1,3 +1,4 @@
+--- @diagnostic disable: invisible
 local assert = require("tests.helpers.assert")
 local spy = require("tests.helpers.spy")
 
@@ -349,14 +350,109 @@ describe("FilePicker:request_completion_items", function()
     end)
 end)
 
-describe("Blink file picker source", function()
-    local source = BlinkSource.new({})
+describe("FilePicker mention helpers", function()
+    --- @type agentic.ui.FilePicker
     local picker
+    --- @type integer
     local bufnr
 
     before_each(function()
         bufnr = vim.api.nvim_create_buf(false, true)
         picker = FilePicker:new(bufnr) --[[@as agentic.ui.FilePicker]]
+    end)
+
+    after_each(function()
+        if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+            vim.api.nvim_buf_delete(bufnr, { force = true })
+        end
+    end)
+
+    it("resolves mentioned files from prompt text", function()
+        local file_paths = picker:resolve_mentioned_file_paths(table.concat({
+            "review @lua/agentic/ui/file_picker.lua",
+            "skip email@example.com",
+            "@lua/agentic/ui/file_picker.lua",
+            "@does/not/exist.lua",
+        }, " "))
+
+        assert.equal(1, #file_paths)
+        assert.truthy(file_paths[1]:match("lua/agentic/ui/file_picker%.lua$"))
+    end)
+
+    it("manually shows the blink source for active @ mentions", function()
+        local show_spy = spy.new(function() end)
+
+        picker._get_blink = function()
+            return { show = show_spy }
+        end
+        picker._is_blink_menu_open = function()
+            return false
+        end
+
+        picker:_show_mention_completion_if_needed("review @main", 12)
+
+        assert.spy(show_spy).was.called(1)
+        assert.same({ providers = { "agentic_files" } }, show_spy.calls[1][1])
+    end)
+
+    it("does not manually show blink outside an @ mention", function()
+        local show_spy = spy.new(function() end)
+
+        picker._get_blink = function()
+            return { show = show_spy }
+        end
+        picker._is_blink_menu_open = function()
+            return false
+        end
+
+        picker:_show_mention_completion_if_needed("email@example.com", 17)
+
+        assert.spy(show_spy).was.called(0)
+    end)
+
+    it("skips auto-show once after a completion accept", function()
+        local show_spy = spy.new(function() end)
+
+        picker._get_blink = function()
+            return { show = show_spy }
+        end
+        picker._is_blink_menu_open = function()
+            return false
+        end
+
+        picker:skip_next_auto_show()
+        picker:_show_mention_completion_if_needed("review @main", 12)
+        picker:_show_mention_completion_if_needed("review @main", 12)
+
+        assert.spy(show_spy).was.called(1)
+    end)
+
+    it("notifies when a selected mention resolves to a file", function()
+        local selected_path
+        local root = picker:_resolve_scan_root()
+
+        picker._on_file_selected = function(file_path)
+            selected_path = file_path
+        end
+
+        picker:handle_file_selected("lua/agentic/ui/file_picker.lua")
+
+        assert.equal(root .. "/lua/agentic/ui/file_picker.lua", selected_path)
+    end)
+end)
+
+describe("Blink file picker source", function()
+    local source = BlinkSource.new({})
+    local picker
+    local bufnr
+    local on_select_spy
+
+    before_each(function()
+        bufnr = vim.api.nvim_create_buf(false, true)
+        on_select_spy = spy.new(function() end)
+        picker = FilePicker:new(bufnr, {
+            on_file_selected = on_select_spy --[[@as fun(file_path: string)]],
+        }) --[[@as agentic.ui.FilePicker]]
         vim.bo[bufnr].filetype = "AgenticInput"
         picker:_store_files(picker:_resolve_scan_root(), {
             {
@@ -405,5 +501,28 @@ describe("Blink file picker source", function()
         end)
 
         assert.same({}, response.items)
+    end)
+
+    it("adds the selected file to attached files on accept", function()
+        local callback_spy = spy.new(function() end)
+        local default_impl_spy = spy.new(function() end)
+        local skip_auto_show_spy = spy.new(function() end)
+        picker.skip_next_auto_show = skip_auto_show_spy
+
+        source:execute({
+            bufnr = bufnr,
+            line = "@lua/agentic/ui/file_picker.lua",
+            cursor = { 1, 31 },
+        }, {
+            data = { path = "lua/agentic/ui/file_picker.lua" },
+        }, callback_spy --[[@as function]], default_impl_spy --[[@as function]])
+
+        assert.spy(skip_auto_show_spy).was.called(1)
+        assert.spy(default_impl_spy).was.called(1)
+        assert.spy(callback_spy).was.called(1)
+        assert.spy(on_select_spy).was.called(1)
+        assert.truthy(
+            on_select_spy.calls[1][1]:match("lua/agentic/ui/file_picker%.lua$")
+        )
     end)
 end)
