@@ -173,7 +173,7 @@ function Theme.setup()
         { Theme.HL_GROUPS.CARD_TITLE, build_derived_highlight({ "Normal", "Title" }, { bold = true }, "Normal") },
         { Theme.HL_GROUPS.CARD_BODY, build_link({ "Normal", "NormalFloat" }, "Normal") },
         { Theme.HL_GROUPS.CARD_DETAIL, build_link({ "Comment", "Folded" }, "Comment") },
-        { Theme.HL_GROUPS.INLINE_FADE, { blend = 35 } },
+        { Theme.HL_GROUPS.INLINE_FADE, { blend = 55, italic = true } },
 
         -- Spinner highlights
         { Theme.HL_GROUPS.SPINNER_GENERATING, build_link({ "DiagnosticInfo", "Identifier", "Function" }, "Comment") },

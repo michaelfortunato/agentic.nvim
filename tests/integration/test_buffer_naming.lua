@@ -20,7 +20,7 @@ describe("Buffer Naming", function()
             [[
 (function()
     local tab_id = vim.api.nvim_get_current_tabpage()
-    local session = require("agentic.session_registry").sessions[tab_id]
+    local session = require("agentic.session_registry").get_current_session(tab_id)
     return vim.api.nvim_buf_get_name(session.widget.buf_nrs.%s)
 end)()
 ]],
@@ -40,7 +40,7 @@ end)()
         assert.is_true(vim.startswith(basename, "󰻞 Agentic Chat"))
     end)
 
-    it("adds tab suffix for multiple instances", function()
+    it("adds a unique per-session suffix for multiple instances", function()
         child.lua([[ require("agentic").toggle() ]])
         child.flush()
 
@@ -52,13 +52,10 @@ end)()
 
         local tab2_basename = get_panel_basename("input")
 
-        -- First instance starts with title (no tab suffix)
         assert.is_true(vim.startswith(tab1_basename, "󰦨 Prompt"))
-        assert.is_nil(tab1_basename:match("%(Tab %d+%)"))
-
-        -- Second instance has visible "(Tab N)" suffix
         assert.is_true(vim.startswith(tab2_basename, "󰦨 Prompt"))
-        assert.is_not_nil(tab2_basename:match("%(Tab %d+%)"))
+        assert.is_not_nil(tab1_basename:match("#%d+"))
+        assert.is_not_nil(tab2_basename:match("#%d+"))
 
         -- Names are unique
         assert.is_not.equal(tab1_basename, tab2_basename)

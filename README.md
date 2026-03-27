@@ -697,7 +697,7 @@ range to the active ACP session as structured selection context.
       prompt_height = 1,
       show_thoughts = true,
       max_thought_lines = 6,
-      result_ttl_ms = 8000,
+      result_ttl_ms = 2500,
       progress = true,
     },
   },
@@ -734,7 +734,7 @@ before you accept or reject them. You can configure the diff preview layout:
 
 **Navigation:**
 
-Use `]c` and `[c` to navigate between diff hunks, `m` and `n` to accept or reject the nearest hunk, and `M` and `N` to accept or reject the whole diff by default.
+Use `]c` and `[c` to navigate between diff hunks, `m` and `n` to accept or reject the nearest hunk, and `M` and `N` to accept-all or reject-all the whole diff by default.
 
 All six review keys are configurable under `keymaps.diff_preview`.
 
@@ -927,7 +927,7 @@ Agentic.nvim uses custom highlight groups that you can override to match your
 colorscheme.
 
 ```lua
-vim.api.nvim_set_hl(0, "AgenticInlineFade", { blend = 45 })
+vim.api.nvim_set_hl(0, "AgenticInlineFade", { blend = 55, italic = true })
 vim.api.nvim_set_hl(0, "AgenticChunkBoundary", { underline = true })
 ```
 
@@ -945,7 +945,7 @@ vim.api.nvim_set_hl(0, "AgenticChunkBoundary", { underline = true })
 | `AgenticCodeBlockFence`  | The left border decoration on tool calls | Links to `Directory`                |
 | `AgenticTitle`           | Window titles in sidebar                 | `bg=#2787b0, fg=#000000, bold=true` |
 | `AgenticChunkBoundary`   | Debug-only merged chunk edge marker      | Links to `DiagnosticHint` + underline |
-| `AgenticInlineFade`      | Fade layer applied to inline extmark UI  | `blend=35`                          |
+| `AgenticInlineFade`      | Fade layer applied to inline extmark UI  | `blend=55, italic=true`             |
 
 If any of these highlight exists, Agentic will use it instead of creating new
 ones.

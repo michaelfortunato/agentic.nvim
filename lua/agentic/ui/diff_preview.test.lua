@@ -7,6 +7,11 @@ local HunkNavigation = require("agentic.ui.hunk_navigation")
 local Logger = require("agentic.utils.logger")
 
 describe("diff_preview", function()
+    --- @param predicate fun(): boolean
+    local function wait_for(predicate)
+        assert.is_true(vim.wait(100, predicate))
+    end
+
     describe("show_diff", function()
         local read_stub
         local get_winid_spy
@@ -98,6 +103,41 @@ describe("diff_preview", function()
                 vim.api.nvim_buf_delete(file_bufnr, { force = true })
             end
         )
+
+        it("does not warn when an exact inline preview is available", function()
+            local file_path = vim.fn.tempname() .. ".lua"
+            local file_bufnr = vim.api.nvim_create_buf(true, false)
+            vim.api.nvim_win_set_buf(vim.api.nvim_get_current_win(), file_bufnr)
+            vim.api.nvim_buf_set_name(file_bufnr, file_path)
+            vim.api.nvim_buf_set_lines(file_bufnr, 0, -1, false, {
+                "local x = 1",
+                "print(x)",
+                "",
+            })
+
+            DiffPreview.show_diff({
+                file_path = file_path,
+                diff = {
+                    old = { "local x = 1", "print(x)", "" },
+                    new = { "local x = 2", "print(x)", "" },
+                },
+                get_winid = get_winid_spy --[[@as function]],
+            })
+
+            local diff_extmarks = vim.api.nvim_buf_get_extmarks(
+                file_bufnr,
+                HunkNavigation.NS_DIFF,
+                0,
+                -1,
+                { details = true }
+            )
+
+            assert.truthy(#diff_extmarks > 0)
+            assert.spy(notify_spy).was.called(0)
+
+            DiffPreview.clear_diff(file_bufnr)
+            vim.api.nvim_buf_delete(file_bufnr, { force = true })
+        end)
 
         it(
             "silently skips diff when both old and new are empty (new file Write tool)",
@@ -384,8 +424,8 @@ describe("diff_preview", function()
                     end, global_hint_segments),
                     ""
                 )
-                assert.truthy(global_text:find("M yes-all", 1, true))
-                assert.truthy(global_text:find("N no-all", 1, true))
+                assert.truthy(global_text:find("M accept-all", 1, true))
+                assert.truthy(global_text:find("N reject-all", 1, true))
 
                 local footer_text = nil
                 for _, mark in ipairs(diff_marks) do
@@ -399,7 +439,7 @@ describe("diff_preview", function()
                             end, footer_segments),
                             ""
                         )
-                        if candidate:find("m yes", 1, true) then
+                        if candidate:find("m accept", 1, true) then
                             footer_text = candidate
                             break
                         end
@@ -408,8 +448,8 @@ describe("diff_preview", function()
 
                 assert.is_not_nil(footer_text)
                 local confirmed_footer_text = footer_text --[[@as string]]
-                assert.truthy(confirmed_footer_text:find("m yes", 1, true))
-                assert.truthy(confirmed_footer_text:find("n no", 1, true))
+                assert.truthy(confirmed_footer_text:find("m accept", 1, true))
+                assert.truthy(confirmed_footer_text:find("n reject", 1, true))
 
                 vim.api.nvim_win_set_cursor(
                     vim.api.nvim_get_current_win(),
@@ -420,6 +460,12 @@ describe("diff_preview", function()
                 accept_all_map.callback()
                 reject_all_map.callback()
 
+                wait_for(function()
+                    return accept_spy.call_count == 1
+                        and reject_spy.call_count == 1
+                        and accept_all_spy.call_count == 1
+                        and reject_all_spy.call_count == 1
+                end)
                 assert.spy(accept_spy).was.called(1)
                 assert.spy(reject_spy).was.called(1)
                 assert.spy(accept_all_spy).was.called(1)
@@ -506,8 +552,8 @@ describe("diff_preview", function()
                     end, global_hint --[[@as table]]),
                     ""
                 )
-                assert.truthy(global_text:find("<leader>YA yes%-all") ~= nil)
-                assert.truthy(global_text:find("<leader>NN no%-all") ~= nil)
+                assert.truthy(global_text:find("<leader>YA accept%-all") ~= nil)
+                assert.truthy(global_text:find("<leader>NN reject%-all") ~= nil)
 
                 local footer_text = nil
                 for _, mark in ipairs(diff_marks) do
@@ -521,7 +567,7 @@ describe("diff_preview", function()
                             end, footer_segments),
                             ""
                         )
-                        if candidate:find("<leader>ya yes", 1, true) then
+                        if candidate:find("<leader>ya accept", 1, true) then
                             footer_text = candidate
                             break
                         end
@@ -531,7 +577,7 @@ describe("diff_preview", function()
                 assert.is_not_nil(footer_text)
                 local confirmed_footer_text = footer_text --[[@as string]]
                 assert.truthy(
-                    confirmed_footer_text:find("<leader>nn no", 1, true)
+                    confirmed_footer_text:find("<leader>nn reject", 1, true)
                 )
 
                 DiffPreview.clear_diff(file_bufnr)
@@ -658,9 +704,9 @@ describe("diff_preview", function()
                             end, footer_segments),
                             ""
                         )
-                        if footer_text:find("m yes", 1, true) then
+                        if footer_text:find("m accept", 1, true) then
                             footer_count = footer_count + 1
-                            assert.truthy(footer_text:find("n no", 1, true))
+                            assert.truthy(footer_text:find("n reject", 1, true))
                         end
                     end
                 end
@@ -753,7 +799,7 @@ describe("diff_preview", function()
                             end, footer_segments),
                             ""
                         )
-                        if footer_text:find("m yes", 1, true) then
+                        if footer_text:find("m accept", 1, true) then
                             remaining_footer_count = remaining_footer_count + 1
                         end
                     end
@@ -765,6 +811,9 @@ describe("diff_preview", function()
                 local accept_map = vim.fn.maparg("m", "n", false, true)
                 accept_map.callback()
 
+                wait_for(function()
+                    return reject_spy.call_count == 1
+                end)
                 assert.spy(accept_spy).was.called(0)
                 assert.spy(reject_spy).was.called(1)
                 assert.same({
@@ -788,7 +837,78 @@ describe("diff_preview", function()
         )
 
         it(
-            "passes m through to builtin marks when the cursor is not adjacent to a hunk",
+            "recenters the next pending hunk after resolving a review hunk",
+            function()
+                local file_path = vim.fn.tempname() .. ".lua"
+                local file_bufnr = vim.api.nvim_create_buf(true, false)
+                local file_lines = {}
+                for line = 1, 80 do
+                    file_lines[#file_lines + 1] =
+                        string.format("local line_%d = %d", line, line)
+                end
+
+                local new_lines = vim.deepcopy(file_lines)
+                new_lines[2] = "local line_2 = 200"
+                new_lines[55] = "local line_55 = 5500"
+
+                read_stub:invokes(function()
+                    return vim.deepcopy(file_lines), nil
+                end)
+
+                vim.api.nvim_win_set_buf(
+                    vim.api.nvim_get_current_win(),
+                    file_bufnr
+                )
+                vim.api.nvim_buf_set_name(file_bufnr, file_path)
+                vim.api.nvim_buf_set_lines(file_bufnr, 0, -1, false, file_lines)
+                vim.api.nvim_win_set_height(vim.api.nvim_get_current_win(), 8)
+
+                local get_scroll_cmd_stub =
+                    spy_module.stub(HunkNavigation, "get_scroll_cmd")
+                get_scroll_cmd_stub:returns("zz")
+                local vim_cmd_spy = spy_module.on(vim, "cmd")
+
+                DiffPreview.show_diff({
+                    file_path = file_path,
+                    diff = {
+                        old = vim.deepcopy(file_lines),
+                        new = new_lines,
+                    },
+                    review_actions = {
+                        on_accept = function() end,
+                        on_reject = function() end,
+                    },
+                    get_winid = get_winid_spy --[[@as function]],
+                })
+
+                get_scroll_cmd_stub:reset()
+                vim_cmd_spy:reset()
+
+                vim.api.nvim_win_set_cursor(
+                    vim.api.nvim_get_current_win(),
+                    { 3, 0 }
+                )
+
+                local accept_map = vim.fn.maparg("m", "n", false, true)
+                accept_map.callback()
+
+                assert.equal(1, get_scroll_cmd_stub.call_count)
+                assert.equal(file_bufnr, get_scroll_cmd_stub.calls[1][1])
+                assert.equal(54, get_scroll_cmd_stub.calls[1][3])
+                assert.equal(56, vim.api.nvim_win_get_cursor(0)[1])
+                assert.equal(1, vim_cmd_spy.call_count)
+                assert.equal("normal! zz", vim_cmd_spy.calls[1][1])
+
+                get_scroll_cmd_stub:revert()
+                vim_cmd_spy:revert()
+                DiffPreview.clear_diff(file_bufnr)
+                vim.api.nvim_buf_delete(file_bufnr, { force = true })
+                os.remove(file_path)
+            end
+        )
+
+        it(
+            "moves to the next pending hunk when the cursor is not adjacent to a review line",
             function()
                 local file_path = vim.fn.tempname() .. ".lua"
                 local file_bufnr = vim.api.nvim_create_buf(true, false)
@@ -796,10 +916,15 @@ describe("diff_preview", function()
                     "local first = 1",
                     "print(first)",
                     "",
+                    "local spacer = 3",
+                    "print(spacer)",
+                    "",
                     "local second = 2",
                     "print(second)",
                     "",
                 }
+                local accept_spy = spy_module.new(function() end)
+                local reject_spy = spy_module.new(function() end)
 
                 read_stub:invokes(function()
                     return vim.deepcopy(file_lines), nil
@@ -820,36 +945,194 @@ describe("diff_preview", function()
                             "local first = 10",
                             "print(first)",
                             "",
+                            "local spacer = 3",
+                            "print(spacer)",
+                            "",
                             "local second = 20",
                             "print(second)",
                             "",
                         },
                     },
                     review_actions = {
-                        on_accept = function() end,
-                        on_reject = function() end,
+                        on_accept = function()
+                            accept_spy()
+                        end,
+                        on_reject = function()
+                            reject_spy()
+                        end,
                     },
                     get_winid = get_winid_spy --[[@as function]],
                 })
 
                 vim.api.nvim_win_set_cursor(
                     vim.api.nvim_get_current_win(),
-                    { 6, 0 }
-                )
-                vim.api.nvim_feedkeys(
-                    vim.api.nvim_replace_termcodes("ma", true, false, true),
-                    "xt",
-                    false
+                    { 5, 0 }
                 )
 
-                local mark_pos = vim.fn.getpos("'a")
-                assert.equal(6, mark_pos[2])
+                local accept_map = vim.fn.maparg("m", "n", false, true)
+                accept_map.callback()
+
+                assert.spy(accept_spy).was.called(0)
+                assert.spy(reject_spy).was.called(0)
+                assert.equal(7, vim.api.nvim_win_get_cursor(0)[1])
 
                 DiffPreview.clear_diff(file_bufnr)
                 vim.api.nvim_buf_delete(file_bufnr, { force = true })
                 os.remove(file_path)
             end
         )
+
+        it(
+            "teleports m and n from widget buffers into the active review hunk",
+            function()
+                local file_path = vim.fn.tempname() .. ".lua"
+                local file_bufnr = vim.api.nvim_create_buf(true, false)
+                local widget_bufnr = vim.api.nvim_create_buf(false, true)
+                local file_lines = {
+                    "local first = 1",
+                    "print(first)",
+                    "",
+                    "local spacer = 3",
+                    "print(spacer)",
+                    "",
+                    "local second = 2",
+                    "print(second)",
+                    "",
+                }
+                local accept_spy = spy_module.new(function() end)
+                local reject_spy = spy_module.new(function() end)
+
+                read_stub:invokes(function()
+                    return vim.deepcopy(file_lines), nil
+                end)
+
+                local diff_winid = vim.api.nvim_get_current_win()
+                vim.api.nvim_win_set_buf(diff_winid, file_bufnr)
+                vim.api.nvim_buf_set_name(file_bufnr, file_path)
+                vim.api.nvim_buf_set_lines(file_bufnr, 0, -1, false, file_lines)
+
+                vim.cmd("vsplit")
+                local widget_winid = vim.api.nvim_get_current_win()
+                vim.api.nvim_win_set_buf(widget_winid, widget_bufnr)
+                DiffPreview.setup_diff_navigation_keymaps({
+                    chat = widget_bufnr,
+                })
+
+                vim.api.nvim_set_current_win(diff_winid)
+                DiffPreview.show_diff({
+                    file_path = file_path,
+                    diff = {
+                        old = vim.deepcopy(file_lines),
+                        new = {
+                            "local first = 10",
+                            "print(first)",
+                            "",
+                            "local spacer = 3",
+                            "print(spacer)",
+                            "",
+                            "local second = 20",
+                            "print(second)",
+                            "",
+                        },
+                    },
+                    review_actions = {
+                        on_accept = function()
+                            accept_spy()
+                        end,
+                        on_reject = function()
+                            reject_spy()
+                        end,
+                    },
+                    get_winid = get_winid_spy --[[@as function]],
+                })
+
+                local accept_map = vim.api.nvim_buf_call(
+                    widget_bufnr,
+                    function()
+                        return vim.fn.maparg("m", "n", false, true)
+                    end
+                )
+                local reject_map = vim.api.nvim_buf_call(
+                    widget_bufnr,
+                    function()
+                        return vim.fn.maparg("n", "n", false, true)
+                    end
+                )
+
+                vim.api.nvim_win_set_cursor(diff_winid, { 5, 0 })
+                vim.api.nvim_set_current_win(widget_winid)
+                accept_map.callback()
+
+                assert.spy(accept_spy).was.called(0)
+                assert.spy(reject_spy).was.called(0)
+                assert.equal(diff_winid, vim.api.nvim_get_current_win())
+                assert.equal(7, vim.api.nvim_win_get_cursor(diff_winid)[1])
+
+                vim.api.nvim_win_set_cursor(diff_winid, { 5, 0 })
+                vim.api.nvim_set_current_win(widget_winid)
+                reject_map.callback()
+
+                assert.spy(accept_spy).was.called(0)
+                assert.spy(reject_spy).was.called(0)
+                assert.equal(diff_winid, vim.api.nvim_get_current_win())
+                assert.equal(7, vim.api.nvim_win_get_cursor(diff_winid)[1])
+
+                DiffPreview.clear_diff(file_bufnr)
+                vim.cmd("only")
+                vim.api.nvim_buf_delete(widget_bufnr, { force = true })
+                vim.api.nvim_buf_delete(file_bufnr, { force = true })
+                os.remove(file_path)
+            end
+        )
+
+        it("notifies when all hunks are reviewed via acceptance", function()
+            local file_path = vim.fn.tempname() .. ".lua"
+            local file_bufnr = vim.api.nvim_create_buf(true, false)
+            local accept_spy = spy_module.new(function() end)
+
+            vim.api.nvim_win_set_buf(vim.api.nvim_get_current_win(), file_bufnr)
+            vim.api.nvim_buf_set_name(file_bufnr, file_path)
+            vim.api.nvim_buf_set_lines(file_bufnr, 0, -1, false, {
+                "local x = 1",
+                "print(x)",
+                "",
+            })
+
+            DiffPreview.show_diff({
+                file_path = file_path,
+                diff = {
+                    old = { "local x = 1", "print(x)", "" },
+                    new = { "local x = 2", "print(x)", "" },
+                },
+                review_actions = {
+                    on_accept = function()
+                        accept_spy()
+                    end,
+                    on_reject = function() end,
+                },
+                get_winid = get_winid_spy --[[@as function]],
+            })
+
+            notify_spy:reset()
+
+            vim.api.nvim_win_set_cursor(
+                vim.api.nvim_get_current_win(),
+                { 2, 0 }
+            )
+
+            local accept_map = vim.fn.maparg("m", "n", false, true)
+            accept_map.callback()
+
+            wait_for(function()
+                return accept_spy.call_count == 1 and notify_spy.call_count == 1
+            end)
+            assert.equal("All hunks reviewed", notify_spy.calls[1][1])
+            assert.equal(vim.log.levels.INFO, notify_spy.calls[1][2])
+
+            DiffPreview.clear_diff(file_bufnr)
+            vim.api.nvim_buf_delete(file_bufnr, { force = true })
+            os.remove(file_path)
+        end)
     end)
 
     describe("clear_diff", function()

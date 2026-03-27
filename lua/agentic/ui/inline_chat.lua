@@ -46,6 +46,7 @@ local PROGRESS_PERCENT = {
 --- @field thought_text string
 --- @field message_text string
 --- @field tool_label? string
+--- @field overlay_hidden boolean
 --- @field progress_id? integer
 
 --- @class agentic.ui.InlineChat.ThreadTurn
@@ -57,6 +58,7 @@ local PROGRESS_PERCENT = {
 --- @field thought_text string
 --- @field message_text string
 --- @field tool_label? string
+--- @field overlay_hidden boolean
 --- @field created_at integer
 --- @field updated_at integer
 
@@ -332,6 +334,7 @@ local function create_thread_turn(request, selection)
         thought_text = request.thought_text,
         message_text = request.message_text,
         tool_label = request.tool_label,
+        overlay_hidden = request.overlay_hidden,
         created_at = timestamp,
         updated_at = timestamp,
     }
@@ -339,15 +342,11 @@ local function create_thread_turn(request, selection)
     return turn
 end
 
---- @param lines string[]
---- @param limit integer
---- @return string[]
-local function tail_lines(lines, limit)
-    if #lines <= limit then
-        return lines
-    end
-
-    return vim.list_slice(lines, #lines - limit + 1, #lines)
+--- @param text string|nil
+--- @return string|nil
+local function latest_line(text)
+    local lines = split_lines(text)
+    return lines[#lines]
 end
 
 --- @param text string
@@ -587,6 +586,7 @@ function InlineChat:_build_request_state(request)
         thought_text = "",
         message_text = "",
         tool_label = nil,
+        overlay_hidden = false,
         progress_id = nil,
     }
 
@@ -688,7 +688,11 @@ function InlineChat:_submit_prompt()
         source_winid = prompt.source_winid,
     })
 
+    -- Exit insert mode and close the prompt after the submit handler accepts it.
     if accepted then
+        if vim.fn.mode():sub(1, 1) == "i" then
+            vim.cmd.stopinsert()
+        end
         self:_close_prompt(true)
     end
 end
@@ -1001,6 +1005,7 @@ function InlineChat:_sync_thread_history(bufnr, request)
         turn.thought_text = request.thought_text
         turn.message_text = request.message_text
         turn.tool_label = request.tool_label
+        turn.overlay_hidden = request.overlay_hidden
         turn.updated_at = timestamp
     end
 
@@ -1124,6 +1129,7 @@ function InlineChat:queue_request(request)
         queued_request.selection = vim.deepcopy(request.selection)
         queued_request.prompt = request.prompt
         queued_request.config_context = self._get_config_context()
+        queued_request.overlay_hidden = false
     end
 
     queued_request.phase = "busy"
@@ -1262,6 +1268,7 @@ function InlineChat:begin_request(request)
         queued_request.status_text = request.status_text
             or "Starting inline request"
         queued_request.tool_label = nil
+        queued_request.overlay_hidden = false
         runtime_id = self:_get_request_runtime_key(queued_request)
 
         local _, runtime = self:_ensure_thread_runtime(
@@ -1394,6 +1401,21 @@ function InlineChat:handle_permission_request()
     self:_update_progress(request)
 end
 
+function InlineChat:handle_applied_edit()
+    local request = self._active_request
+    if
+        not request
+        or is_terminal_phase(request.phase)
+        or request.overlay_hidden
+    then
+        return
+    end
+
+    request.overlay_hidden = true
+    self:_sync_thread_history(request.source_bufnr, request)
+    self:_clear_thread_overlay(self:_get_request_runtime_key(request))
+end
+
 --- @param response agentic.acp.PromptResponse|nil
 --- @param err table|nil
 function InlineChat:complete(response, err)
@@ -1516,6 +1538,11 @@ function InlineChat:_render_thread(runtime_id)
         return
     end
 
+    if turn.overlay_hidden then
+        self:_clear_thread_overlay(runtime_id)
+        return
+    end
+
     local range =
         self:_get_thread_range(runtime.source_bufnr, runtime.range_extmark_id)
     if not range or range.invalid then
@@ -1550,6 +1577,30 @@ function InlineChat:_render_thread(runtime_id)
     )
 end
 
+--- @param label string
+--- @param text string
+--- @param label_hl string|string[]|nil
+--- @param text_hl string|string[]|nil
+--- @param max_width integer
+--- @return table
+function InlineChat:_build_compact_line(
+    label,
+    text,
+    label_hl,
+    text_hl,
+    max_width
+)
+    local label_text = label .. ": "
+    local available_width =
+        math.max(12, max_width - vim.fn.strdisplaywidth(label_text) - 4)
+
+    return {
+        faded_segment("  ", Theme.HL_GROUPS.REVIEW_BANNER),
+        faded_segment(label_text, label_hl),
+        faded_segment(truncate_text(text, available_width), text_hl),
+    }
+end
+
 --- @param entry agentic.ui.InlineChat.ActiveRequest|agentic.ui.InlineChat.ThreadTurn
 --- @param selection agentic.Selection
 --- @param max_width integer
@@ -1558,10 +1609,15 @@ function InlineChat:_build_virtual_lines(entry, selection, max_width)
     local config_context = entry.config_context
     local status_hl =
         Theme.get_spinner_hl_group(phase_to_spinner_state(entry.phase))
+    local latest_thought = Config.inline.show_thoughts
+            and latest_line(entry.thought_text)
+        or nil
+    local latest_response = latest_line(entry.message_text)
 
     --- @type table[]
     local lines = {
         {
+            faded_segment("  ", Theme.HL_GROUPS.REVIEW_BANNER),
             faded_segment(
                 "[Agentic Inline] ",
                 Theme.HL_GROUPS.REVIEW_BANNER_ACCENT
@@ -1572,71 +1628,78 @@ function InlineChat:_build_virtual_lines(entry, selection, max_width)
             ),
             faded_segment(entry.status_text, status_hl),
         },
-        {
-            faded_segment("Prompt: ", Theme.HL_GROUPS.CARD_TITLE),
-            faded_segment(
-                truncate_text(entry.prompt, max_width),
-                Theme.HL_GROUPS.CARD_BODY
-            ),
-        },
     }
 
-    if config_context and config_context ~= "" then
-        lines[#lines + 1] = {
-            faded_segment("Config: ", Theme.HL_GROUPS.CARD_TITLE),
-            faded_segment(
-                truncate_text(config_context, max_width),
-                Theme.HL_GROUPS.CARD_DETAIL
-            ),
-        }
-    end
+    local detail_line = nil
 
-    if entry.tool_label and entry.tool_label ~= "" then
-        lines[#lines + 1] = {
-            faded_segment("Tool: ", Theme.HL_GROUPS.CARD_TITLE),
-            faded_segment(
-                truncate_text(entry.tool_label, max_width),
-                Theme.HL_GROUPS.CARD_BODY
-            ),
-        }
-    end
-
-    if Config.inline.show_thoughts then
-        local thought_lines = tail_lines(
-            split_lines(entry.thought_text),
-            Config.inline.max_thought_lines
+    if entry.phase == "thinking" and latest_thought then
+        detail_line = self:_build_compact_line(
+            "Thinking",
+            latest_thought,
+            Theme.HL_GROUPS.THOUGHT_TEXT,
+            Theme.HL_GROUPS.THOUGHT_TEXT,
+            max_width
         )
-
-        if #thought_lines > 0 then
-            lines[#lines + 1] = {
-                faded_segment("Thinking:", Theme.HL_GROUPS.THOUGHT_TEXT),
-            }
-
-            for _, line in ipairs(thought_lines) do
-                lines[#lines + 1] = {
-                    faded_segment(
-                        "  " .. truncate_text(line, max_width),
-                        Theme.HL_GROUPS.THOUGHT_TEXT
-                    ),
-                }
-            end
-        end
+    elseif
+        (entry.phase == "tool" or entry.phase == "waiting")
+        and entry.tool_label
+        and entry.tool_label ~= ""
+    then
+        detail_line = self:_build_compact_line(
+            "Tool",
+            entry.tool_label,
+            Theme.HL_GROUPS.REVIEW_BANNER_ACCENT,
+            Theme.HL_GROUPS.ACTIVITY_TEXT,
+            max_width
+        )
+    elseif latest_response then
+        local result_hl = entry.phase == "failed"
+                and Theme.HL_GROUPS.STATUS_FAILED
+            or Theme.HL_GROUPS.REVIEW_BANNER
+        detail_line = self:_build_compact_line(
+            is_terminal_phase(entry.phase) and "Result" or "Response",
+            latest_response,
+            entry.phase == "failed" and Theme.HL_GROUPS.STATUS_FAILED
+                or Theme.HL_GROUPS.REVIEW_BANNER_ACCENT,
+            result_hl,
+            max_width
+        )
+    elseif latest_thought then
+        detail_line = self:_build_compact_line(
+            "Thinking",
+            latest_thought,
+            Theme.HL_GROUPS.THOUGHT_TEXT,
+            Theme.HL_GROUPS.THOUGHT_TEXT,
+            max_width
+        )
+    elseif entry.tool_label and entry.tool_label ~= "" then
+        detail_line = self:_build_compact_line(
+            "Tool",
+            entry.tool_label,
+            Theme.HL_GROUPS.REVIEW_BANNER_ACCENT,
+            Theme.HL_GROUPS.ACTIVITY_TEXT,
+            max_width
+        )
+    elseif entry.prompt ~= "" then
+        detail_line = self:_build_compact_line(
+            "Prompt",
+            entry.prompt,
+            Theme.HL_GROUPS.REVIEW_BANNER_ACCENT,
+            Theme.HL_GROUPS.REVIEW_BANNER,
+            max_width
+        )
+    elseif config_context and config_context ~= "" then
+        detail_line = self:_build_compact_line(
+            "Config",
+            config_context,
+            Theme.HL_GROUPS.REVIEW_BANNER_ACCENT,
+            Theme.HL_GROUPS.REVIEW_BANNER,
+            max_width
+        )
     end
 
-    local response_lines = tail_lines(split_lines(entry.message_text), 4)
-    if #response_lines > 0 then
-        lines[#lines + 1] = {
-            faded_segment("Response:", Theme.HL_GROUPS.CARD_TITLE),
-        }
-
-        for _, line in ipairs(response_lines) do
-            lines[#lines + 1] = {
-                faded_segment(
-                    "  " .. truncate_text(line, max_width),
-                    Theme.HL_GROUPS.CARD_BODY
-                ),
-            }
-        end
+    if detail_line then
+        lines[#lines + 1] = detail_line
     end
 
     return lines

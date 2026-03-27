@@ -221,6 +221,30 @@ function SessionSelectors.get_interaction_session(state)
 end
 
 --- @param state agentic.session.State
+--- @return agentic.acp.PlanEntry[]
+function SessionSelectors.get_latest_plan_entries(state)
+    local turns = state
+        and state.interaction
+        and state.interaction.turns
+        or {}
+
+    for turn_index = #turns, 1, -1 do
+        local turn = turns[turn_index]
+        local response = turn and turn.response or nil
+        local nodes = response and response.nodes or {}
+
+        for node_index = #nodes, 1, -1 do
+            local node = nodes[node_index]
+            if node and node.type == "plan" then
+                return vim.deepcopy(node.entries or {})
+            end
+        end
+    end
+
+    return {}
+end
+
+--- @param state agentic.session.State
 --- @return boolean
 function SessionSelectors.has_interaction_content(state)
     return InteractionModel.has_content(

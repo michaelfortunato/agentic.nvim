@@ -453,7 +453,7 @@ local ConfigDefault = {
         prompt_height = 1,
         show_thoughts = true,
         max_thought_lines = 6,
-        result_ttl_ms = 8000,
+        result_ttl_ms = 2500,
         progress = true,
     },
 

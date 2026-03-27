@@ -18,6 +18,14 @@ local NS_DIFF = M.NS_DIFF
 --- @field saved_keymaps { next?: table, prev?: table } Saved keymaps for restoration
 --- @field anchors_cache integer[]|nil Cached hunk anchor positions (0-indexed line numbers)
 
+--- @class agentic.ui.HunkNavigation.DeletedRange
+--- @field start_line integer
+--- @field end_line integer
+
+--- @class agentic.ui.HunkNavigation.AnchorContext
+--- @field current_index integer
+--- @field is_exactly_on_anchor boolean
+
 --- Module-level state storage (per-buffer)
 --- @type table<number, agentic.ui.HunkNavigation.State>
 local buffer_state = {}
@@ -43,8 +51,58 @@ function M.invalidate_cache(bufnr)
     end
 end
 
+--- @param deleted_positions integer[]
+--- @return integer[] positions
+--- @return agentic.ui.HunkNavigation.DeletedRange[] ranges
+local function group_deleted_positions(deleted_positions)
+    --- @type integer[]
+    local positions = {}
+    --- @type agentic.ui.HunkNavigation.DeletedRange[]
+    local ranges = {}
+    local range_start = nil
+    local prev_line = nil
+
+    for _, line_num in ipairs(deleted_positions) do
+        if range_start == nil then
+            range_start = line_num
+        elseif prev_line ~= nil and line_num > prev_line + 1 then
+            positions[#positions + 1] = range_start
+            ranges[#ranges + 1] = {
+                start_line = range_start,
+                end_line = prev_line,
+            }
+            range_start = line_num
+        end
+
+        prev_line = line_num
+    end
+
+    if range_start ~= nil and prev_line ~= nil then
+        positions[#positions + 1] = range_start
+        ranges[#ranges + 1] = {
+            start_line = range_start,
+            end_line = prev_line,
+        }
+    end
+
+    return positions, ranges
+end
+
+--- @param line_num integer
+--- @param ranges agentic.ui.HunkNavigation.DeletedRange[]
+--- @return boolean
+local function is_within_deleted_ranges(line_num, ranges)
+    for _, range in ipairs(ranges) do
+        if line_num >= range.start_line and line_num <= range.end_line then
+            return true
+        end
+    end
+
+    return false
+end
+
 --- Get all hunk positions (first deleted line per hunk)
---- Falls back to virtual line anchor for pure insertions.
+--- Includes virtual line anchors for insertion-only hunks.
 --- Groups consecutive deleted lines (only returns first line of each group).
 --- @param bufnr number
 --- @return integer[] positions 0-indexed line numbers where hunks begin
@@ -86,22 +144,15 @@ function M._get_hunk_anchors(bufnr)
     end
     table.sort(deleted_positions)
 
-    local positions = {}
-    local prev_line = -2
+    local positions, deleted_ranges = group_deleted_positions(deleted_positions)
 
-    for _, line_num in ipairs(deleted_positions) do
-        if line_num > prev_line + 1 then
-            table.insert(positions, line_num)
+    for anchor in pairs(virt_line_anchors) do
+        if not is_within_deleted_ranges(anchor, deleted_ranges) then
+            positions[#positions + 1] = anchor
         end
-        prev_line = line_num
     end
 
-    if #positions == 0 then
-        for anchor in pairs(virt_line_anchors) do
-            table.insert(positions, anchor)
-        end
-        table.sort(positions)
-    end
+    table.sort(positions)
 
     if #positions == 0 then
         positions = { 0 }
@@ -109,6 +160,34 @@ function M._get_hunk_anchors(bufnr)
 
     state.anchors_cache = positions
     return positions
+end
+
+--- Find next/previous hunk position relative to buffer's cursor position
+--- @param anchors integer[]
+--- @param current_line integer
+--- @return agentic.ui.HunkNavigation.AnchorContext context
+local function get_anchor_context(anchors, current_line)
+    local current_index = -1
+    local is_exactly_on_anchor = false
+
+    for i, anchor in ipairs(anchors) do
+        if anchor == current_line then
+            current_index = i - 1
+            is_exactly_on_anchor = true
+            break
+        elseif anchor < current_line then
+            current_index = i - 1
+        else
+            break
+        end
+    end
+
+    --- @type agentic.ui.HunkNavigation.AnchorContext
+    local context = {
+        current_index = current_index,
+        is_exactly_on_anchor = is_exactly_on_anchor,
+    }
+    return context
 end
 
 --- Find next/previous hunk position relative to buffer's cursor position
@@ -129,26 +208,14 @@ local function find_hunk(bufnr, direction)
     local cursor = vim.api.nvim_win_get_cursor(winid)
     local current_line = cursor[1] - 1 -- 0-indexed
 
-    local current_index = -1
-    local is_exactly_on_anchor = false
-
-    for i, anchor in ipairs(anchors) do
-        if anchor == current_line then
-            current_index = i - 1
-            is_exactly_on_anchor = true
-            break
-        elseif anchor < current_line then
-            current_index = i - 1
-        else
-            break
-        end
-    end
+    local anchor_context = get_anchor_context(anchors, current_line)
+    local current_index = anchor_context.current_index
 
     local new_index
     if direction == "next" then
         new_index = (current_index + 1) % #anchors
     else
-        if is_exactly_on_anchor then
+        if anchor_context.is_exactly_on_anchor then
             new_index = current_index <= 0 and #anchors - 1 or current_index - 1
         else
             new_index = current_index < 0 and #anchors - 1 or current_index
@@ -291,6 +358,37 @@ function M.setup_keymaps(bufnr)
     end, { desc = "Go to previous hunk - Agentic DiffPreview" })
 end
 
+--- @param bufnr number
+--- @param saved_map table|nil
+local function restore_saved_keymap(bufnr, saved_map)
+    if not saved_map or not saved_map.lhs then
+        return
+    end
+
+    local opts = { buffer = bufnr }
+    if saved_map.noremap == 1 then
+        opts.noremap = true
+    end
+    if saved_map.silent == 1 then
+        opts.silent = true
+    end
+    if saved_map.expr == 1 then
+        opts.expr = true
+    end
+    if saved_map.nowait == 1 then
+        opts.nowait = true
+    end
+
+    pcall(
+        BufHelpers.keymap_set,
+        bufnr,
+        "n",
+        saved_map.lhs,
+        saved_map.callback or saved_map.rhs,
+        opts
+    )
+end
+
 --- Restore saved keymaps for buffer
 --- @param bufnr number
 function M.restore_keymaps(bufnr)
@@ -305,30 +403,7 @@ function M.restore_keymaps(bufnr)
 
     if state.saved_keymaps then
         for _, saved_map in pairs(state.saved_keymaps) do
-            if saved_map and saved_map.lhs then
-                local opts = { buffer = bufnr }
-                if saved_map.noremap == 1 then
-                    opts.noremap = true
-                end
-                if saved_map.silent == 1 then
-                    opts.silent = true
-                end
-                if saved_map.expr == 1 then
-                    opts.expr = true
-                end
-                if saved_map.nowait == 1 then
-                    opts.nowait = true
-                end
-
-                pcall(
-                    BufHelpers.keymap_set,
-                    bufnr,
-                    "n",
-                    saved_map.lhs,
-                    saved_map.callback or saved_map.rhs,
-                    opts
-                )
-            end
+            restore_saved_keymap(bufnr, saved_map)
         end
     end
 

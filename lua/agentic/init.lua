@@ -34,7 +34,24 @@ local function show_session_widget(session, opts)
         show_opts.focus_prompt = true
     end
 
+    local invoking_winid = vim.api.nvim_get_current_win()
+    if show_opts.anchor_winid == nil then
+        local current_session =
+            SessionRegistry.find_session_by_buf(vim.api.nvim_get_current_buf())
+        if
+            current_session
+            and current_session.widget
+            and current_session.widget.find_first_editor_window
+        then
+            show_opts.anchor_winid =
+                current_session.widget:find_first_editor_window()
+        else
+            show_opts.anchor_winid = invoking_winid
+        end
+    end
+
     session.widget:show(show_opts)
+    SessionRegistry.set_active_session(session, show_opts.anchor_winid)
 
     if show_opts.prompt_text ~= nil then
         session.widget:set_input_text(show_opts.prompt_text)
@@ -112,6 +129,11 @@ local function handle_chat_command(command_opts)
         return
     end
 
+    if subcommand == "load" then
+        Agentic.load_session()
+        return
+    end
+
     Logger.notify(
         string.format("Unknown AgenticChat subcommand: %s", subcommand),
         vim.log.levels.ERROR
@@ -122,7 +144,7 @@ end
 --- @return string[]
 local function complete_chat_subcommand(arg_lead)
     local matches = {}
-    for _, candidate in ipairs({ "new", "restore" }) do
+    for _, candidate in ipairs({ "new", "restore", "load" }) do
         if arg_lead == "" or candidate:find("^" .. vim.pesc(arg_lead)) then
             matches[#matches + 1] = candidate
         end
@@ -175,7 +197,7 @@ end
 --- Closes the chat widget for the current tab page
 --- Safe to call multiple times
 function Agentic.close()
-    SessionRegistry.get_session_for_tab_page(nil, function(session)
+    SessionRegistry.get_current_session(nil, function(session)
         session.widget:hide()
     end)
 end
@@ -202,7 +224,7 @@ end
 --- Rotates through predefined window layouts for the chat widget
 --- @param layouts agentic.UserConfig.Windows.Position[]|nil
 function Agentic.rotate_layout(layouts)
-    SessionRegistry.get_session_for_tab_page(nil, function(session)
+    SessionRegistry.get_current_session(nil, function(session)
         session.widget:rotate_layout(layouts)
     end)
 end
@@ -334,7 +356,7 @@ end
 --- @param provider_name agentic.UserConfig.ProviderName
 local function apply_provider_switch(provider_name)
     Config.provider = provider_name
-    SessionRegistry.get_session_for_tab_page(nil, function(session)
+    SessionRegistry.get_current_session(nil, function(session)
         session:switch_provider()
     end)
 end
@@ -359,7 +381,7 @@ end
 --- The session remains active and ready for the next prompt
 --- Safe to call multiple times or when no generation is active
 function Agentic.stop_generation()
-    SessionRegistry.get_session_for_tab_page(nil, function(session)
+    SessionRegistry.get_current_session(nil, function(session)
         if session.is_generating then
             session.agent:stop_generation(session.session_id)
             session.permission_manager:clear()
@@ -370,8 +392,36 @@ end
 --- show a selector to restore a previous session
 function Agentic.restore_session()
     local tab_page_id = vim.api.nvim_get_current_tabpage()
-    local current_session = SessionRegistry.sessions[tab_page_id]
+    local current_session =
+        SessionRegistry.find_session_by_buf(vim.api.nvim_get_current_buf())
     SessionRestore.show_picker(tab_page_id, current_session)
+end
+
+function Agentic.load_session()
+    local current_session = SessionRegistry.get_current_session(nil)
+    if not current_session then
+        Logger.notify(
+            "Open or focus a chat widget before loading another live session.",
+            vim.log.levels.INFO
+        )
+        return
+    end
+
+    local shown = SessionRegistry.select_live_session(
+        current_session,
+        function(target_session)
+            if target_session then
+                SessionRegistry.load_session_into_current_widget(target_session)
+            end
+        end
+    )
+
+    if not shown then
+        Logger.notify(
+            "No other live sessions are available in this tab.",
+            vim.log.levels.INFO
+        )
+    end
 end
 
 --- Used to make sure we don't set multiple signal handlers or autocmds, if the user calls setup multiple times
@@ -478,15 +528,14 @@ function Agentic.setup(opts)
         group = cleanup_group,
         callback = function(ev)
             local tab_id = tonumber(ev.match)
-            SessionRegistry.destroy_session(tab_id)
+            SessionRegistry.destroy_sessions_for_tab(tab_id)
         end,
         desc = "Cleanup Agentic processes on tab close",
     })
 
     if Config.image_paste.enabled then
         local function get_current_session()
-            local tab_page_id = vim.api.nvim_get_current_tabpage()
-            return SessionRegistry.sessions[tab_page_id]
+            return SessionRegistry.get_current_session(nil)
         end
 
         local Clipboard = require("agentic.ui.clipboard")

@@ -76,6 +76,42 @@ describe("agentic.acp.ACPClient", function()
         handle_request_stub:revert()
     end)
 
+    it("schedules response callbacks in fast event context", function()
+        local client = make_client()
+        local callback_spy = spy.new(function() end)
+        local captured_callback = nil
+        local in_fast_event_stub = spy.stub(vim, "in_fast_event")
+        local schedule_stub = spy.stub(vim, "schedule")
+
+        in_fast_event_stub:returns(true)
+        schedule_stub:invokes(function(fn)
+            captured_callback = fn
+        end)
+
+        client.callbacks[7] = callback_spy
+
+        client:_handle_message({
+            jsonrpc = "2.0",
+            id = 7,
+            result = {
+                sessionId = "session-1",
+            },
+        })
+
+        assert.spy(schedule_stub).was.called(1)
+        assert.spy(callback_spy).was.called(0)
+        assert.is_not_nil(captured_callback)
+        --- @cast captured_callback fun()
+
+        captured_callback()
+
+        assert.spy(callback_spy).was.called(1)
+        assert.equal("session-1", callback_spy.calls[1][1].sessionId)
+
+        schedule_stub:revert()
+        in_fast_event_stub:revert()
+    end)
+
     it("returns a json-rpc error for unsupported client requests", function()
         local client, send_spy = make_client()
 

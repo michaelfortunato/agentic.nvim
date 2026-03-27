@@ -14,6 +14,8 @@ describe("agentic", function()
     local new_session_stub
     --- @type TestStub|nil
     local show_picker_stub
+    --- @type TestStub|nil
+    local find_session_by_buf_stub
     --- @type integer
     local test_bufnr
 
@@ -70,8 +72,13 @@ describe("agentic", function()
     end)
 
     after_each(function()
-        local tab_page_id = vim.api.nvim_get_current_tabpage()
-        SessionRegistry.sessions[tab_page_id] = nil
+        for key in pairs(SessionRegistry.sessions) do
+            SessionRegistry.sessions[key] = nil
+        end
+
+        for key in pairs(SessionRegistry._window_active_sessions or {}) do
+            SessionRegistry._window_active_sessions[key] = nil
+        end
 
         if get_session_stub then
             get_session_stub:revert()
@@ -86,6 +93,11 @@ describe("agentic", function()
         if show_picker_stub then
             show_picker_stub:revert()
             show_picker_stub = nil
+        end
+
+        if find_session_by_buf_stub then
+            find_session_by_buf_stub:revert()
+            find_session_by_buf_stub = nil
         end
 
         if new_signal_stub then
@@ -162,7 +174,9 @@ describe("agentic", function()
         local session = create_session()
         local tab_page_id = vim.api.nvim_get_current_tabpage()
 
-        SessionRegistry.sessions[tab_page_id] = session
+        find_session_by_buf_stub =
+            spy.stub(SessionRegistry, "find_session_by_buf")
+        find_session_by_buf_stub:returns(session)
         show_picker_stub = spy.stub(SessionRestore, "show_picker")
 
         vim.cmd("AgenticChat restore")

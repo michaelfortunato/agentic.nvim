@@ -24,7 +24,13 @@ end
 --- @param session_id string
 --- @param tab_page_id integer
 --- @param has_conflict boolean
-local function do_restore(session_id, tab_page_id, has_conflict)
+--- @param current_session agentic.SessionManager|nil
+local function do_restore(
+    session_id,
+    tab_page_id,
+    has_conflict,
+    current_session
+)
     PersistedSession.load(session_id, function(history, err)
         if err or not history then
             Logger.notify(
@@ -34,31 +40,38 @@ local function do_restore(session_id, tab_page_id, has_conflict)
             return
         end
 
-        SessionRegistry.get_session_for_tab_page(tab_page_id, function(session)
-            if has_conflict then
-                if session.session_id then
-                    session.agent:cancel_session(session.session_id)
-                    session.widget:clear()
-                end
-            end
+        local session = current_session
+        if session == nil then
+            session = SessionRegistry.new_session(tab_page_id)
+        end
 
-            session:restore_session_data(
-                history,
-                { reuse_session = not has_conflict }
-            )
+        if session == nil then
+            return
+        end
 
-            session.widget:show()
-        end)
+        if has_conflict and session.session_id then
+            session.agent:cancel_session(session.session_id)
+            session.widget:clear()
+        end
+
+        session:restore_session_data(
+            history,
+            { reuse_session = not has_conflict }
+        )
+
+        session.widget:show()
     end)
 end
 
 --- @param session_id string
 --- @param tab_page_id integer
 --- @param has_conflict boolean
+--- @param current_session agentic.SessionManager|nil
 local function restore_with_conflict_check(
     session_id,
     tab_page_id,
-    has_conflict
+    has_conflict,
+    current_session
 )
     if has_conflict then
         Chooser.show({
@@ -68,11 +81,16 @@ local function restore_with_conflict_check(
             prompt = "Current session has content. What would you like to do?",
         }, function(choice)
             if choice == "Clear current session and restore" then
-                do_restore(session_id, tab_page_id, has_conflict)
+                do_restore(
+                    session_id,
+                    tab_page_id,
+                    has_conflict,
+                    current_session
+                )
             end
         end)
     else
-        do_restore(session_id, tab_page_id, has_conflict)
+        do_restore(session_id, tab_page_id, has_conflict, current_session)
     end
 end
 
@@ -107,7 +125,8 @@ function SessionRestore.show_picker(tab_page_id, current_session)
                 restore_with_conflict_check(
                     choice.session_id,
                     tab_page_id,
-                    check_conflict(current_session)
+                    check_conflict(current_session),
+                    current_session
                 )
             end
         end)

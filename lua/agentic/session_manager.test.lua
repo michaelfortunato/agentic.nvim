@@ -25,6 +25,11 @@ describe("agentic.SessionManager", function()
         }))
     end
 
+    --- @param predicate fun(): boolean
+    local function wait_for(predicate)
+        assert.is_true(vim.wait(100, predicate))
+    end
+
     describe("_on_session_update: config_option_update", function()
         --- @type TestSpy
         local render_header_spy
@@ -1020,6 +1025,87 @@ describe("agentic.SessionManager", function()
                 )
             end
         )
+
+        it("clears waiting activity after permission completion", function()
+            local session_state = SessionState:new()
+            local start_spy = spy.new(function() end)
+            local completion_callback = nil
+
+            seed_request(session_state, "edit this")
+            session_state:dispatch(
+                SessionEvents.upsert_interaction_tool_call("Codex ACP", {
+                    tool_call_id = "tc-perm-resume-1",
+                    kind = "edit",
+                    status = "pending",
+                    file_path = "/tmp/demo.lua",
+                    diff = { old = { "a" }, new = { "b" } },
+                })
+            )
+
+            local session = {
+                agent = { provider_config = { name = "Codex ACP" } },
+                session_state = session_state,
+                is_generating = true,
+                _agent_phase = "thinking",
+                status_animation = {
+                    start = start_spy,
+                    stop = function() end,
+                },
+                permission_manager = {
+                    add_request = function(_self, request, callback)
+                        session_state:dispatch(
+                            SessionEvents.enqueue_permission(request, callback)
+                        )
+                        session_state:dispatch(
+                            SessionEvents.show_next_permission()
+                        )
+                        completion_callback = callback
+                    end,
+                },
+                _set_chat_activity = SessionManager._set_chat_activity,
+                _clear_chat_activity = SessionManager._clear_chat_activity,
+                _get_active_tool_activity = SessionManager._get_active_tool_activity,
+                _refresh_chat_activity = SessionManager._refresh_chat_activity,
+                _handle_permission_request = SessionManager._handle_permission_request,
+            } --[[@as agentic.SessionManager]]
+
+            session:_handle_permission_request({
+                toolCall = { toolCallId = "tc-perm-resume-1" },
+                options = {
+                    {
+                        optionId = "allow-once",
+                        name = "Allow once",
+                        kind = "allow_once",
+                    },
+                },
+            }, function() end)
+
+            assert
+                .spy(start_spy).was
+                .called_with(session.status_animation, "waiting", { detail = nil })
+            assert.is_not_nil(completion_callback)
+            --- @cast completion_callback fun(option_id: string|nil)
+            completion_callback("allow-once")
+            session_state:dispatch(SessionEvents.complete_current_permission())
+
+            wait_for(function()
+                local last_call = start_spy.calls[start_spy.call_count]
+                return last_call ~= nil and last_call[2] == "generating"
+            end)
+
+            local last_call = start_spy.calls[start_spy.call_count]
+            assert.equal("generating", last_call[2])
+            assert.same({ detail = "/tmp/demo.lua" }, last_call[3])
+            assert.is_nil(session_state:get_state().permissions.current_request)
+            assert.is_nil(session_state:get_state().review.active_tool_call_id)
+            assert.equal(
+                "approved",
+                require("agentic.session.session_selectors").get_tool_call(
+                    session_state:get_state(),
+                    "tc-perm-resume-1"
+                ).permission_state
+            )
+        end)
     end)
 
     describe("chat activity state", function()
@@ -1471,6 +1557,31 @@ describe("agentic.SessionManager", function()
             end
         end)
 
+        it("hides active inline ghost text when a file edit lands", function()
+            local handle_tool_call_update_spy = spy.new(function() end)
+            local handle_applied_edit_spy = spy.new(function() end)
+            local session = make_session({
+                ["tc-1"] = { kind = "edit", status = "in_progress" },
+            })
+
+            session.inline_chat = {
+                is_active = function()
+                    return true
+                end,
+                handle_tool_call_update = handle_tool_call_update_spy,
+                handle_applied_edit = handle_applied_edit_spy,
+            }
+
+            SessionManager._on_tool_call_update(
+                session,
+                { tool_call_id = "tc-1", status = "completed" }
+            )
+
+            assert.spy(handle_tool_call_update_spy).was.called(1)
+            assert.spy(handle_applied_edit_spy).was.called(1)
+            assert.spy(checktime_stub).was.called(1)
+        end)
+
         it("does not call checktime for failed tool calls", function()
             local session = make_session({
                 ["tc-1"] = { kind = "edit", status = "in_progress" },
@@ -1483,6 +1594,49 @@ describe("agentic.SessionManager", function()
 
             assert.spy(checktime_stub).was.called(0)
         end)
+
+        it(
+            "keeps the active review target on non-terminal tool updates",
+            function()
+                local session = make_session({
+                    ["tc-1"] = { kind = "edit", status = "pending" },
+                })
+                session.session_state:dispatch(
+                    SessionEvents.set_review_target("tc-1")
+                )
+
+                SessionManager._on_tool_call_update(
+                    session,
+                    { tool_call_id = "tc-1", status = "in_progress" }
+                )
+
+                assert.equal(
+                    "tc-1",
+                    session.session_state:get_state().review.active_tool_call_id
+                )
+            end
+        )
+
+        it(
+            "clears the active review target on terminal tool updates",
+            function()
+                local session = make_session({
+                    ["tc-1"] = { kind = "edit", status = "pending" },
+                })
+                session.session_state:dispatch(
+                    SessionEvents.set_review_target("tc-1")
+                )
+
+                SessionManager._on_tool_call_update(
+                    session,
+                    { tool_call_id = "tc-1", status = "completed" }
+                )
+
+                assert.is_nil(
+                    session.session_state:get_state().review.active_tool_call_id
+                )
+            end
+        )
 
         it("does not call checktime for non-mutating kinds", function()
             local session = make_session({
@@ -1769,6 +1923,7 @@ describe("agentic.SessionManager", function()
                     _render_window_headers = function() end,
                     _prepare_submission = SessionManager._prepare_submission,
                     _dispatch_submission = dispatch_spy,
+                    _drain_queued_submissions = function() end,
                     _drain_pending_session_callbacks = SessionManager._drain_pending_session_callbacks,
                     _ensure_session_started = SessionManager._ensure_session_started,
                     _with_active_session = SessionManager._with_active_session,
@@ -1788,5 +1943,45 @@ describe("agentic.SessionManager", function()
                 assert.equal("hello", dispatch_spy.calls[1][2].input_text)
             end
         )
+    end)
+
+    describe("_dispatch_submission", function()
+        it("waits for an active session before sending the prompt", function()
+            local send_prompt_spy = spy.new(function() end)
+            local with_active_session_spy = spy.new(function(_self, callback)
+                _self._queued_dispatch = callback
+            end)
+
+            local session = {
+                session_id = nil,
+                session_state = SessionState:new(),
+                agent = {
+                    provider_config = { name = "Codex" },
+                    send_prompt = send_prompt_spy,
+                },
+                inline_chat = nil,
+                _with_active_session = with_active_session_spy,
+                _dispatch_submission = SessionManager._dispatch_submission,
+            } --[[@as agentic.SessionManager]]
+
+            session:_dispatch_submission({
+                id = 1,
+                input_text = "hello",
+                prompt = { { type = "text", text = "hello" } },
+                request = {
+                    kind = "user",
+                    text = "hello",
+                    timestamp = os.time(),
+                    content = { { type = "text", text = "hello" } },
+                },
+            })
+
+            assert.spy(with_active_session_spy).was.called(1)
+            assert.spy(send_prompt_spy).was.called(0)
+            assert.equal(
+                0,
+                #session.session_state:get_state().interaction.turns
+            )
+        end)
     end)
 end)

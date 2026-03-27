@@ -93,6 +93,10 @@ describe("agentic.ui.PermissionManager", function()
     end)
 
     after_each(function()
+        if pm then
+            pm:destroy()
+        end
+
         chooser_show_stub:revert()
         chooser_close_stub:revert()
 
@@ -280,5 +284,58 @@ describe("agentic.ui.PermissionManager", function()
         pm:clear()
 
         assert.equal(lines_before, vim.api.nvim_buf_line_count(bufnr))
+    end)
+
+    it("serializes permission flows across multiple managers", function()
+        local second_state = SessionState:new()
+        local second_pm = PermissionManager:new(second_state)
+        local first_callback = spy.new(function() end)
+        local second_callback = spy.new(function() end)
+
+        local function add_tool_call_for_state(state, tool_call_id, kind)
+            state:dispatch(SessionEvents.append_interaction_request({
+                kind = "user",
+                text = "approve this",
+                timestamp = 1,
+                content = {
+                    { type = "text", text = "approve this" },
+                },
+            }))
+            state:dispatch(
+                SessionEvents.upsert_interaction_tool_call("Codex ACP", {
+                    tool_call_id = tool_call_id,
+                    kind = kind or "edit",
+                    status = "pending",
+                    file_path = "/tmp/demo.lua",
+                    diff = { old = { "a" }, new = { "b" } },
+                })
+            )
+        end
+
+        add_tool_call("tc-global-1", "edit")
+        add_tool_call_for_state(second_state, "tc-global-2", "write")
+
+        pm:add_request(
+            make_request("tc-global-1"),
+            first_callback --[[@as function]]
+        )
+        second_pm:add_request(
+            make_request("tc-global-2"),
+            second_callback --[[@as function]]
+        )
+
+        assert.spy(chooser_show_stub).was.called(1)
+        assert.equal("tc-global-1", pm.current_request.toolCallId)
+        assert.is_nil(second_pm.current_request)
+        assert.equal(1, #second_pm.queue)
+
+        shown_callback(shown_items[1])
+
+        assert.spy(chooser_show_stub).was.called(2)
+        assert.equal("tc-global-2", second_pm.current_request.toolCallId)
+        assert.spy(first_callback).was.called(1)
+        assert.spy(second_callback).was.called(0)
+
+        second_pm:destroy()
     end)
 end)

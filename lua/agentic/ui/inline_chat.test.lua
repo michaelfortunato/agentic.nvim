@@ -13,6 +13,11 @@ describe("agentic.ui.InlineChat", function()
     --- @type agentic.UserConfig.Inline
     local saved_inline_config
 
+    --- @param predicate fun(): boolean
+    local function wait_for(predicate)
+        assert.is_true(vim.wait(200, predicate))
+    end
+
     local function extmark_lines(extmark)
         local details = extmark[4] or {}
         local virt_lines = details.virt_lines or {}
@@ -74,7 +79,10 @@ describe("agentic.ui.InlineChat", function()
 
     before_each(function()
         bufnr = vim.api.nvim_create_buf(true, false)
-        vim.api.nvim_buf_set_name(bufnr, "/tmp/inline_chat_test.lua")
+        vim.api.nvim_buf_set_name(
+            bufnr,
+            vim.fn.tempname() .. "/inline_chat_test.lua"
+        )
         vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, {
             "local value = 1",
             "return value",
@@ -127,16 +135,21 @@ describe("agentic.ui.InlineChat", function()
             sessionUpdate = "agent_thought_chunk",
             content = {
                 type = "text",
-                text = "Inspecting the selected lines",
+                text = "Inspecting the selected lines\nChoosing accept/reject wording",
             },
         })
 
         local lines = get_rendered_lines()
-        assert.truthy(vim.tbl_contains(lines, "Thinking:"))
         assert.truthy(
+            vim.tbl_contains(
+                lines,
+                "  Thinking: Choosing accept/reject wording"
+            )
+        )
+        assert.is_false(
             vim.tbl_contains(lines, "  Inspecting the selected lines")
         )
-        assert.truthy(vim.tbl_contains(lines, "Config: Mode: Code"))
+        assert.is_false(vim.tbl_contains(lines, "Config: Mode: Code"))
 
         local thread_extmarks = get_thread_extmarks()
         assert.equal(1, #thread_extmarks)
@@ -146,16 +159,55 @@ describe("agentic.ui.InlineChat", function()
         assert.equal("Refactor this", thread.turns[1].prompt)
         assert.equal("Thinking", thread.turns[1].status_text)
         assert.equal(
-            "Inspecting the selected lines",
+            "Inspecting the selected lines\nChoosing accept/reject wording",
             thread.turns[1].thought_text
         )
 
         local overlay_extmark = get_overlay_extmarks()[1]
         local first_segment = overlay_extmark[4].virt_lines[1][1]
         assert.same({
-            Theme.HL_GROUPS.REVIEW_BANNER_ACCENT,
+            Theme.HL_GROUPS.REVIEW_BANNER,
             Theme.HL_GROUPS.INLINE_FADE,
         }, first_segment[2])
+        local second_segment = overlay_extmark[4].virt_lines[1][2]
+        assert.same({
+            Theme.HL_GROUPS.REVIEW_BANNER_ACCENT,
+            Theme.HL_GROUPS.INLINE_FADE,
+        }, second_segment[2])
+    end)
+
+    it("shows only the latest response line while generating", function()
+        local inline = InlineChat:new({
+            tab_page_id = vim.api.nvim_get_current_tabpage(),
+            on_submit = function()
+                return true
+            end,
+        })
+
+        inline:begin_request({
+            prompt = "Change this",
+            selection = {
+                lines = { "local value = 1" },
+                start_line = 1,
+                end_line = 1,
+                file_path = "/tmp/inline_chat_test.lua",
+                file_type = "lua",
+            },
+            source_bufnr = bufnr,
+            source_winid = winid,
+        })
+
+        inline:handle_session_update({
+            sessionUpdate = "agent_message_chunk",
+            content = {
+                type = "text",
+                text = "First draft line\nLatest answer line",
+            },
+        })
+
+        local lines = get_rendered_lines()
+        assert.truthy(vim.tbl_contains(lines, "  Response: Latest answer line"))
+        assert.is_false(vim.tbl_contains(lines, "  Response: First draft line"))
     end)
 
     it("restores focus to the source window after submitting", function()
@@ -177,8 +229,10 @@ describe("agentic.ui.InlineChat", function()
             file_type = "lua",
         })
 
+        --- @diagnostic disable-next-line: invisible
         local prompt = inline._prompt
         assert.is_not_nil(prompt)
+        --- @cast prompt agentic.ui.InlineChat.PromptState
         vim.api.nvim_buf_set_lines(
             prompt.prompt_bufnr,
             0,
@@ -187,6 +241,7 @@ describe("agentic.ui.InlineChat", function()
             { "Refactor this line" }
         )
 
+        --- @diagnostic disable-next-line: invisible
         inline:_submit_prompt()
 
         assert.spy(on_submit_spy).was.called(1)
@@ -194,6 +249,55 @@ describe("agentic.ui.InlineChat", function()
         assert.equal(winid, set_current_win_spy.calls[1][1])
 
         set_current_win_spy:revert()
+    end)
+
+    it("returns to normal mode after submitting with <CR>", function()
+        local on_submit_spy = spy.new(function()
+            return true
+        end)
+
+        local inline = InlineChat:new({
+            tab_page_id = vim.api.nvim_get_current_tabpage(),
+            on_submit = on_submit_spy --[[@as function]],
+        })
+
+        inline:open({
+            lines = { "local value = 1" },
+            start_line = 1,
+            end_line = 1,
+            file_path = "/tmp/inline_chat_test.lua",
+            file_type = "lua",
+        })
+
+        --- @diagnostic disable-next-line: invisible
+        local prompt = inline._prompt
+        assert.is_not_nil(prompt)
+        --- @cast prompt agentic.ui.InlineChat.PromptState
+        vim.api.nvim_buf_set_lines(
+            prompt.prompt_bufnr,
+            0,
+            -1,
+            false,
+            { "Refactor this line" }
+        )
+        vim.api.nvim_set_current_win(prompt.prompt_winid)
+
+        local entered_insert = vim.wait(200, function()
+            return vim.fn.mode():sub(1, 1) == "i"
+        end)
+        assert.is_true(entered_insert)
+
+        local mapping = vim.fn.maparg("<CR>", "i", false, true)
+        mapping.callback()
+
+        local exited_insert = vim.wait(200, function()
+            return vim.fn.mode():sub(1, 1) ~= "i"
+        end)
+
+        assert.spy(on_submit_spy).was.called(1)
+        assert.is_true(exited_insert)
+        assert.are_not.equal("i", vim.fn.mode():sub(1, 1))
+        assert.equal(winid, vim.api.nvim_get_current_win())
     end)
 
     it("renders the tracked visual range for inline selections", function()
@@ -223,7 +327,7 @@ describe("agentic.ui.InlineChat", function()
         assert.truthy(
             vim.tbl_contains(
                 lines,
-                "[Agentic Inline] inline_chat_test.lua:1:7-1:11 Starting inline request"
+                "  [Agentic Inline] inline_chat_test.lua:1:7-1:11 Starting inline request"
             )
         )
     end)
@@ -264,8 +368,34 @@ describe("agentic.ui.InlineChat", function()
         })
 
         inline:sync_queued_requests({
-            { id = 1, inline_request = {} },
-            { id = 2, inline_request = {} },
+            {
+                id = 1,
+                input_text = "First queued request",
+                prompt = { { type = "text", text = "First queued request" } },
+                request = {
+                    kind = "user",
+                    text = "First queued request",
+                    timestamp = 1,
+                    content = {
+                        { type = "text", text = "First queued request" },
+                    },
+                },
+                inline_request = {},
+            },
+            {
+                id = 2,
+                input_text = "Second queued request",
+                prompt = { { type = "text", text = "Second queued request" } },
+                request = {
+                    kind = "user",
+                    text = "Second queued request",
+                    timestamp = 2,
+                    content = {
+                        { type = "text", text = "Second queued request" },
+                    },
+                },
+                inline_request = {},
+            },
         }, {
             waiting_for_session = true,
         })
@@ -282,8 +412,34 @@ describe("agentic.ui.InlineChat", function()
         end))
 
         inline:sync_queued_requests({
-            { id = 1, inline_request = {} },
-            { id = 2, inline_request = {} },
+            {
+                id = 1,
+                input_text = "First queued request",
+                prompt = { { type = "text", text = "First queued request" } },
+                request = {
+                    kind = "user",
+                    text = "First queued request",
+                    timestamp = 1,
+                    content = {
+                        { type = "text", text = "First queued request" },
+                    },
+                },
+                inline_request = {},
+            },
+            {
+                id = 2,
+                input_text = "Second queued request",
+                prompt = { { type = "text", text = "Second queued request" } },
+                request = {
+                    kind = "user",
+                    text = "Second queued request",
+                    timestamp = 2,
+                    content = {
+                        { type = "text", text = "Second queued request" },
+                    },
+                },
+                inline_request = {},
+            },
         })
 
         local queued_texts = vim.tbl_map(function(overlay)
@@ -377,6 +533,7 @@ describe("agentic.ui.InlineChat", function()
             file_type = "lua",
         })
         assert.equal(1, submission_id)
+        --- @cast submission_id integer
         assert.is_true(inline:remove_queued_submission(submission_id))
         assert.equal(0, #get_overlay_extmarks())
         assert.equal(0, #get_thread_extmarks())
@@ -414,10 +571,10 @@ describe("agentic.ui.InlineChat", function()
         assert.truthy(
             vim.tbl_contains(
                 lines,
-                "[Agentic Inline] inline_chat_test.lua:1-1 Waiting for approval"
+                "  [Agentic Inline] inline_chat_test.lua:1-1 Waiting for approval"
             )
         )
-        assert.truthy(vim.tbl_contains(lines, "Tool: edit replace value"))
+        assert.truthy(vim.tbl_contains(lines, "  Tool: edit replace value"))
 
         inline:clear()
         local extmarks = vim.api.nvim_buf_get_extmarks(
@@ -433,6 +590,77 @@ describe("agentic.ui.InlineChat", function()
         assert.equal(1, #thread_extmarks)
         assert.is_not_nil(get_thread_store()[tostring(thread_extmarks[1][1])])
     end)
+
+    it(
+        "hides the ghost preview after an applied edit and keeps progress live",
+        function()
+            Config.inline.progress = true
+
+            local progress_spy = spy.on(vim.api, "nvim_echo")
+            local inline = InlineChat:new({
+                tab_page_id = vim.api.nvim_get_current_tabpage(),
+                on_submit = function()
+                    return true
+                end,
+            })
+
+            inline:begin_request({
+                prompt = "Change this",
+                selection = {
+                    lines = { "local value = 1" },
+                    start_line = 1,
+                    end_line = 1,
+                    file_path = "/tmp/inline_chat_test.lua",
+                    file_type = "lua",
+                },
+                source_bufnr = bufnr,
+                source_winid = winid,
+            })
+
+            inline:handle_tool_call({
+                kind = "edit",
+                file_path = "/tmp/inline_chat_test.lua",
+                argument = "replace value",
+            })
+            inline:handle_applied_edit()
+            local overlay_count_after_apply = #get_overlay_extmarks()
+
+            inline:refresh()
+            local overlay_count_after_refresh = #get_overlay_extmarks()
+
+            inline:handle_session_update({
+                sessionUpdate = "agent_message_chunk",
+                content = {
+                    type = "text",
+                    text = "Applied the edit\nWrapping up",
+                },
+            })
+            local overlay_count_after_message = #get_overlay_extmarks()
+
+            local saw_generating_progress = false
+            for _, call in ipairs(progress_spy.calls) do
+                local chunks = call[1]
+                local opts = call[3]
+                local message = chunks and chunks[1] and chunks[1][1] or nil
+
+                if
+                    message == "Generating response"
+                    and opts
+                    and opts.kind == "progress"
+                    and opts.status == "running"
+                then
+                    saw_generating_progress = true
+                    break
+                end
+            end
+
+            progress_spy:revert()
+            assert.equal(0, overlay_count_after_apply)
+            assert.equal(0, overlay_count_after_refresh)
+            assert.equal(0, overlay_count_after_message)
+            assert.is_true(saw_generating_progress)
+        end
+    )
 
     it(
         "keeps the inline overlay attached to the tracked range extmark",
@@ -470,7 +698,7 @@ describe("agentic.ui.InlineChat", function()
             assert.truthy(
                 vim.tbl_contains(
                     lines,
-                    "[Agentic Inline] inline_chat_test.lua:3-3 Starting inline request"
+                    "  [Agentic Inline] inline_chat_test.lua:3-3 Starting inline request"
                 )
             )
         end
@@ -559,4 +787,35 @@ describe("agentic.ui.InlineChat", function()
             end))
         end
     )
+
+    it("clears completed ghost text after the configured ttl", function()
+        Config.inline.result_ttl_ms = 30
+
+        local inline = InlineChat:new({
+            tab_page_id = vim.api.nvim_get_current_tabpage(),
+            on_submit = function()
+                return true
+            end,
+        })
+
+        inline:begin_request({
+            prompt = "Short lived",
+            selection = {
+                lines = { "local value = 1" },
+                start_line = 1,
+                end_line = 1,
+                file_path = "/tmp/inline_chat_test.lua",
+                file_type = "lua",
+            },
+            source_bufnr = bufnr,
+            source_winid = winid,
+        })
+
+        inline:complete({ stopReason = "end_turn" }, nil)
+
+        wait_for(function()
+            return #get_overlay_extmarks() == 0
+        end)
+        assert.equal(0, #get_overlay_extmarks())
+    end)
 end)

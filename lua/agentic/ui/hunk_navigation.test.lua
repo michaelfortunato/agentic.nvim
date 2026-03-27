@@ -139,11 +139,67 @@ describe("hunk_navigation", function()
             assert.equal(anchors[2], 15)
         end)
 
+        it("keeps insertion anchors when deleted hunks also exist", function()
+            add_hunk(test_bufnr, test_ns, 10)
+            add_hunk(test_bufnr, test_ns, 11)
+            vim.api.nvim_buf_set_extmark(test_bufnr, test_ns, 11, 0, {
+                virt_lines = { { { "same hunk footer", "Comment" } } },
+            })
+            vim.api.nvim_buf_set_extmark(test_bufnr, test_ns, 15, 0, {
+                virt_lines = { { { "inserted line", "Comment" } } },
+            })
+            add_hunk(test_bufnr, test_ns, 25)
+
+            local anchors = get_hunk_anchors(test_bufnr)
+
+            assert.equal(#anchors, 3)
+            assert.equal(anchors[1], 10)
+            assert.equal(anchors[2], 15)
+            assert.equal(anchors[3], 25)
+        end)
+
         it("falls back to line 0 when no extmarks exist", function()
             local anchors = get_hunk_anchors(test_bufnr)
 
             assert.equal(#anchors, 1)
             assert.equal(anchors[1], 0)
+        end)
+
+        it(
+            "ignores insertion anchors that land inside deleted ranges",
+            function()
+                add_hunk(test_bufnr, test_ns, 10)
+                add_hunk(test_bufnr, test_ns, 11)
+                add_hunk(test_bufnr, test_ns, 12)
+                vim.api.nvim_buf_set_extmark(test_bufnr, test_ns, 11, 0, {
+                    virt_lines = { { { "inserted line", "Comment" } } },
+                })
+                vim.api.nvim_buf_set_extmark(test_bufnr, test_ns, 20, 0, {
+                    virt_lines = { { { "separate insert", "Comment" } } },
+                })
+
+                local anchors = get_hunk_anchors(test_bufnr)
+
+                assert.equal(#anchors, 2)
+                assert.equal(anchors[1], 10)
+                assert.equal(anchors[2], 20)
+            end
+        )
+
+        it("recomputes anchors after cache invalidation", function()
+            add_hunk(test_bufnr, test_ns, 5)
+
+            local anchors_before = get_hunk_anchors(test_bufnr)
+            assert.equal(#anchors_before, 1)
+            assert.equal(anchors_before[1], 5)
+
+            add_hunk(test_bufnr, test_ns, 25)
+            HunkNavigation.invalidate_cache(test_bufnr)
+
+            local anchors_after = get_hunk_anchors(test_bufnr)
+            assert.equal(#anchors_after, 2)
+            assert.equal(anchors_after[1], 5)
+            assert.equal(anchors_after[2], 25)
         end)
     end)
 
@@ -190,6 +246,26 @@ describe("hunk_navigation", function()
             local pos2 = vim.api.nvim_win_get_cursor(winid)[1]
 
             assert.equal(pos1, pos2)
+        end)
+
+        it("navigates through mixed deleted and insertion hunks", function()
+            add_hunk(test_bufnr, test_ns, 1)
+            vim.api.nvim_buf_set_extmark(test_bufnr, test_ns, 10, 0, {
+                virt_lines = { { { "inserted line", "Comment" } } },
+            })
+            add_hunk(test_bufnr, test_ns, 20)
+
+            HunkNavigation.navigate_next(test_bufnr)
+            assert.equal(vim.api.nvim_win_get_cursor(winid)[1], 2)
+
+            HunkNavigation.navigate_next(test_bufnr)
+            assert.equal(vim.api.nvim_win_get_cursor(winid)[1], 11)
+
+            HunkNavigation.navigate_next(test_bufnr)
+            assert.equal(vim.api.nvim_win_get_cursor(winid)[1], 21)
+
+            HunkNavigation.navigate_next(test_bufnr)
+            assert.equal(vim.api.nvim_win_get_cursor(winid)[1], 2)
         end)
 
         it("positions cursor at column 0", function()

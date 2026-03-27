@@ -7,6 +7,7 @@ local Logger = require("agentic.utils.logger")
 --- @field _bufnr integer
 --- @field _root string
 --- @field _resolve_root? fun(): string|nil
+--- @field _resolve_preferred_file_path? fun(): string|nil
 --- @field _on_file_selected? fun(file_path: string)
 --- @field _skip_auto_show_once boolean
 local FilePicker = {}
@@ -57,6 +58,7 @@ local blink_filetype_registered = false
 
 --- @class agentic.ui.FilePicker.Opts
 --- @field resolve_root? fun(): string|nil
+--- @field resolve_preferred_file_path? fun(): string|nil
 --- @field on_file_selected? fun(file_path: string)
 
 --- @class agentic.ui.FilePicker.RootCache
@@ -151,6 +153,7 @@ function FilePicker:new(bufnr, opts)
         _bufnr = bufnr,
         _root = normalize_root(vim.fn.getcwd()),
         _resolve_root = opts.resolve_root,
+        _resolve_preferred_file_path = opts.resolve_preferred_file_path,
         _on_file_selected = opts.on_file_selected,
         _skip_auto_show_once = false,
     }, self)
@@ -305,6 +308,66 @@ function FilePicker:_resolve_scan_root()
     end
 
     return normalize_root(root)
+end
+
+--- @param root string
+--- @return string|nil preferred_word
+function FilePicker:_resolve_preferred_word(root)
+    if not self._resolve_preferred_file_path then
+        return nil
+    end
+
+    local preferred_path = self._resolve_preferred_file_path()
+    if not preferred_path or preferred_path == "" then
+        return nil
+    end
+
+    local preferred_abs_path =
+        vim.fs.normalize(FileSystem.to_absolute_path(preferred_path))
+    local preferred_relative_path =
+        to_root_relative_path(root, preferred_abs_path)
+
+    if preferred_relative_path == "" then
+        return nil
+    end
+
+    return "@" .. preferred_relative_path
+end
+
+--- @param root string
+--- @param items table[]
+--- @return table[] prioritized_items
+function FilePicker:_prioritize_source_items(root, items)
+    local preferred_word = self:_resolve_preferred_word(root)
+    if not preferred_word then
+        return items
+    end
+
+    local preferred_index = nil
+    for index, item in ipairs(items) do
+        if item.word == preferred_word then
+            preferred_index = index
+            break
+        end
+    end
+
+    if preferred_index == nil then
+        return items
+    end
+
+    --- @type table[]
+    local prioritized_items = {}
+    local preferred_item = vim.deepcopy(items[preferred_index])
+    preferred_item._preferred_match = true
+    prioritized_items[1] = preferred_item
+
+    for index, item in ipairs(items) do
+        if index ~= preferred_index then
+            prioritized_items[#prioritized_items + 1] = item
+        end
+    end
+
+    return prioritized_items
 end
 
 --- @param path string
@@ -560,7 +623,7 @@ function FilePicker:request_source_items(callback)
 
     if cache then
         self._files = cache.files
-        callback(cache.files)
+        callback(self:_prioritize_source_items(root, cache.files))
     else
         callback({})
     end
@@ -576,7 +639,7 @@ function FilePicker:request_source_items(callback)
                 end
 
                 self._files = files
-                callback(files)
+                callback(self:_prioritize_source_items(root, files))
             end)
         end
 
@@ -589,7 +652,7 @@ function FilePicker:request_source_items(callback)
         end
 
         self._files = files
-        callback(files)
+        callback(self:_prioritize_source_items(root, files))
     end)
 end
 

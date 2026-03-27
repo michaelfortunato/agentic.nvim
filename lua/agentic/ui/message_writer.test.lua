@@ -1504,7 +1504,7 @@ describe("agentic.ui.MessageWriter", function()
                     vim.fn.index(lines, "    1 hunk · 6 modified lines")
                 local hint_index = vim.fn.index(
                     lines,
-                    "    Review in buffer: ]c next, [c prev, m yes, n no · <CR> expand"
+                    "    Review in buffer: ]c next, [c prev, m accept, n reject · <CR> expand"
                 )
 
                 assert.is_true(title_index >= 0)

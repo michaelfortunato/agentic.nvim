@@ -20,6 +20,13 @@ local PERMISSION_KIND_PRIORITY = {
     reject_always = 4,
 }
 
+--- Global interactive flow coordination.
+--- Only one permission/review flow may be active at a time.
+local GLOBAL_FLOW_STATE = {
+    active_manager = nil,
+    queued_managers = {},
+}
+
 --- @class agentic.ui.PermissionManager.PermissionRequest
 --- @field toolCallId string
 --- @field request agentic.acp.RequestPermission
@@ -32,8 +39,46 @@ local PERMISSION_KIND_PRIORITY = {
 --- @field _chooser_tabpage? integer
 --- @field _diff_review_handler? fun(current_request: agentic.ui.PermissionManager.PermissionRequest): boolean|nil
 --- @field _state_listener_id? integer
+--- @field _destroyed boolean
 local PermissionManager = {}
 PermissionManager.__index = PermissionManager
+
+--- @param manager agentic.ui.PermissionManager
+--- @return boolean
+local function is_queued_manager(manager)
+    for _, queued_manager in ipairs(GLOBAL_FLOW_STATE.queued_managers) do
+        if queued_manager == manager then
+            return true
+        end
+    end
+
+    return false
+end
+
+--- @param manager agentic.ui.PermissionManager
+local function remove_queued_manager(manager)
+    for index, queued_manager in ipairs(GLOBAL_FLOW_STATE.queued_managers) do
+        if queued_manager == manager then
+            table.remove(GLOBAL_FLOW_STATE.queued_managers, index)
+            return
+        end
+    end
+end
+
+local function activate_next_manager()
+    while #GLOBAL_FLOW_STATE.queued_managers > 0 do
+        local manager = table.remove(GLOBAL_FLOW_STATE.queued_managers, 1)
+        if manager and not manager._destroyed then
+            GLOBAL_FLOW_STATE.active_manager = manager
+            manager:_process_next()
+            if manager.current_request ~= nil or #manager.queue > 0 then
+                return
+            end
+        end
+    end
+
+    GLOBAL_FLOW_STATE.active_manager = nil
+end
 
 --- @param session_state agentic.session.SessionState|nil
 --- @return agentic.ui.PermissionManager
@@ -45,6 +90,7 @@ function PermissionManager:new(session_state)
         _chooser_tabpage = nil,
         _diff_review_handler = nil,
         _state_listener_id = nil,
+        _destroyed = false,
     }, self)
 
     instance:_sync_state()
@@ -104,11 +150,15 @@ function PermissionManager:add_request(request, callback)
     )
 
     if not self.current_request then
-        self:_process_next()
+        self:_request_global_turn()
     end
 end
 
 function PermissionManager:_process_next()
+    if GLOBAL_FLOW_STATE.active_manager ~= self then
+        return
+    end
+
     if self.current_request or #self.queue == 0 then
         return
     end
@@ -131,6 +181,40 @@ function PermissionManager:_process_next()
     local sorted_options =
         PermissionManager._sort_permission_options(request.options)
     self:_show_chooser(current.toolCallId, sorted_options)
+end
+
+function PermissionManager:_request_global_turn()
+    if self._destroyed then
+        return
+    end
+
+    if GLOBAL_FLOW_STATE.active_manager == self then
+        self:_process_next()
+        return
+    end
+
+    if GLOBAL_FLOW_STATE.active_manager == nil then
+        GLOBAL_FLOW_STATE.active_manager = self
+        self:_process_next()
+        if self.current_request == nil and #self.queue == 0 then
+            activate_next_manager()
+        end
+        return
+    end
+
+    if not is_queued_manager(self) then
+        GLOBAL_FLOW_STATE.queued_managers[#GLOBAL_FLOW_STATE.queued_managers + 1] =
+            self
+    end
+end
+
+function PermissionManager:_release_global_turn()
+    remove_queued_manager(self)
+
+    if GLOBAL_FLOW_STATE.active_manager == self then
+        GLOBAL_FLOW_STATE.active_manager = nil
+        activate_next_manager()
+    end
 end
 
 --- @param tool_call_id string
@@ -231,7 +315,14 @@ function PermissionManager:_complete_request(option_id)
     current.callback(option_id)
 
     self.session_state:dispatch(SessionEvents.complete_current_permission())
-    self:_process_next()
+    if #self.queue > 0 then
+        self:_process_next()
+        if self.current_request ~= nil then
+            return
+        end
+    end
+
+    self:_release_global_turn()
 end
 
 --- @param handler fun(current_request: agentic.ui.PermissionManager.PermissionRequest): boolean|nil
@@ -260,6 +351,7 @@ function PermissionManager:clear()
     end
 
     self.session_state:dispatch(SessionEvents.clear_permissions())
+    self:_release_global_turn()
 end
 
 --- Remove permission request for a specific tool call ID (e.g., when tool call fails)
@@ -280,6 +372,8 @@ end
 
 function PermissionManager:destroy()
     self:_close_chooser()
+    self._destroyed = true
+    self:_release_global_turn()
     self.session_state:unsubscribe(self._state_listener_id)
     self._state_listener_id = nil
 end

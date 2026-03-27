@@ -47,6 +47,15 @@ local review_keymap_state = {}
 local get_review_session
 local resolve_pending_hunk
 
+--- @param action fun()|nil
+local function schedule_review_action(action)
+    if not action then
+        return
+    end
+
+    vim.schedule(action)
+end
+
 --- @return agentic.UserConfig.DiffPreviewKeymaps
 local function get_diff_preview_keymaps()
     local configured = Config.keymaps and Config.keymaps.diff_preview or {}
@@ -138,7 +147,7 @@ local function build_review_banner(
             { " ACP whole diff ", Theme.HL_GROUPS.REVIEW_BANNER_ACCENT },
             {
                 string.format(
-                    " %s yes-all  %s no-all ",
+                    " %s accept-all  %s reject-all ",
                     diff_keymaps.accept_all,
                     diff_keymaps.reject_all
                 ),
@@ -179,6 +188,23 @@ local function render_review_banner(
     })
 end
 
+--- @param old_lines string[]
+--- @param new_lines string[]
+--- @return boolean
+local function has_preview_changes(old_lines, new_lines)
+    return table.concat(old_lines, "\n") ~= table.concat(new_lines, "\n")
+end
+
+--- @param file_path string
+local function notify_approximate_preview(file_path)
+    Logger.notify(
+        "Diff preview: exact location changed in "
+            .. file_path
+            .. "; showing approximate preview",
+        vim.log.levels.WARN
+    )
+end
+
 --- @param opts agentic.ui.DiffPreview.ShowOpts
 --- @return agentic.ui.ToolCallDiff.DiffBlock[] diff_blocks
 --- @return boolean is_approximate
@@ -199,8 +225,7 @@ local function resolve_diff_blocks(opts)
     local old_lines = ToolCallDiff.normalize_to_lines(opts.diff.old or {})
     local has_content = not ToolCallDiff.is_empty_lines(new_lines)
         or not ToolCallDiff.is_empty_lines(old_lines)
-    local has_changes = table.concat(old_lines, "\n")
-        ~= table.concat(new_lines, "\n")
+    local has_changes = has_preview_changes(old_lines, new_lines)
 
     if not has_content or not has_changes then
         return diff_blocks, false
@@ -212,12 +237,7 @@ local function resolve_diff_blocks(opts)
         return diff_blocks, false
     end
 
-    Logger.notify(
-        "Diff preview: exact location changed in "
-            .. opts.file_path
-            .. "; showing approximate preview",
-        vim.log.levels.WARN
-    )
+    notify_approximate_preview(opts.file_path)
     return fallback_blocks, true
 end
 
@@ -241,11 +261,30 @@ local function is_line_visible_in_window(winid, line)
     return line >= topline and line <= botline
 end
 
+--- @param bufnr integer
 --- @param winid integer
 --- @param line integer
-local function focus_diff_target(winid, line)
+--- @param anchor_line integer|nil
+local function focus_diff_target(bufnr, winid, line, anchor_line)
+    if not vim.api.nvim_win_is_valid(winid) then
+        return
+    end
+
     pcall(vim.api.nvim_set_current_win, winid)
     pcall(vim.api.nvim_win_set_cursor, winid, { line, 0 })
+
+    if anchor_line == nil then
+        return
+    end
+
+    local scroll_cmd = HunkNavigation.get_scroll_cmd(bufnr, winid, anchor_line)
+    if scroll_cmd == "" then
+        return
+    end
+
+    pcall(vim.api.nvim_win_call, winid, function()
+        vim.cmd("normal! " .. scroll_cmd)
+    end)
 end
 
 --- @param bufnr integer
@@ -269,6 +308,14 @@ local function get_block_anchor_line(block)
     end
 
     return math.max(0, block.end_line - 1)
+end
+
+--- @param bufnr integer
+--- @param winid integer
+--- @param block agentic.ui.ToolCallDiff.DiffBlock
+--- @param line integer
+local function focus_review_block(bufnr, winid, block, line)
+    focus_diff_target(bufnr, winid, line, get_block_anchor_line(block))
 end
 
 --- @param block agentic.ui.ToolCallDiff.DiffBlock
@@ -511,12 +558,10 @@ local function setup_review_keymaps(bufnr, review_actions)
 
     BufHelpers.keymap_set(bufnr, "n", review_keymaps.accept, function()
         if get_review_session(bufnr) then
-            if resolve_pending_hunk(bufnr, "accept") then
-                return ""
-            end
-            return review_keymaps.accept
+            resolve_pending_hunk(bufnr, "accept")
+            return ""
         end
-        review_actions.on_accept()
+        schedule_review_action(review_actions.on_accept)
         return ""
     end, {
         desc = "Agentic Review: Accept diff",
@@ -526,12 +571,10 @@ local function setup_review_keymaps(bufnr, review_actions)
 
     BufHelpers.keymap_set(bufnr, "n", review_keymaps.reject, function()
         if get_review_session(bufnr) then
-            if resolve_pending_hunk(bufnr, "reject") then
-                return ""
-            end
-            return review_keymaps.reject
+            resolve_pending_hunk(bufnr, "reject")
+            return ""
         end
-        review_actions.on_reject()
+        schedule_review_action(review_actions.on_reject)
         return ""
     end, {
         desc = "Agentic Review: Reject diff",
@@ -540,11 +583,15 @@ local function setup_review_keymaps(bufnr, review_actions)
     })
 
     BufHelpers.keymap_set(bufnr, "n", review_keymaps.accept_all, function()
-        (review_actions.on_accept_all or review_actions.on_accept)()
+        schedule_review_action(
+            review_actions.on_accept_all or review_actions.on_accept
+        )
     end, { desc = "Agentic Review: Accept diff", nowait = true })
 
     BufHelpers.keymap_set(bufnr, "n", review_keymaps.reject_all, function()
-        (review_actions.on_reject_all or review_actions.on_reject)()
+        schedule_review_action(
+            review_actions.on_reject_all or review_actions.on_reject
+        )
     end, { desc = "Agentic Review: Reject diff", nowait = true })
 end
 
@@ -624,7 +671,9 @@ local function build_plain_segments(line, change)
     local changed = line:sub(change.new_start + 1, change.new_end)
     local after = line:sub(change.new_end + 1)
 
-    -- Line-level highlight for unchanged portions, word-level for changed
+    -- Keep the add-line background on the unchanged prefix/suffix so the whole
+    -- line still reads as inserted content, then use the stronger word-level
+    -- highlight only on the changed slice to show the precise replacement.
     if #before > 0 then
         table.insert(segments, { before, Theme.HL_GROUPS.DIFF_ADD })
     end
@@ -645,12 +694,12 @@ local function build_hunk_review_footer()
     return {
         { "  ", Theme.HL_GROUPS.REVIEW_BANNER },
         {
-            string.format("%s yes", review_keymaps.accept),
+            string.format("%s accept", review_keymaps.accept),
             Theme.HL_GROUPS.DIFF_ADD,
         },
         { "  ", Theme.HL_GROUPS.REVIEW_BANNER },
         {
-            string.format("%s no", review_keymaps.reject),
+            string.format("%s reject", review_keymaps.reject),
             Theme.HL_GROUPS.DIFF_DELETE,
         },
     }
@@ -869,12 +918,13 @@ end
 --- @param session agentic.ui.DiffPreview.ReviewSession
 local function finalize_review_session(session)
     if #session.rejected_block_ids == 0 then
-        session.review_actions.on_accept()
+        Logger.notify("All hunks reviewed", vim.log.levels.INFO)
+        schedule_review_action(session.review_actions.on_accept)
         return
     end
 
     if #session.accepted_block_ids == 0 then
-        session.review_actions.on_reject()
+        schedule_review_action(session.review_actions.on_reject)
         return
     end
 
@@ -883,7 +933,7 @@ local function finalize_review_session(session)
             "Partial hunk review is unavailable for approximate diff previews",
             vim.log.levels.WARN
         )
-        session.review_actions.on_reject()
+        schedule_review_action(session.review_actions.on_reject)
         return
     end
 
@@ -903,7 +953,29 @@ local function finalize_review_session(session)
         )
     end
 
-    session.review_actions.on_reject()
+    schedule_review_action(session.review_actions.on_reject)
+end
+
+--- @param bufnr integer
+--- @param session agentic.ui.DiffPreview.ReviewSession
+--- @param winid integer
+--- @param cursor_line integer
+--- @return boolean focused
+local function focus_next_pending_block(bufnr, session, winid, cursor_line)
+    for _, pending_block_id in ipairs(session.pending_block_ids) do
+        local pending_block = session.diff_blocks[pending_block_id]
+        if pending_block.start_line > cursor_line then
+            focus_review_block(
+                bufnr,
+                winid,
+                pending_block,
+                pending_block.start_line
+            )
+            return true
+        end
+    end
+
+    return false
 end
 
 --- @param bufnr integer
@@ -926,7 +998,7 @@ resolve_pending_hunk = function(bufnr, decision)
     local block_id, position =
         find_pending_block_for_cursor(session, cursor_line, line_count)
     if not block_id or not position then
-        return false
+        return focus_next_pending_block(bufnr, session, winid, cursor_line)
     end
 
     if decision == "accept" then
@@ -939,7 +1011,7 @@ resolve_pending_hunk = function(bufnr, decision)
     if #session.pending_block_ids == 0 then
         state.session = nil
         finalize_review_session(session)
-        return
+        return true
     end
 
     render_inline_diff_blocks(
@@ -953,8 +1025,10 @@ resolve_pending_hunk = function(bufnr, decision)
     local next_position = math.min(position, #session.pending_block_ids)
     local next_block_id = session.pending_block_ids[next_position]
     if next_block_id then
-        focus_diff_target(
+        focus_review_block(
+            bufnr,
             winid,
+            session.diff_blocks[next_block_id],
             get_block_focus_line(session.diff_blocks[next_block_id], line_count)
         )
     end
@@ -1056,7 +1130,12 @@ function M.show_diff(opts)
             or not is_line_visible_in_window(target_winid, first_diff_line)
 
         if should_focus_review then
-            focus_diff_target(target_winid, first_diff_line)
+            focus_diff_target(
+                bufnr,
+                target_winid,
+                first_diff_line,
+                get_block_anchor_line(diff_blocks[1])
+            )
         end
     end
 end
@@ -1139,7 +1218,7 @@ function M.add_navigation_hint(tracker, lines_to_append)
 
     local diff_keymaps = get_diff_preview_keymaps()
     local hint_text = string.format(
-        "Review in buffer: %s next, %s prev, %s yes, %s no",
+        "Review in buffer: %s next, %s prev, %s accept, %s reject",
         diff_keymaps.next_hunk,
         diff_keymaps.prev_hunk,
         diff_keymaps.accept,
@@ -1178,11 +1257,35 @@ function M.apply_hint_styling(bufnr, ns_id, button_start_row, hint_line_index)
     end)
 end
 
+--- @return integer|nil diff_bufnr
+--- @return agentic.ui.DiffPreview.ReviewSession|nil review_session
+local function get_active_review_diff_buffer()
+    local diff_bufnr = M.get_active_diff_buffer()
+    if not diff_bufnr then
+        return nil, nil
+    end
+
+    return diff_bufnr, get_review_session(diff_bufnr)
+end
+
+--- @param decision "accept"|"reject"
+--- @param fallback_key string
+--- @return string
+local function handle_widget_review_hunk(decision, fallback_key)
+    local diff_bufnr, review_session = get_active_review_diff_buffer()
+    if not diff_bufnr or not review_session then
+        return fallback_key
+    end
+
+    resolve_pending_hunk(diff_bufnr, decision)
+    return ""
+end
+
 --- Setup hunk navigation keymaps for widget buffers
 --- Allows navigating hunks in the active diff buffer from widget buffers
 --- @param buf_nrs table<string, number>
 function M.setup_diff_navigation_keymaps(buf_nrs)
-    local diff_keymaps = Config.keymaps.diff_preview
+    local diff_keymaps = get_diff_preview_keymaps()
 
     for _, bufnr in pairs(buf_nrs) do
         BufHelpers.keymap_set(bufnr, "n", diff_keymaps.next_hunk, function()
@@ -1205,6 +1308,22 @@ function M.setup_diff_navigation_keymaps(buf_nrs)
             HunkNavigation.navigate_prev(diff_bufnr)
         end, {
             desc = "Go to previous hunk - Agentic DiffPreview",
+        })
+
+        BufHelpers.keymap_set(bufnr, "n", diff_keymaps.accept, function()
+            return handle_widget_review_hunk("accept", diff_keymaps.accept)
+        end, {
+            desc = "Accept next review hunk - Agentic DiffPreview",
+            expr = true,
+            nowait = true,
+        })
+
+        BufHelpers.keymap_set(bufnr, "n", diff_keymaps.reject, function()
+            return handle_widget_review_hunk("reject", diff_keymaps.reject)
+        end, {
+            desc = "Reject next review hunk - Agentic DiffPreview",
+            expr = true,
+            nowait = true,
         })
     end
 end

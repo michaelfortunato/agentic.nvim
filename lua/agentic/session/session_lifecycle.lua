@@ -53,6 +53,146 @@ local function build_handlers(session)
     }
 end
 
+--- @param option agentic.acp.ConfigOption|nil
+--- @param value string|nil
+--- @return boolean supported
+local function config_option_supports_value(option, value)
+    if not option or type(value) ~= "string" or value == "" then
+        return false
+    end
+
+    local options = option.options or {}
+    for _, candidate in ipairs(options) do
+        if candidate.value == value then
+            return true
+        end
+
+        if
+            type(candidate) == "table"
+            and type(candidate.options) == "table"
+        then
+            for _, grouped_candidate in ipairs(candidate.options) do
+                if grouped_candidate.value == value then
+                    return true
+                end
+            end
+        end
+    end
+
+    return false
+end
+
+--- @param session agentic.SessionManager
+--- @param announced_options agentic.acp.ConfigOption[]|nil
+--- @return {id: string, value: string}[] changes
+--- @return boolean restores_mode
+local function get_restorable_config_changes(session, announced_options)
+    local persisted_session = session.session_state
+            and session.session_state.get_persisted_session_data
+            and session.session_state:get_persisted_session_data()
+        or nil
+    local persisted_options = persisted_session
+            and persisted_session.config_options
+        or {}
+
+    if #persisted_options == 0 or type(announced_options) ~= "table" then
+        return {}, false
+    end
+
+    local announced_by_id = {}
+    for _, option in ipairs(announced_options) do
+        announced_by_id[option.id] = option
+    end
+
+    local restores_mode = false
+    local changes = {}
+
+    for _, persisted_option in ipairs(persisted_options) do
+        local announced_option = announced_by_id[persisted_option.id]
+        local desired_value = persisted_option.currentValue
+
+        if
+            announced_option
+            and desired_value ~= nil
+            and desired_value ~= announced_option.currentValue
+            and config_option_supports_value(announced_option, desired_value)
+        then
+            changes[#changes + 1] = {
+                id = announced_option.id,
+                value = desired_value,
+            }
+
+            if announced_option.category == "mode" then
+                restores_mode = true
+            end
+        end
+    end
+
+    return changes, restores_mode
+end
+
+--- @param session agentic.SessionManager
+--- @param config_id string
+--- @param value string
+local function update_local_config_option_value(session, config_id, value)
+    if session.config_options and session.config_options.get_config_option then
+        local option = session.config_options:get_config_option(config_id)
+        if option then
+            option.currentValue = value
+        end
+    end
+
+    local render_window_headers = rawget(session, "_render_window_headers")
+    if type(render_window_headers) == "function" then
+        render_window_headers(session)
+    end
+
+    if session.inline_chat and session.inline_chat.refresh then
+        session.inline_chat:refresh()
+    end
+end
+
+--- @param session agentic.SessionManager
+--- @param changes {id: string, value: string}[]
+--- @param callback fun()
+local function restore_config_changes(session, changes, callback)
+    local change = table.remove(changes, 1)
+    if not change then
+        callback()
+        return
+    end
+
+    session.agent:set_config_option(
+        session.session_id,
+        change.id,
+        change.value,
+        function(result, err)
+            if err then
+                Logger.debug(
+                    "Failed to restore config option ",
+                    change.id,
+                    ": ",
+                    err.message or vim.inspect(err)
+                )
+            elseif result and result.configOptions then
+                local handle_new_config_options =
+                    rawget(session, "_handle_new_config_options")
+                if type(handle_new_config_options) == "function" then
+                    handle_new_config_options(session, result.configOptions)
+                end
+            else
+                update_local_config_option_value(
+                    session,
+                    change.id,
+                    change.value
+                )
+            end
+
+            restore_config_changes(session, changes, callback)
+        end
+    )
+end
+
 --- @param session agentic.SessionManager
 function SessionLifecycle.cancel(session)
     if session.session_id then
@@ -146,19 +286,57 @@ function SessionLifecycle.start(session, opts)
                 end
             end
 
-            session.config_options:set_initial_mode(
-                session.agent.provider_config.default_mode
-            )
+            local function finish_session_setup()
+                if
+                    session.config_options
+                    and session.config_options.set_initial_mode
+                then
+                    local changes, restores_mode =
+                        get_restorable_config_changes(
+                            session,
+                            response.configOptions
+                        )
 
-            if not restore_mode then
-                session._is_first_message = true
+                    local apply_initial_mode = function()
+                        if not restores_mode then
+                            session.config_options:set_initial_mode(
+                                session.agent.provider_config.default_mode
+                            )
+                        end
+                    end
+
+                    if #changes > 0 then
+                        restore_config_changes(session, changes, function()
+                            apply_initial_mode()
+
+                            if not restore_mode then
+                                session._is_first_message = true
+                            end
+
+                            vim.schedule(function()
+                                if on_created then
+                                    on_created()
+                                end
+                            end)
+                        end)
+                        return
+                    end
+
+                    apply_initial_mode()
+                end
+
+                if not restore_mode then
+                    session._is_first_message = true
+                end
+
+                vim.schedule(function()
+                    if on_created then
+                        on_created()
+                    end
+                end)
             end
 
-            vim.schedule(function()
-                if on_created then
-                    on_created()
-                end
-            end)
+            finish_session_setup()
         end
     )
 end

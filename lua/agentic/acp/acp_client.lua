@@ -30,7 +30,7 @@ local KNOWN_ACP_KINDS = {
 --- @field capabilities agentic.acp.ClientCapabilities
 --- @field agent_capabilities? agentic.acp.AgentCapabilities
 --- @field agent_info? agentic.acp.AgentInfo
---- @field callbacks table<number, fun(result: table|nil, err: agentic.acp.ACPError|nil)>
+--- @field callbacks table<number, fun(result: table|string|vim.NIL|nil, err: agentic.acp.ACPError|nil)>
 --- @field transport? agentic.acp.ACPTransportInstance
 --- @field subscribers table<string, agentic.acp.ClientHandlers>
 --- @field _ready_callbacks fun(client: agentic.acp.ACPClient)[]
@@ -108,6 +108,20 @@ function ACPClient:_notify_ready()
     for _, callback in ipairs(callbacks) do
         callback(self)
     end
+end
+
+--- @param callback fun(result: table|string|vim.NIL|nil, err: agentic.acp.ACPError|nil)
+--- @param result table|string|vim.NIL|nil
+--- @param err agentic.acp.ACPError|nil
+function ACPClient:_invoke_response_callback(callback, result, err)
+    if vim.in_fast_event() then
+        vim.schedule(function()
+            callback(result, err)
+        end)
+        return
+    end
+
+    callback(result, err)
 end
 
 --- @param session_id string
@@ -199,7 +213,7 @@ end
 
 --- @param method string
 --- @param params table|nil
---- @param callback fun(result: table|nil, err: agentic.acp.ACPError|nil)
+--- @param callback fun(result: table|string|vim.NIL|nil, err: agentic.acp.ACPError|nil)
 function ACPClient:_send_request(method, params, callback)
     local id = self:_next_id()
     local message = {
@@ -292,7 +306,11 @@ function ACPClient:_handle_message(message)
         local callback = self.callbacks[message.id]
         if callback then
             self.callbacks[message.id] = nil
-            callback(message.result, message.error)
+            self:_invoke_response_callback(
+                callback,
+                message.result,
+                message.error
+            )
         else
             Logger.notify(
                 "No callback found for response id: "

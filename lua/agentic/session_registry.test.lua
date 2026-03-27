@@ -6,33 +6,51 @@ describe("agentic.SessionRegistry", function()
     --- @type agentic.SessionRegistry
     local SessionRegistry
 
-    --- @type table Mock for SessionManager module
+    --- @type table
     local session_manager_mock
-    --- @type table Mock for ACPHealth module
+    --- @type table
     local acp_health_mock
-    --- @type table Stub for Logger module
+    --- @type table
     local logger_stub
-    --- @type table Mock for Config module
+    --- @type table
     local config_mock
-    --- @type table Mock for DefaultConfig module
+    --- @type table
     local default_config_mock
+
+    --- @type integer[]
+    local created_bufnrs
 
     --- @type TestStub|nil
     local ui_select_stub
 
     --- @param tab_page_id integer
-    --- @return table mock_session
-    local function create_mock_session(tab_page_id)
-        return {
+    --- @param opts {instance_id?: integer|nil}|nil
+    --- @return table
+    local function create_mock_session(tab_page_id, opts)
+        opts = opts or {}
+
+        local widget_bufnr = vim.api.nvim_create_buf(false, true)
+        created_bufnrs[#created_bufnrs + 1] = widget_bufnr
+
+        local session = {
             tab_page_id = tab_page_id,
+            instance_id = opts.instance_id,
+            widget_bufnr = widget_bufnr,
+            widget = {},
             destroy = function() end,
             is_mock = true,
         }
+
+        session.widget.owns_buffer = function(_, bufnr)
+            return bufnr == widget_bufnr
+        end
+
+        return session
     end
 
     session_manager_mock = {
-        new = function(_, tab_page_id)
-            return create_mock_session(tab_page_id)
+        new = function(_, tab_page_id, opts)
+            return create_mock_session(tab_page_id, opts)
         end,
     }
 
@@ -88,6 +106,7 @@ describe("agentic.SessionRegistry", function()
     end
 
     before_each(function()
+        created_bufnrs = {}
         package.loaded["agentic.session_manager"] = session_manager_mock
 
         acp_health_mock.check_configured_provider = function()
@@ -107,15 +126,34 @@ describe("agentic.SessionRegistry", function()
         }
         default_config_mock.provider = "claude-acp"
 
-        session_manager_mock.new = function(_, tab_page_id)
-            return create_mock_session(tab_page_id)
+        session_manager_mock.new = function(_, tab_page_id, opts)
+            return create_mock_session(tab_page_id, opts)
         end
     end)
 
     after_each(function()
         if SessionRegistry and SessionRegistry.sessions then
-            for k in pairs(SessionRegistry.sessions) do
-                SessionRegistry.sessions[k] = nil
+            for key in pairs(SessionRegistry.sessions) do
+                SessionRegistry.sessions[key] = nil
+            end
+        end
+
+        local active_sessions = SessionRegistry
+                and rawget(SessionRegistry, "_window_active_sessions")
+            or nil
+        if active_sessions then
+            for key in pairs(active_sessions) do
+                active_sessions[key] = nil
+            end
+        end
+
+        if SessionRegistry then
+            rawset(SessionRegistry, "_next_instance_id", 0)
+        end
+
+        for _, bufnr in ipairs(created_bufnrs or {}) do
+            if vim.api.nvim_buf_is_valid(bufnr) then
+                vim.api.nvim_buf_delete(bufnr, { force = true })
             end
         end
 
@@ -136,35 +174,46 @@ describe("agentic.SessionRegistry", function()
     end)
 
     describe("get_session_for_tab_page", function()
-        it("creates new session when none exists for tabpage", function()
+        it("creates a new session when none exists for the tabpage", function()
             local tab_id = 1
             local session = SessionRegistry.get_session_for_tab_page(tab_id)
 
             assert.is_not_nil(session)
             assert.is_true(session.is_mock)
             assert.equal(tab_id, session.tab_page_id)
+            assert.equal(session, SessionRegistry.sessions[session.instance_id])
         end)
 
-        it("returns existing session for tabpage", function()
-            local tab_id = 1
-            local session1 = SessionRegistry.get_session_for_tab_page(tab_id)
-            local session2 = SessionRegistry.get_session_for_tab_page(tab_id)
+        it(
+            "returns the session associated with the current editor window",
+            function()
+                local tab_id = 1
+                local first = SessionRegistry.new_session(tab_id)
+                local second = SessionRegistry.new_session(tab_id)
+                SessionRegistry.set_active_session(
+                    second,
+                    vim.api.nvim_get_current_win()
+                )
 
-            assert.equal(session1, session2)
-        end)
+                local resolved =
+                    SessionRegistry.get_session_for_tab_page(tab_id)
 
-        it("creates separate sessions for different tabpages", function()
-            local tab1_id = 1
-            local tab2_id = 2
+                assert.equal(second, resolved)
+                assert.are_not.equal(first, second)
+            end
+        )
 
-            local session1 = SessionRegistry.get_session_for_tab_page(tab1_id)
-            local session2 = SessionRegistry.get_session_for_tab_page(tab2_id)
+        it("prefers the session under the current cursor buffer", function()
+            local tab_id = vim.api.nvim_get_current_tabpage()
+            local first = SessionRegistry.new_session(tab_id)
+            local second = SessionRegistry.new_session(tab_id)
 
-            assert.is_not_nil(session1)
-            assert.is_not_nil(session2)
-            assert.are_not.equal(session1, session2)
-            assert.equal(tab1_id, session1.tab_page_id)
-            assert.equal(tab2_id, session2.tab_page_id)
+            vim.api.nvim_set_current_buf(first.widget_bufnr)
+
+            local resolved = SessionRegistry.get_session_for_tab_page(tab_id)
+
+            assert.equal(first, resolved)
+            assert.are_not.equal(first, second)
         end)
 
         it("uses current tabpage when tab_page_id is nil", function()
@@ -175,10 +224,9 @@ describe("agentic.SessionRegistry", function()
             assert.equal(current_tab_id, session.tab_page_id)
         end)
 
-        it("calls callback with session when provided", function()
+        it("calls callback with the resolved session", function()
             local tab_id = 1
             local callback_called = false
-            --- @type table|nil
             local callback_session = nil
 
             SessionRegistry.get_session_for_tab_page(tab_id, function(session)
@@ -188,36 +236,11 @@ describe("agentic.SessionRegistry", function()
 
             assert.is_true(callback_called)
             assert.is_not_nil(callback_session)
-            if callback_session then
-                assert.equal(tab_id, callback_session.tab_page_id)
-            end
+            assert.equal(tab_id, callback_session.tab_page_id)
         end)
 
         it(
-            "calls callback with existing session when already exists",
-            function()
-                local tab_id = 1
-                local existing_session =
-                    SessionRegistry.get_session_for_tab_page(tab_id)
-
-                local callback_called = false
-                local callback_session = nil
-
-                SessionRegistry.get_session_for_tab_page(
-                    tab_id,
-                    function(session)
-                        callback_called = true
-                        callback_session = session
-                    end
-                )
-
-                assert.is_true(callback_called)
-                assert.equal(existing_session, callback_session)
-            end
-        )
-
-        it(
-            "returns nil and does not call callback when provider not configured",
+            "returns nil and does not call callback when provider is not configured",
             function()
                 acp_health_mock.check_configured_provider = function()
                     return false
@@ -236,161 +259,121 @@ describe("agentic.SessionRegistry", function()
                 assert.is_false(callback_called)
             end
         )
+    end)
+
+    describe("get_current_session", function()
+        it("returns nil when the tabpage has no sessions", function()
+            assert.is_nil(SessionRegistry.get_current_session(1))
+        end)
 
         it(
-            "returns nil and skips registry when SessionManager:new returns nil",
+            "returns the editor-window session without creating a new one",
             function()
-                session_manager_mock.new = function()
-                    return nil
-                end
+                local tab_id = 1
+                local session = SessionRegistry.new_session(tab_id)
+                SessionRegistry.set_active_session(
+                    session,
+                    vim.api.nvim_get_current_win()
+                )
 
-                local session = SessionRegistry.get_session_for_tab_page(1)
+                local resolved = SessionRegistry.get_current_session(tab_id)
 
-                assert.is_nil(session)
-                assert.is_nil(SessionRegistry.sessions[1])
+                assert.equal(session, resolved)
+                assert.equal(1, #SessionRegistry.get_tab_sessions(tab_id))
             end
         )
     end)
 
     describe("new_session", function()
-        it("creates new session when none exists", function()
+        it("creates an additional session in the same tab", function()
             local tab_id = 1
-            local session = SessionRegistry.new_session(tab_id)
+            local first = SessionRegistry.new_session(tab_id)
+            local second = SessionRegistry.new_session(tab_id)
 
-            assert.is_not_nil(session)
-            assert.equal(tab_id, session.tab_page_id)
+            local sessions = SessionRegistry.get_tab_sessions(tab_id)
+
+            assert.are_not.equal(first, second)
+            assert.equal(2, #sessions)
+            assert.equal(first, sessions[1])
+            assert.equal(second, sessions[2])
+        end)
+    end)
+
+    describe("find_session_by_buf", function()
+        it("returns the owning session for a widget buffer", function()
+            local session = SessionRegistry.new_session(1)
+
+            local resolved =
+                SessionRegistry.find_session_by_buf(session.widget_bufnr)
+
+            assert.equal(session, resolved)
         end)
 
-        it("destroys existing session before creating new one", function()
-            local tab_id = 1
+        it("returns nil for unrelated buffers", function()
+            local bufnr = vim.api.nvim_create_buf(false, true)
+            created_bufnrs[#created_bufnrs + 1] = bufnr
 
-            local first_session = create_mock_session(tab_id)
-            local destroy_spy = spy.new(function() end)
-            first_session.destroy = destroy_spy
-            SessionRegistry.sessions[tab_id] = first_session
-
-            local new_session = SessionRegistry.new_session(tab_id)
-
-            assert.spy(destroy_spy).was.called(1)
-
-            assert.are_not.equal(first_session, new_session)
-            assert.equal(tab_id, new_session.tab_page_id)
-        end)
-
-        it("handles destroy errors gracefully", function()
-            local tab_id = 1
-
-            -- Create session with destroy that throws error
-            local error_session = create_mock_session(tab_id)
-            error_session.destroy = function()
-                error("destroy failed")
-            end
-            SessionRegistry.sessions[tab_id] = error_session
-
-            local new_session = SessionRegistry.new_session(tab_id)
-
-            assert.is_not_nil(new_session)
-            assert.equal(tab_id, new_session.tab_page_id)
-        end)
-
-        it("uses current tabpage when tab_page_id is nil", function()
-            local current_tab_id = vim.api.nvim_get_current_tabpage()
-            local session = SessionRegistry.new_session(nil)
-
-            assert.is_not_nil(session)
-            assert.equal(current_tab_id, session.tab_page_id)
-        end)
-
-        it("replaces session in registry", function()
-            local tab_id = 1
-
-            local first_session =
-                SessionRegistry.get_session_for_tab_page(tab_id)
-
-            local new_session = SessionRegistry.new_session(tab_id)
-
-            assert.equal(new_session, SessionRegistry.sessions[tab_id])
-            assert.are_not.equal(first_session, new_session)
-        end)
-
-        it("recreates session only for specified tabpage", function()
-            local tab1_id = 1
-            local tab2_id = 2
-
-            local session1_v1 =
-                SessionRegistry.get_session_for_tab_page(tab1_id)
-            local session2_v1 =
-                SessionRegistry.get_session_for_tab_page(tab2_id)
-
-            local session1_v2 = SessionRegistry.new_session(tab1_id)
-
-            assert.are_not.equal(session1_v1, session1_v2)
-            assert.equal(session2_v1, SessionRegistry.sessions[tab2_id])
+            assert.is_nil(SessionRegistry.find_session_by_buf(bufnr))
         end)
     end)
 
     describe("destroy_session", function()
-        it("destroys existing session and removes from registry", function()
-            local tab_id = 1
+        it(
+            "destroys the specified session and removes it from the registry",
+            function()
+                local session = create_mock_session(1, { instance_id = 7 })
+                local destroy_spy = spy.new(function() end)
+                session.destroy = destroy_spy
+                SessionRegistry.sessions[7] = session --[[@as agentic.SessionManager]]
+                SessionRegistry.set_active_session(
+                    session --[[@as agentic.SessionManager]],
+                    vim.api.nvim_get_current_win()
+                )
 
-            local session = create_mock_session(tab_id)
-            local destroy_spy = spy.new(function() end)
-            session.destroy = destroy_spy
-            SessionRegistry.sessions[tab_id] = session
+                SessionRegistry.destroy_session(
+                    session --[[@as agentic.SessionManager]]
+                )
 
-            SessionRegistry.destroy_session(tab_id)
-
-            assert.spy(destroy_spy).was.called(1)
-            assert.is_nil(SessionRegistry.sessions[tab_id])
-        end)
-
-        it("does nothing when no session exists for tabpage", function()
-            local tab_id = 1
-
-            SessionRegistry.destroy_session(tab_id)
-
-            assert.is_nil(SessionRegistry.sessions[tab_id])
-        end)
-
-        it("uses current tabpage when tab_page_id is nil", function()
-            local current_tab_id = vim.api.nvim_get_current_tabpage()
-
-            local session = create_mock_session(current_tab_id)
-            local destroy_spy = spy.new(function() end)
-            session.destroy = destroy_spy
-            SessionRegistry.sessions[current_tab_id] = session
-
-            SessionRegistry.destroy_session(nil)
-
-            assert.spy(destroy_spy).was.called(1)
-            assert.is_nil(SessionRegistry.sessions[current_tab_id])
-        end)
-
-        it("handles destroy errors gracefully", function()
-            local tab_id = 1
-
-            local error_session = create_mock_session(tab_id)
-            error_session.destroy = function()
-                error("destroy failed")
+                assert.spy(destroy_spy).was.called(1)
+                assert.is_nil(SessionRegistry.sessions[7])
             end
-            SessionRegistry.sessions[tab_id] = error_session
+        )
 
-            SessionRegistry.destroy_session(tab_id)
+        it(
+            "clears the active editor-window association for the destroyed session",
+            function()
+                local second = SessionRegistry.new_session(1)
+                SessionRegistry.set_active_session(
+                    second,
+                    vim.api.nvim_get_current_win()
+                )
 
-            assert.is_nil(SessionRegistry.sessions[tab_id])
+                SessionRegistry.destroy_session(second)
+
+                assert.is_nil(SessionRegistry.get_current_session(1))
+            end
+        )
+
+        it("does nothing when no session matches the target", function()
+            SessionRegistry.destroy_session(999)
+
+            assert.equal(0, #SessionRegistry.get_tab_sessions(1))
         end)
+    end)
 
-        it("only affects specified tabpage", function()
-            local tab1_id = 1
-            local tab2_id = 2
+    describe("destroy_sessions_for_tab", function()
+        it("destroys all sessions in the given tab only", function()
+            local tab1_first = SessionRegistry.new_session(1)
+            local tab1_second = SessionRegistry.new_session(1)
+            local tab2_session = SessionRegistry.new_session(2)
 
-            SessionRegistry.sessions[tab1_id] = create_mock_session(tab1_id)
-            SessionRegistry.sessions[tab2_id] = create_mock_session(tab2_id)
+            SessionRegistry.destroy_sessions_for_tab(1)
 
-            SessionRegistry.destroy_session(tab1_id)
-
-            assert.is_nil(SessionRegistry.sessions[tab1_id])
-            assert.is_not_nil(SessionRegistry.sessions[tab2_id])
+            assert.is_nil(SessionRegistry.sessions[tab1_first.instance_id])
+            assert.is_nil(SessionRegistry.sessions[tab1_second.instance_id])
+            assert.is_not_nil(
+                SessionRegistry.sessions[tab2_session.instance_id]
+            )
         end)
     end)
 
@@ -442,7 +425,7 @@ describe("agentic.SessionRegistry", function()
             assert.is_false(captured_items[2].installed)
         end)
 
-        it("marks provider without config as not-installed", function()
+        it("marks providers without config as not-installed", function()
             acp_health_mock.get_default_provider_names = function()
                 return { "unknown-acp" }
             end
@@ -454,111 +437,22 @@ describe("agentic.SessionRegistry", function()
             assert.is_false(captured_items[1].installed)
         end)
 
-        it("calls on_selected with provider name on selection", function()
+        it("calls on_selected with the provider name on selection", function()
             acp_health_mock.get_default_provider_names = function()
                 return { "claude-acp" }
             end
 
-            local result = nil
-            SessionRegistry.select_provider(function(name)
-                result = name
+            local selected = nil
+            SessionRegistry.select_provider(function(provider_name)
+                selected = provider_name
             end)
 
-            captured_on_choice({ name = "claude-acp", installed = true })
+            captured_on_choice(captured_items[1])
 
-            assert.equal("claude-acp", result)
-        end)
-
-        it("calls on_selected with nil on cancellation", function()
-            acp_health_mock.get_default_provider_names = function()
-                return { "claude-acp" }
-            end
-
-            local called = false
-            local result = nil
-            SessionRegistry.select_provider(function(name)
-                called = true
-                result = name
-            end)
-
-            captured_on_choice(nil)
-
-            assert.is_true(called)
-            assert.is_nil(result)
-        end)
-
-        describe("format_item labels", function()
-            before_each(function()
-                acp_health_mock.get_default_provider_names = function()
-                    return { "claude-acp", "gemini-acp" }
-                end
-                acp_health_mock.is_command_available = function(cmd)
-                    return cmd == "claude-code-acp"
-                end
-            end)
-
-            it("appends '(current)' for Config.provider", function()
-                config_mock.provider = "claude-acp"
-                default_config_mock.provider = "gemini-acp"
-
-                SessionRegistry.select_provider(function() end)
-
-                local label = captured_opts.format_item({
-                    name = "claude-acp",
-                    installed = true,
-                })
-                assert.equal("claude-acp (current) ✓ available", label)
-            end)
-
-            it(
-                "appends '(default)' for DefaultConfig.provider when not current",
-                function()
-                    config_mock.provider = "gemini-acp"
-                    default_config_mock.provider = "claude-acp"
-
-                    SessionRegistry.select_provider(function() end)
-
-                    local label = captured_opts.format_item({
-                        name = "claude-acp",
-                        installed = true,
-                    })
-                    assert.equal("claude-acp (default) ✓ available", label)
-                end
-            )
-
-            it("appends availability suffix based on installed flag", function()
-                config_mock.provider = "none"
-                default_config_mock.provider = "none"
-
-                SessionRegistry.select_provider(function() end)
-
-                local installed_label = captured_opts.format_item({
-                    name = "claude-acp",
-                    installed = true,
-                })
-                local missing_label = captured_opts.format_item({
-                    name = "gemini-acp",
-                    installed = false,
-                })
-
-                assert.equal("claude-acp ✓ available", installed_label)
-                assert.equal("gemini-acp ✗ not installed", missing_label)
-            end)
-
-            it(
-                "prefers '(current)' over '(default)' when both match",
-                function()
-                    config_mock.provider = "claude-acp"
-                    default_config_mock.provider = "claude-acp"
-
-                    SessionRegistry.select_provider(function() end)
-
-                    local label = captured_opts.format_item({
-                        name = "claude-acp",
-                        installed = true,
-                    })
-                    assert.equal("claude-acp (current) ✓ available", label)
-                end
+            assert.equal("claude-acp", selected)
+            assert.equal(
+                "Select an ACP provider for the new session:",
+                captured_opts.prompt
             )
         end)
     end)

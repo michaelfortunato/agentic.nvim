@@ -5,7 +5,6 @@ describe("SessionRestore", function()
     --- @type agentic.SessionRestore
     local SessionRestore
     local PersistedSession
-    local InteractionModel
     local SessionRegistry
     local Logger
 
@@ -14,7 +13,7 @@ describe("SessionRestore", function()
     --- @type TestStub
     local persisted_session_list_stub
     --- @type TestStub
-    local session_registry_stub
+    local session_registry_new_stub
     --- @type TestStub
     local logger_notify_stub
     --- @type TestStub
@@ -92,9 +91,7 @@ describe("SessionRestore", function()
     end
 
     local function setup_registry_stub(session)
-        session_registry_stub:invokes(function(_tab_id, callback)
-            callback(session)
-        end)
+        session_registry_new_stub:returns(session)
     end
 
     local function select_session(index)
@@ -106,21 +103,18 @@ describe("SessionRestore", function()
     before_each(function()
         package.loaded["agentic.session_restore"] = nil
         package.loaded["agentic.session.persisted_session"] = nil
-        package.loaded["agentic.session.interaction_model"] = nil
         package.loaded["agentic.session_registry"] = nil
         package.loaded["agentic.utils.logger"] = nil
 
         SessionRestore = require("agentic.session_restore")
         PersistedSession = require("agentic.session.persisted_session")
-        InteractionModel = require("agentic.session.interaction_model")
         SessionRegistry = require("agentic.session_registry")
         Logger = require("agentic.utils.logger")
 
         persisted_session_load_stub = spy.stub(PersistedSession, "load")
         persisted_session_list_stub =
             spy.stub(PersistedSession, "list_sessions")
-        session_registry_stub =
-            spy.stub(SessionRegistry, "get_session_for_tab_page")
+        session_registry_new_stub = spy.stub(SessionRegistry, "new_session")
         logger_notify_stub = spy.stub(Logger, "notify")
         vim_ui_select_stub = spy.stub(vim.ui, "select")
     end)
@@ -128,7 +122,7 @@ describe("SessionRestore", function()
     after_each(function()
         persisted_session_load_stub:revert()
         persisted_session_list_stub:revert()
-        session_registry_stub:revert()
+        session_registry_new_stub:revert()
         logger_notify_stub:revert()
         vim_ui_select_stub:revert()
     end)
@@ -295,7 +289,7 @@ describe("SessionRestore", function()
                 logger_notify_stub.calls[1][1]:match("File not found")
             )
             assert.equal(vim.log.levels.WARN, logger_notify_stub.calls[1][2])
-            assert.spy(session_registry_stub).was.called(0)
+            assert.spy(session_registry_new_stub).was.called(0)
         end)
 
         it("shows warning on nil history without error", function()
@@ -309,7 +303,7 @@ describe("SessionRestore", function()
 
             assert.spy(logger_notify_stub).was.called(1)
             assert.truthy(logger_notify_stub.calls[1][1]:match("unknown error"))
-            assert.spy(session_registry_stub).was.called(0)
+            assert.spy(session_registry_new_stub).was.called(0)
         end)
     end)
 

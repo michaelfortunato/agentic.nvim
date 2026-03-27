@@ -31,16 +31,19 @@ local WidgetLayout = require("agentic.ui.widget_layout")
 --- Options for showing the widget
 --- @class agentic.ui.ChatWidget.ShowOpts : agentic.ui.ChatWidget.AddToContextOpts
 --- @field auto_add_to_context? boolean Automatically add current selection or file to context when opening
+--- @field anchor_winid? integer Open the widget relative to this window when creating it
 
 --- A sidebar-style chat widget with multiple windows stacked vertically
 --- The main chat window is the first, and contains the width, the below ones adapt to its size
 --- @class agentic.ui.ChatWidget
+--- @field instance_id? integer
 --- @field tab_page_id integer
 --- @field buf_nrs agentic.ui.ChatWidget.BufNrs
 --- @field win_nrs agentic.ui.ChatWidget.WinNrs
 --- @field on_submit_input fun(prompt: string) external callback to be called when user submits the input
 --- @field _chat_viewport agentic.ui.ChatViewport
 --- @field _message_writer? agentic.ui.MessageWriter
+--- @field _headers agentic.ui.ChatWidget.Headers
 local ChatWidget = {}
 ChatWidget.__index = ChatWidget
 local KEYMAP_HELP_KEY = "?"
@@ -48,7 +51,9 @@ local KEYMAP_HELP_SUFFIX = "?: keymaps"
 
 --- @param tab_page_id integer
 --- @param on_submit_input fun(prompt: string)
-function ChatWidget:new(tab_page_id, on_submit_input)
+--- @param opts {instance_id?: integer|nil}|nil
+function ChatWidget:new(tab_page_id, on_submit_input, opts)
+    opts = opts or {}
     self = setmetatable({}, self)
 
     self.win_nrs = {}
@@ -56,6 +61,8 @@ function ChatWidget:new(tab_page_id, on_submit_input)
     self._header_overlays = {}
     self.on_submit_input = on_submit_input
     self.tab_page_id = tab_page_id
+    self.instance_id = opts.instance_id
+    self._headers = WindowDecoration.get_default_headers()
 
     self:_initialize()
     self._chat_viewport = ChatViewport:new({
@@ -96,6 +103,7 @@ function ChatWidget:show(opts)
         buf_nrs = self.buf_nrs,
         win_nrs = self.win_nrs,
         focus_prompt = opts.focus_prompt,
+        anchor_winid = opts.anchor_winid,
     })
 
     self:_restore_chat_window_view()
@@ -276,9 +284,14 @@ function ChatWidget:bind_message_writer(message_writer)
     self._chat_viewport:bind_message_writer(message_writer)
 end
 
-function ChatWidget:_unbind_message_writer()
+function ChatWidget:unbind_message_writer()
     self._message_writer = nil
     self._chat_viewport:unbind_message_writer()
+end
+
+--- @param on_submit_input fun(prompt: string)|nil
+function ChatWidget:set_submit_input_handler(on_submit_input)
+    self.on_submit_input = on_submit_input or function() end
 end
 
 function ChatWidget:_submit_input()
@@ -390,6 +403,12 @@ function ChatWidget:set_input_text(text)
     BufHelpers.with_modifiable(self.buf_nrs.input, function(bufnr)
         vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
     end)
+end
+
+--- @return string
+function ChatWidget:get_input_text()
+    local lines = vim.api.nvim_buf_get_lines(self.buf_nrs.input, 0, -1, false)
+    return table.concat(lines, "\n")
 end
 
 function ChatWidget:_initialize()
@@ -613,16 +632,12 @@ local function build_input_suffix(mode)
 end
 
 function ChatWidget:_refresh_header_keymap_hints()
-    if not vim.api.nvim_tabpage_is_valid(self.tab_page_id) then
+    if not self._headers then
         return
     end
 
-    local headers = WindowDecoration.get_headers_state(self.tab_page_id)
-
-    headers.chat.suffix = KEYMAP_HELP_SUFFIX
-    headers.input.suffix = build_input_suffix(vim.fn.mode())
-
-    WindowDecoration.set_headers_state(self.tab_page_id, headers)
+    self._headers.chat.suffix = KEYMAP_HELP_SUFFIX
+    self._headers.input.suffix = build_input_suffix(vim.fn.mode())
 end
 
 --- Binds events to change the suffix header texts based on current mode keymaps
@@ -660,11 +675,18 @@ function ChatWidget:render_header(window_name, context)
         self._header_contexts[window_name] = context
     end
 
-    WindowDecoration.render_header(
-        bufnr,
-        window_name,
-        self:_get_effective_header_context(window_name)
-    )
+    local header = self._headers and self._headers[window_name] or nil
+    if not header then
+        return
+    end
+
+    local rendered_header = vim.deepcopy(header)
+    rendered_header.context = self:_get_effective_header_context(window_name)
+
+    WindowDecoration.render_header(bufnr, window_name, rendered_header, {
+        name_suffix = self.instance_id and ("#" .. tostring(self.instance_id))
+            or nil,
+    })
 end
 
 --- @param panel_name agentic.ui.ChatWidget.PanelNames
@@ -740,6 +762,30 @@ function ChatWidget:find_first_non_widget_window()
     return nil
 end
 
+--- Finds the first editor window in the current tabpage that is not part of any Agentic widget.
+--- @return number|nil winid
+function ChatWidget:find_first_editor_window()
+    local all_windows = vim.api.nvim_tabpage_list_wins(self.tab_page_id)
+    local widget_win_ids = {}
+    for _, winid in pairs(self.win_nrs) do
+        if winid then
+            widget_win_ids[winid] = true
+        end
+    end
+
+    for _, winid in ipairs(all_windows) do
+        if not widget_win_ids[winid] then
+            local bufnr = vim.api.nvim_win_get_buf(winid)
+            local ft = vim.bo[bufnr].filetype
+            if not EXCLUDED_FILETYPES[ft] and not ft:match("^Agentic") then
+                return winid
+            end
+        end
+    end
+
+    return nil
+end
+
 --- Checks if a buffer belongs to this widget
 --- @param bufnr number
 --- @return boolean
@@ -750,6 +796,12 @@ function ChatWidget:_is_widget_buffer(bufnr)
         end
     end
     return false
+end
+
+--- @param bufnr integer
+--- @return boolean
+function ChatWidget:owns_buffer(bufnr)
+    return self:_is_widget_buffer(bufnr)
 end
 
 --- Opens a new window on the left side with full height

@@ -99,6 +99,108 @@ describe("Open and Close Chat Widget", function()
         assert.equal(1, session_count_after)
     end)
 
+    it("allows multiple independent sessions in the same tabpage", function()
+        child.lua([[ require("agentic").toggle() ]])
+        child.flush()
+
+        child.lua(
+            [[ require("agentic").new_session({ auto_add_to_context = false }) ]]
+        )
+        child.flush()
+
+        local tab_sessions = child.lua_get([[
+            #require("agentic.session_registry").get_tab_sessions(vim.api.nvim_get_current_tabpage())
+        ]])
+        assert.equal(2, tab_sessions)
+
+        local filetypes = get_tabpage_filetypes(0)
+        local chat_count = 0
+        local input_count = 0
+        for _, filetype in ipairs(filetypes) do
+            if filetype == "AgenticChat" then
+                chat_count = chat_count + 1
+            elseif filetype == "AgenticInput" then
+                input_count = input_count + 1
+            end
+        end
+
+        assert.equal(2, chat_count)
+        assert.equal(2, input_count)
+    end)
+
+    it("loads another live session into the current chat widget", function()
+        child.lua([[ require("agentic").toggle({ auto_add_to_context = false }) ]])
+        child.flush()
+
+        child.lua([[
+(function()
+    local session = require("agentic.session_registry").get_current_session()
+    session.widget:set_input_text("first draft")
+end)()
+]])
+
+        child.lua(
+            [[ require("agentic").new_session({ auto_add_to_context = false }) ]]
+        )
+        child.flush()
+
+        child.lua([[
+(function()
+    local session = require("agentic.session_registry").get_current_session()
+    session.widget:set_input_text("second draft")
+end)()
+]])
+
+        local before_swap = child.lua_get([[
+(function()
+    local registry = require("agentic.session_registry")
+    local sessions = registry.get_tab_sessions(vim.api.nvim_get_current_tabpage())
+    return {
+        first_input_bufnr = sessions[1].widget.buf_nrs.input,
+        second_input_bufnr = sessions[2].widget.buf_nrs.input,
+    }
+end)()
+]])
+
+        child.lua([[
+(function()
+    local registry = require("agentic.session_registry")
+    local sessions = registry.get_tab_sessions(vim.api.nvim_get_current_tabpage())
+    vim.api.nvim_set_current_win(sessions[2].widget.win_nrs.input)
+    registry.load_session_into_current_widget(sessions[1])
+end)()
+]])
+        child.flush()
+
+        local after_swap = child.lua_get([[
+(function()
+    local registry = require("agentic.session_registry")
+    local sessions = registry.get_tab_sessions(vim.api.nvim_get_current_tabpage())
+    local current = registry.find_session_by_buf(vim.api.nvim_get_current_buf())
+    return {
+        first_input_bufnr = sessions[1].widget.buf_nrs.input,
+        second_input_bufnr = sessions[2].widget.buf_nrs.input,
+        first_input_lines = vim.api.nvim_buf_get_lines(sessions[1].widget.buf_nrs.input, 0, -1, false),
+        second_input_lines = vim.api.nvim_buf_get_lines(sessions[2].widget.buf_nrs.input, 0, -1, false),
+        current_instance_id = current and current.instance_id or nil,
+        first_instance_id = sessions[1].instance_id,
+    }
+end)()
+]])
+
+        assert.equal(
+            before_swap.second_input_bufnr,
+            after_swap.first_input_bufnr
+        )
+        assert.equal(
+            before_swap.first_input_bufnr,
+            after_swap.second_input_bufnr
+        )
+        assert.same({ "first draft" }, after_swap.first_input_lines)
+        assert.same({ "second draft" }, after_swap.second_input_lines)
+        assert.equal(after_swap.first_instance_id, after_swap.current_instance_id)
+    end)
+
     it("handles tabclose while in insert mode without errors", function()
         -- Open widget
         child.lua([[ require("agentic").toggle() ]])
@@ -135,7 +237,7 @@ describe("Open and Close Chat Widget", function()
         local expected_input_bufnr = child.lua_get([[
 (function()
     local tab_id = vim.api.nvim_get_current_tabpage()
-    local session = require("agentic.session_registry").sessions[tab_id]
+    local session = require("agentic.session_registry").get_current_session(tab_id)
     return session.widget.buf_nrs.input
 end)()
 ]])

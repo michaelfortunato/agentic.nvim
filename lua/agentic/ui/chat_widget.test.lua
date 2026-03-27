@@ -4,7 +4,6 @@ local Config = require("agentic.config")
 local KeymapHelp = require("agentic.ui.keymap_help")
 local Logger = require("agentic.utils.logger")
 local WidgetLayout = require("agentic.ui.widget_layout")
-local WindowDecoration = require("agentic.ui.window_decoration")
 
 describe("agentic.ui.ChatWidget", function()
     --- @type agentic.ui.ChatWidget
@@ -88,13 +87,10 @@ describe("agentic.ui.ChatWidget", function()
             it(
                 "initializes prompt header hints from the current keymaps",
                 function()
-                    local headers =
-                        WindowDecoration.get_headers_state(tab_page_id)
-
-                    assert.equal("?: keymaps", headers.chat.suffix)
+                    assert.equal("?: keymaps", widget._headers.chat.suffix)
                     assert.equal(
                         "?: keymaps · <CR>: submit",
-                        headers.input.suffix
+                        widget._headers.input.suffix
                     )
                 end
             )

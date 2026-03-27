@@ -89,6 +89,7 @@ end
 --- @field inline_request? {prompt: string, selection: agentic.Selection, source_bufnr: integer, source_winid: integer}|nil
 
 --- @class agentic.SessionManager
+--- @field instance_id? integer
 --- @field session_id? string
 --- @field tab_page_id integer
 --- @field _is_first_message boolean Whether this is the first message in the session, used to add system info only once
@@ -114,27 +115,21 @@ end
 --- @field _session_starting boolean
 --- @field _session_state_subscription? integer
 --- @field _pending_session_callbacks fun()[]
+--- @field _restoring_widget_state? boolean
 local SessionManager = {}
 SessionManager.__index = SessionManager
 
 --- @param tab_page_id integer
-function SessionManager:new(tab_page_id)
+--- @param opts {instance_id?: integer|nil}|nil
+function SessionManager:new(tab_page_id, opts)
+    opts = opts or {}
     local AgentInstance = require("agentic.acp.agent_instance")
-    local BufHelpers = require("agentic.utils.buf_helpers")
     local ChatWidget = require("agentic.ui.chat_widget")
-    local CodeSelection = require("agentic.ui.code_selection")
-    local FileList = require("agentic.ui.file_list")
-    local FilePicker = require("agentic.ui.file_picker")
     local InlineChat = require("agentic.ui.inline_chat")
-    local MessageWriter = require("agentic.ui.message_writer")
     local PermissionManager = require("agentic.ui.permission_manager")
-    local ReviewController = require("agentic.ui.review_controller")
-    local QueueList = require("agentic.ui.queue_list")
-    local StatusAnimation = require("agentic.ui.status_animation")
-    local TodoList = require("agentic.ui.todo_list")
-    local AgentConfigOptions = require("agentic.acp.agent_config_options")
 
     self = setmetatable({
+        instance_id = opts.instance_id,
         session_id = nil,
         tab_page_id = tab_page_id,
         _is_first_message = true,
@@ -163,8 +158,143 @@ function SessionManager:new(tab_page_id)
     self.agent = agent
 
     self.session_state = SessionState:new()
+    self.permission_manager = PermissionManager:new(self.session_state)
 
-    self.widget = ChatWidget:new(tab_page_id, function(input_text)
+    self.widget = ChatWidget:new(tab_page_id, function() end, {
+        instance_id = self.instance_id,
+    })
+    self._session_state_subscription = self.session_state:subscribe(
+        function(state)
+            self:_render_interaction_session(state)
+        end
+    )
+    self:_attach_widget(self.widget)
+
+    self.inline_chat = InlineChat:new({
+        tab_page_id = tab_page_id,
+        on_submit = function(request)
+            return self:_submit_inline_request(request)
+        end,
+        on_change_mode = function()
+            self.config_options:show_mode_selector()
+        end,
+        on_change_model = function()
+            self.config_options:show_model_selector()
+        end,
+        on_change_thought_level = function()
+            self.config_options:show_thought_level_selector()
+        end,
+        on_change_approval_preset = function()
+            self.config_options:show_approval_preset_selector()
+        end,
+        get_config_context = function()
+            return self.config_options and self.config_options:get_header_context()
+                or nil
+        end,
+    })
+
+    return self
+end
+
+--- @return {input_text: string, file_paths: string[], code_selections: agentic.Selection[], diagnostics: agentic.ui.DiagnosticsList.Diagnostic[]}
+function SessionManager:_capture_widget_state()
+    --- @type {input_text: string, file_paths: string[], code_selections: agentic.Selection[], diagnostics: agentic.ui.DiagnosticsList.Diagnostic[]}
+    local snapshot = {
+        input_text = "",
+        file_paths = {},
+        code_selections = {},
+        diagnostics = {},
+    }
+
+    if self.widget and self.widget.get_input_text then
+        snapshot.input_text = self.widget:get_input_text()
+    end
+
+    if self.file_list and self.file_list.get_files then
+        snapshot.file_paths = self.file_list:get_files()
+    end
+
+    if self.code_selection and self.code_selection.get_selections then
+        snapshot.code_selections = self.code_selection:get_selections()
+    end
+
+    if self.diagnostics_list and self.diagnostics_list.get_diagnostics then
+        snapshot.diagnostics = self.diagnostics_list:get_diagnostics()
+    end
+
+    return snapshot
+end
+
+function SessionManager:_destroy_widget_bindings()
+    if self.review_controller then
+        self.review_controller:destroy()
+        self.review_controller = nil
+    end
+
+    if self.status_animation and self.status_animation.stop then
+        self.status_animation:stop()
+    end
+    self.status_animation = nil
+
+    if self.message_writer and self.message_writer.destroy then
+        self.message_writer:destroy()
+    end
+    self.message_writer = nil
+
+    if self.widget then
+        if self.widget.unbind_message_writer then
+            self.widget:unbind_message_writer()
+        end
+
+        if self.widget.set_submit_input_handler then
+            self.widget:set_submit_input_handler(function() end)
+        end
+    end
+
+    self.queue_list = nil
+    self.config_options = nil
+    self.file_list = nil
+    self.code_selection = nil
+    self.diagnostics_list = nil
+    self.todo_list = nil
+    self.file_picker = nil
+end
+
+function SessionManager:_bind_widget_session_keymaps()
+    if not self.widget then
+        return
+    end
+
+    local BufHelpers = require("agentic.utils.buf_helpers")
+    for _, bufnr in pairs(self.widget.buf_nrs) do
+        BufHelpers.multi_keymap_set(
+            Config.keymaps.widget.manage_queue,
+            bufnr,
+            function()
+                self:_focus_queue_panel()
+            end,
+            { desc = "Agentic: Manage queued messages" }
+        )
+    end
+end
+
+--- @param widget agentic.ui.ChatWidget
+--- @param snapshot {input_text?: string|nil, file_paths?: string[]|nil, code_selections?: agentic.Selection[]|nil, diagnostics?: agentic.ui.DiagnosticsList.Diagnostic[]|nil}|nil
+function SessionManager:_attach_widget(widget, snapshot)
+    local AgentConfigOptions = require("agentic.acp.agent_config_options")
+    local CodeSelection = require("agentic.ui.code_selection")
+    local FileList = require("agentic.ui.file_list")
+    local FilePicker = require("agentic.ui.file_picker")
+    local MessageWriter = require("agentic.ui.message_writer")
+    local QueueList = require("agentic.ui.queue_list")
+    local ReviewController = require("agentic.ui.review_controller")
+    local StatusAnimation = require("agentic.ui.status_animation")
+    local TodoList = require("agentic.ui.todo_list")
+
+    snapshot = snapshot or {}
+    self:_destroy_widget_bindings()
+    self.widget = widget
+    self.widget:set_submit_input_handler(function(input_text)
         self:_handle_input_submit(input_text)
     end)
 
@@ -178,13 +308,8 @@ function SessionManager:new(tab_page_id)
         provider_name = self.agent.provider_config.name,
     })
     self.widget:bind_message_writer(self.message_writer)
-    self._session_state_subscription = self.session_state:subscribe(
-        function(state)
-            self:_render_interaction_session(state)
-        end
-    )
+
     self.status_animation = StatusAnimation:new(self.widget.buf_nrs.chat)
-    self.permission_manager = PermissionManager:new(self.session_state)
     self.review_controller = ReviewController:new(
         self.session_state,
         self.widget,
@@ -193,6 +318,7 @@ function SessionManager:new(tab_page_id)
     self.permission_manager:set_diff_review_handler(function(current_request)
         return self.review_controller:activate_diff_review(current_request)
     end)
+
     self.queue_list = QueueList:new(self.widget.buf_nrs.queue, {
         on_steer = function(submission_id)
             self:_steer_queued_submission(submission_id)
@@ -223,7 +349,9 @@ function SessionManager:new(tab_page_id)
             self.widget:move_cursor_to(self.widget.win_nrs.input)
         else
             self.widget:render_header("files", tostring(#file_list:get_files()))
-            self.widget:show({ focus_prompt = false })
+            if not self._restoring_widget_state then
+                self.widget:show({ focus_prompt = false })
+            end
         end
     end)
 
@@ -238,7 +366,9 @@ function SessionManager:new(tab_page_id)
                     "code",
                     tostring(#code_selection:get_selections())
                 )
-                self.widget:show({ focus_prompt = false })
+                if not self._restoring_widget_state then
+                    self.widget:show({ focus_prompt = false })
+                end
             end
         end
     )
@@ -250,58 +380,90 @@ function SessionManager:new(tab_page_id)
                 self.widget:close_optional_window("diagnostics")
                 self.widget:move_cursor_to(self.widget.win_nrs.input)
             else
-                -- show() opens layouts but does not update the diagnostics header count
                 self.widget:render_header(
                     "diagnostics",
                     tostring(#diagnostics_list:get_diagnostics())
                 )
-                self.widget:show({ focus_prompt = false })
+                if not self._restoring_widget_state then
+                    self.widget:show({ focus_prompt = false })
+                end
             end
         end
     )
 
     self.todo_list = TodoList:new(self.widget.buf_nrs.todos, function(todo_list)
-        if not todo_list:is_empty() then
+        if not todo_list:is_empty() and not self._restoring_widget_state then
             self.widget:show({ focus_prompt = false })
         end
     end, function()
         self.widget:close_optional_window("todos")
     end)
 
-    self.inline_chat = InlineChat:new({
-        tab_page_id = tab_page_id,
-        on_submit = function(request)
-            return self:_submit_inline_request(request)
-        end,
-        on_change_mode = function()
-            self.config_options:show_mode_selector()
-        end,
-        on_change_model = function()
-            self.config_options:show_model_selector()
-        end,
-        on_change_thought_level = function()
-            self.config_options:show_thought_level_selector()
-        end,
-        on_change_approval_preset = function()
-            self.config_options:show_approval_preset_selector()
-        end,
-        get_config_context = function()
-            return self.config_options:get_header_context()
-        end,
-    })
+    self:_bind_widget_session_keymaps()
 
-    for _, bufnr in pairs(self.widget.buf_nrs) do
-        BufHelpers.multi_keymap_set(
-            Config.keymaps.widget.manage_queue,
-            bufnr,
-            function()
-                self:_focus_queue_panel()
-            end,
-            { desc = "Agentic: Manage queued messages" }
-        )
+    self._restoring_widget_state = true
+    self.widget:set_input_text(snapshot.input_text or "")
+    for _, file_path in ipairs(snapshot.file_paths or {}) do
+        self.file_list:add(file_path)
+    end
+    for _, selection in ipairs(snapshot.code_selections or {}) do
+        self.code_selection:add(selection)
+    end
+    self.diagnostics_list:add_many(snapshot.diagnostics or {})
+
+    local state = self.session_state:get_state()
+    self.config_options:set_options(
+        state.session.config_options or {},
+        self.agent and self.agent.provider_config or nil
+    )
+    if state.session.current_mode_id and self.config_options.set_current_mode then
+        self.config_options:set_current_mode(state.session.current_mode_id)
+    end
+    SlashCommands.setCommands(
+        self.widget.buf_nrs.input,
+        state.session.available_commands or {}
+    )
+
+    if Config.windows.todos.display then
+        local entries = SessionSelectors.get_latest_plan_entries(state)
+        if #entries > 0 then
+            self.todo_list:render(entries)
+        else
+            self.todo_list:clear()
+        end
     end
 
-    return self
+    self.queue_list:set_items(self.submission_queue:list())
+    self:_render_interaction_session(state)
+    self:_render_window_headers()
+    self._restoring_widget_state = false
+    self:_sync_queue_panel(self.submission_queue:count() > 0)
+    self:_sync_inline_queue_states()
+    SessionManager._refresh_chat_activity(self)
+
+    if self.widget:is_open() then
+        self.widget:show({ focus_prompt = false })
+    end
+end
+
+--- @param other_session agentic.SessionManager|nil
+function SessionManager:swap_widget(other_session)
+    if
+        other_session == nil
+        or other_session == self
+        or self.widget == nil
+        or other_session.widget == nil
+    then
+        return
+    end
+
+    local own_snapshot = self:_capture_widget_state()
+    local other_snapshot = other_session:_capture_widget_state()
+    local own_widget = self.widget
+    local other_widget = other_session.widget
+
+    self:_attach_widget(other_widget, own_snapshot)
+    other_session:_attach_widget(own_widget, other_snapshot)
 end
 
 --- @param file_picker_module agentic.ui.FilePicker|nil
@@ -602,16 +764,24 @@ function SessionManager:_on_tool_call_update(tool_call_update)
         self.inline_chat:handle_tool_call_update(tool_call_update)
     end
 
-    dispatch_state_events(self, {
+    local events = {
         SessionEvents.upsert_interaction_tool_call(
             self.agent.provider_config.name,
             tool_call_update
         ),
-        SessionEvents.clear_review_target(
+    }
+
+    if
+        tool_call_update.status == "completed"
+        or tool_call_update.status == "failed"
+    then
+        events[#events + 1] = SessionEvents.clear_review_target(
             tool_call_update.tool_call_id,
             tool_call_update.status == "failed"
-        ),
-    })
+        )
+    end
+
+    dispatch_state_events(self, events)
 
     if tool_call_update.status == "failed" then
         self.permission_manager:remove_request_by_tool_call_id(
@@ -632,7 +802,16 @@ function SessionManager:_on_tool_call_update(tool_call_update)
             )
         end
 
-        if tracker and tracker.kind and FILE_MUTATING_KINDS[tracker.kind] then
+        local tool_kind = tracker and tracker.kind or tool_call_update.kind
+        if tool_kind and FILE_MUTATING_KINDS[tool_kind] then
+            if
+                self.inline_chat
+                and self.inline_chat.is_active
+                and self.inline_chat:is_active()
+                and self.inline_chat.handle_applied_edit
+            then
+                self.inline_chat:handle_applied_edit()
+            end
             vim.cmd.checktime()
         end
     end
@@ -1018,6 +1197,13 @@ end
 
 --- @param submission agentic.SessionManager.QueuedSubmission
 function SessionManager:_dispatch_submission(submission)
+    if not self.session_id then
+        self:_with_active_session(function()
+            self:_dispatch_submission(submission)
+        end)
+        return
+    end
+
     if submission.inline_request and self.inline_chat then
         self.inline_chat:begin_request({
             submission_id = submission.id,
@@ -1236,7 +1422,7 @@ end
 --- @return string
 function SessionManager:_get_workspace_root()
     local file_path
-    local target_winid = self.widget:find_first_non_widget_window()
+    local target_winid = self.widget:find_first_editor_window()
 
     if target_winid and vim.api.nvim_win_is_valid(target_winid) then
         local target_bufnr = vim.api.nvim_win_get_buf(target_winid)

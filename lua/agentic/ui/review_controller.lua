@@ -4,12 +4,6 @@ local Logger = require("agentic.utils.logger")
 local PermissionOption = require("agentic.utils.permission_option")
 local SessionSelectors = require("agentic.session.session_selectors")
 
-local DIFF_PREVIEW_KINDS = {
-    edit = true,
-    create = true,
-    write = true,
-}
-
 --- @param permission_manager agentic.ui.PermissionManager
 --- @param option_id string
 local function complete_current_request(permission_manager, option_id)
@@ -43,6 +37,30 @@ local function get_review_diff(tracker)
     return nil
 end
 
+--- @param tracker table|nil
+--- @return string|nil
+local function get_review_file_path(tracker)
+    if not tracker then
+        return nil
+    end
+
+    if tracker.file_path and tracker.file_path ~= "" then
+        return tracker.file_path
+    end
+
+    for _, content_node in ipairs(tracker.content_nodes or {}) do
+        if
+            content_node.type == "diff_output"
+            and content_node.file_path
+            and content_node.file_path ~= ""
+        then
+            return content_node.file_path
+        end
+    end
+
+    return nil
+end
+
 --- @param session_state agentic.session.SessionState
 --- @param widget agentic.ui.ChatWidget
 --- @param permission_manager agentic.ui.PermissionManager|nil
@@ -66,9 +84,8 @@ end
 --- @return boolean
 function ReviewController._is_reviewable(tracker)
     return tracker ~= nil
-        and DIFF_PREVIEW_KINDS[tracker.kind] == true
         and get_review_diff(tracker) ~= nil
-        and tracker.file_path ~= nil
+        and get_review_file_path(tracker) ~= nil
 end
 
 --- @param state agentic.session.State
@@ -138,7 +155,7 @@ function ReviewController:_show_active_review(state)
     local current_permission = SessionSelectors.get_current_permission(state)
     --- @cast current_permission agentic.ui.PermissionManager.PermissionRequest|nil
     local review_diff = get_review_diff(tracker)
-    local tracker_file_path = tracker.file_path
+    local tracker_file_path = get_review_file_path(tracker)
     local tracker_tool_call_id = tracker.tool_call_id
     if not review_diff or not tracker_file_path or not tracker_tool_call_id then
         return
@@ -212,7 +229,7 @@ function ReviewController:_show_active_review(state)
         diff = review_diff,
         review_actions = review_actions,
         get_winid = function(bufnr)
-            local winid = self.widget:find_first_non_widget_window()
+            local winid = self.widget:find_first_editor_window()
             if not winid then
                 return self.widget:open_left_window(bufnr, false)
             end
@@ -271,7 +288,7 @@ function ReviewController:_clear_review_for_tool(
     end
     --- @cast tracker agentic.session.InteractionToolCallNode
 
-    local tracker_file_path = tracker.file_path
+    local tracker_file_path = get_review_file_path(tracker)
     if not tracker_file_path then
         return
     end

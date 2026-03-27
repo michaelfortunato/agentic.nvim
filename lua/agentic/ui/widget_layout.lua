@@ -9,6 +9,7 @@ local Logger = require("agentic.utils.logger")
 --- @field buf_nrs agentic.ui.ChatWidget.BufNrs
 --- @field win_nrs agentic.ui.ChatWidget.WinNrs
 --- @field focus_prompt? boolean
+--- @field anchor_winid? integer|nil
 
 --- @class agentic.ui.WidgetLayout
 local WidgetLayout = {}
@@ -239,7 +240,9 @@ local function show_layout(params, position)
 
     --- @type vim.api.keyset.win_config
     local chat_opts = {
-        win = -1,
+        win = params.anchor_winid and vim.api.nvim_win_is_valid(
+            params.anchor_winid
+        ) and params.anchor_winid or -1,
         split = split_direction,
     }
 

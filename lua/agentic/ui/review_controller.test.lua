@@ -19,6 +19,11 @@ describe("agentic.ui.ReviewController", function()
     local bufnr
     local file_path
 
+    --- @param predicate fun(): boolean
+    local function wait_for(predicate)
+        assert.is_true(vim.wait(100, predicate))
+    end
+
     before_each(function()
         read_stub = spy.stub(FileSystem, "read_from_buffer_or_disk")
         read_stub:invokes(function()
@@ -155,8 +160,8 @@ describe("agentic.ui.ReviewController", function()
                 end, banner_segments),
                 ""
             )
-            assert.truthy(action_banner:find("M yes-all", 1, true))
-            assert.truthy(action_banner:find("N no-all", 1, true))
+            assert.truthy(action_banner:find("M accept-all", 1, true))
+            assert.truthy(action_banner:find("N reject-all", 1, true))
 
             local footer_banner = nil
             for _, mark in ipairs(diff_marks) do
@@ -170,7 +175,7 @@ describe("agentic.ui.ReviewController", function()
                         end, footer_segments),
                         ""
                     )
-                    if footer_text:find("m yes", 1, true) then
+                    if footer_text:find("m accept", 1, true) then
                         footer_banner = footer_text
                         break
                     end
@@ -178,8 +183,8 @@ describe("agentic.ui.ReviewController", function()
             end
 
             assert.is_not_nil(footer_banner)
-            assert.truthy(footer_banner:find("m yes", 1, true))
-            assert.truthy(footer_banner:find("n no", 1, true))
+            assert.truthy(footer_banner:find("m accept", 1, true))
+            assert.truthy(footer_banner:find("n reject", 1, true))
 
             local function get_map(key)
                 return vim.api.nvim_buf_call(bufnr, function()
@@ -196,6 +201,10 @@ describe("agentic.ui.ReviewController", function()
             get_map("M").callback()
             get_map("N").callback()
 
+            wait_for(function()
+                return permission_manager.complete_current_request.call_count
+                    == 4
+            end)
             assert.equal(
                 "allow-once",
                 permission_manager.complete_current_request.calls[1][2]
@@ -212,6 +221,84 @@ describe("agentic.ui.ReviewController", function()
                 "reject-always",
                 permission_manager.complete_current_request.calls[4][2]
             )
+        end
+    )
+
+    it(
+        "activates diff review from diff content even for non-whitelisted tool kinds",
+        function()
+            session_state:dispatch(SessionEvents.append_interaction_request({
+                kind = "user",
+                text = "review this write",
+                timestamp = 1,
+                content = {
+                    { type = "text", text = "review this write" },
+                },
+            }))
+            session_state:dispatch(
+                SessionEvents.upsert_interaction_tool_call("Codex ACP", {
+                    tool_call_id = "tc-review-2",
+                    kind = "other",
+                    status = "pending",
+                    content_items = {
+                        {
+                            type = "diff",
+                            path = file_path,
+                            oldText = table.concat({
+                                "local x = 1",
+                                "print(x)",
+                                "",
+                            }, "\n"),
+                            newText = table.concat({
+                                "local x = 3",
+                                "print(x)",
+                                "",
+                            }, "\n"),
+                        },
+                    },
+                })
+            )
+            session_state:dispatch(
+                SessionEvents.set_review_target("tc-review-2")
+            )
+            session_state:dispatch(SessionEvents.enqueue_permission({
+                sessionId = "sess-2",
+                toolCall = {
+                    toolCallId = "tc-review-2",
+                },
+                options = {
+                    {
+                        optionId = "allow-once",
+                        name = "Allow once",
+                        kind = "allow_once",
+                    },
+                    {
+                        optionId = "reject-once",
+                        name = "Reject once",
+                        kind = "reject_once",
+                    },
+                },
+            }, function() end))
+            session_state:dispatch(SessionEvents.show_next_permission())
+
+            local review_marks = vim.api.nvim_buf_get_extmarks(
+                bufnr,
+                DiffPreview.NS_REVIEW,
+                0,
+                -1,
+                { details = true }
+            )
+
+            assert.equal(1, #review_marks)
+
+            local function get_map(key)
+                return vim.api.nvim_buf_call(bufnr, function()
+                    return vim.fn.maparg(key, "n", false, true)
+                end)
+            end
+
+            assert.is_not_nil(get_map("m").callback)
+            assert.is_not_nil(get_map("n").callback)
         end
     )
 end)
