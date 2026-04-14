@@ -1,5 +1,4 @@
 local FilePicker = require("agentic.ui.file_picker")
-local PREFERRED_MATCH_SCORE_OFFSET = 100
 
 --- @class agentic.ui.FilePickerBlinkSource.Context
 --- @field bufnr integer
@@ -34,8 +33,6 @@ local function to_completion_item(item, index, context, mention_start_col)
         kind = vim.lsp.protocol.CompletionItemKind.File,
         filterText = path,
         sortText = string.format("%04d", index),
-        score_offset = item._preferred_match and PREFERRED_MATCH_SCORE_OFFSET
-            or nil,
         insertTextFormat = vim.lsp.protocol.InsertTextFormat.PlainText,
         textEdit = {
             newText = item.word,

@@ -185,7 +185,7 @@ end
 --- Safe to call multiple times
 --- @param opts agentic.Agentic.ChatOpts|nil
 function Agentic.open(opts)
-    SessionRegistry.get_session_for_tab_page(nil, function(session)
+    SessionRegistry.get_or_create_session(function(session)
         if not opts or opts.auto_add_to_context ~= false then
             session:add_selection_or_file_to_session()
         end
@@ -197,7 +197,7 @@ end
 --- Closes the chat widget for the current tab page
 --- Safe to call multiple times
 function Agentic.close()
-    SessionRegistry.get_current_session(nil, function(session)
+    SessionRegistry.get_current_session(function(session)
         session.widget:hide()
     end)
 end
@@ -206,7 +206,7 @@ end
 --- Safe to call multiple times
 --- @param opts agentic.Agentic.ChatOpts|nil
 function Agentic.toggle(opts)
-    SessionRegistry.get_session_for_tab_page(nil, function(session)
+    SessionRegistry.get_or_create_session(function(session)
         if
             session.widget:is_open() and (not opts or opts.prompt_text == nil)
         then
@@ -224,7 +224,7 @@ end
 --- Rotates through predefined window layouts for the chat widget
 --- @param layouts agentic.UserConfig.Windows.Position[]|nil
 function Agentic.rotate_layout(layouts)
-    SessionRegistry.get_current_session(nil, function(session)
+    SessionRegistry.get_current_session(function(session)
         session.widget:rotate_layout(layouts)
     end)
 end
@@ -232,7 +232,7 @@ end
 --- Add the current visual selection to the Chat context
 --- @param opts agentic.ui.ChatWidget.AddToContextOpts|nil
 function Agentic.add_selection(opts)
-    SessionRegistry.get_session_for_tab_page(nil, function(session)
+    SessionRegistry.get_or_create_session(function(session)
         session:add_selection_to_session()
         session.widget:show(opts)
     end)
@@ -241,7 +241,7 @@ end
 --- Add the current file to the Chat context
 --- @param opts agentic.ui.ChatWidget.AddToContextOpts|nil
 function Agentic.add_file(opts)
-    SessionRegistry.get_session_for_tab_page(nil, function(session)
+    SessionRegistry.get_or_create_session(function(session)
         session:add_file_to_session()
         session.widget:show(opts)
     end)
@@ -251,7 +251,7 @@ end
 --- You can add 1 or more in a single call
 --- @param opts agentic.ui.ChatWidget.AddFilesToContextOpts
 function Agentic.add_files_to_context(opts)
-    SessionRegistry.get_session_for_tab_page(nil, function(session)
+    SessionRegistry.get_or_create_session(function(session)
         local files = opts.files
 
         if files and type(files) == "table" then
@@ -272,7 +272,7 @@ end
 --- Add either the current visual selection or the current file to the Chat context
 --- @param opts agentic.ui.ChatWidget.AddToContextOpts|nil
 function Agentic.add_selection_or_file_to_context(opts)
-    SessionRegistry.get_session_for_tab_page(nil, function(session)
+    SessionRegistry.get_or_create_session(function(session)
         session:add_selection_or_file_to_session()
         session.widget:show(opts)
     end)
@@ -284,7 +284,7 @@ end
 --- Add diagnostics at the current cursor line to the Chat context
 --- @param opts agentic.ui.ChatWidget.AddToContextOpts|nil
 function Agentic.add_current_line_diagnostics(opts)
-    SessionRegistry.get_session_for_tab_page(nil, function(session)
+    SessionRegistry.get_or_create_session(function(session)
         local count = session:add_current_line_diagnostics_to_context()
         if count > 0 then
             session.widget:show(opts)
@@ -300,7 +300,7 @@ end
 --- Add all diagnostics from the current buffer to the Chat context
 --- @param opts agentic.ui.ChatWidget.AddToContextOpts|nil
 function Agentic.add_buffer_diagnostics(opts)
-    SessionRegistry.get_session_for_tab_page(nil, function(session)
+    SessionRegistry.get_or_create_session(function(session)
         local count = session:add_buffer_diagnostics_to_context()
         if count > 0 then
             session.widget:show(opts)
@@ -316,7 +316,7 @@ end
 --- Open inline chat for the current visual selection.
 --- @param opts agentic.Agentic.InlineChatOpts|nil
 function Agentic.inline_chat(opts)
-    SessionRegistry.get_session_for_tab_page(nil, function(session)
+    SessionRegistry.get_or_create_session(function(session)
         session:open_inline_chat(opts and opts.selection or nil)
     end)
 end
@@ -356,7 +356,7 @@ end
 --- @param provider_name agentic.UserConfig.ProviderName
 local function apply_provider_switch(provider_name)
     Config.provider = provider_name
-    SessionRegistry.get_current_session(nil, function(session)
+    SessionRegistry.get_current_session(function(session)
         session:switch_provider()
     end)
 end
@@ -381,7 +381,7 @@ end
 --- The session remains active and ready for the next prompt
 --- Safe to call multiple times or when no generation is active
 function Agentic.stop_generation()
-    SessionRegistry.get_current_session(nil, function(session)
+    SessionRegistry.get_current_session(function(session)
         if session.is_generating then
             session.agent:stop_generation(session.session_id)
             session.permission_manager:clear()
@@ -391,14 +391,12 @@ end
 
 --- show a selector to restore a previous session
 function Agentic.restore_session()
-    local tab_page_id = vim.api.nvim_get_current_tabpage()
-    local current_session =
-        SessionRegistry.find_session_by_buf(vim.api.nvim_get_current_buf())
-    SessionRestore.show_picker(tab_page_id, current_session)
+    local current_session = SessionRegistry.get_current_session()
+    SessionRestore.show_picker(current_session)
 end
 
 function Agentic.load_session()
-    local current_session = SessionRegistry.get_current_session(nil)
+    local current_session = SessionRegistry.get_current_session()
     if not current_session then
         Logger.notify(
             "Open or focus a chat widget before loading another live session.",
@@ -523,19 +521,21 @@ function Agentic.setup(opts)
         desc = "Cleanup Agentic processes on exit",
     })
 
-    -- Cleanup specific tab instance when tab is closed
+    -- Cleanup widget-bound sessions when a tab is closed.
     vim.api.nvim_create_autocmd("TabClosed", {
         group = cleanup_group,
         callback = function(ev)
             local tab_id = tonumber(ev.match)
-            SessionRegistry.destroy_sessions_for_tab(tab_id)
+            if tab_id ~= nil then
+                SessionRegistry.destroy_widget_sessions_for_tab(tab_id)
+            end
         end,
         desc = "Cleanup Agentic processes on tab close",
     })
 
     if Config.image_paste.enabled then
         local function get_current_session()
-            return SessionRegistry.get_current_session(nil)
+            return SessionRegistry.get_current_session()
         end
 
         local Clipboard = require("agentic.ui.clipboard")

@@ -488,6 +488,7 @@ describe("Blink file picker source", function()
         assert.equal("src/main.lua", response.items[1].label)
         assert.equal("@src/main.lua", response.items[1].textEdit.newText)
         assert.equal(7, response.items[1].textEdit.range.start.character)
+        assert.is_nil(response.items[1].score_offset)
     end)
 
     it("returns no completions outside an @ mention", function()

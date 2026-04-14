@@ -223,10 +223,7 @@ end
 --- @param state agentic.session.State
 --- @return agentic.acp.PlanEntry[]
 function SessionSelectors.get_latest_plan_entries(state)
-    local turns = state
-        and state.interaction
-        and state.interaction.turns
-        or {}
+    local turns = state and state.interaction and state.interaction.turns or {}
 
     for turn_index = #turns, 1, -1 do
         local turn = turns[turn_index]

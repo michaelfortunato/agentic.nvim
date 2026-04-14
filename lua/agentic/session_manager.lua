@@ -91,7 +91,7 @@ end
 --- @class agentic.SessionManager
 --- @field instance_id? integer
 --- @field session_id? string
---- @field tab_page_id integer
+--- @field tab_page_id integer Current widget tab page
 --- @field _is_first_message boolean Whether this is the first message in the session, used to add system info only once
 --- @field is_generating boolean
 --- @field widget agentic.ui.ChatWidget
@@ -119,19 +119,20 @@ end
 local SessionManager = {}
 SessionManager.__index = SessionManager
 
---- @param tab_page_id integer
---- @param opts {instance_id?: integer|nil}|nil
-function SessionManager:new(tab_page_id, opts)
+--- @param opts {instance_id?: integer|nil, tab_page_id?: integer|nil}|nil
+function SessionManager:new(opts)
     opts = opts or {}
     local AgentInstance = require("agentic.acp.agent_instance")
     local ChatWidget = require("agentic.ui.chat_widget")
     local InlineChat = require("agentic.ui.inline_chat")
     local PermissionManager = require("agentic.ui.permission_manager")
+    local widget_tab_page_id = opts.tab_page_id
+        or vim.api.nvim_get_current_tabpage()
 
     self = setmetatable({
         instance_id = opts.instance_id,
         session_id = nil,
-        tab_page_id = tab_page_id,
+        tab_page_id = widget_tab_page_id,
         _is_first_message = true,
         is_generating = false,
         _restoring = false,
@@ -160,7 +161,7 @@ function SessionManager:new(tab_page_id, opts)
     self.session_state = SessionState:new()
     self.permission_manager = PermissionManager:new(self.session_state)
 
-    self.widget = ChatWidget:new(tab_page_id, function() end, {
+    self.widget = ChatWidget:new(widget_tab_page_id, function() end, {
         instance_id = self.instance_id,
     })
     self._session_state_subscription = self.session_state:subscribe(
@@ -171,7 +172,7 @@ function SessionManager:new(tab_page_id, opts)
     self:_attach_widget(self.widget)
 
     self.inline_chat = InlineChat:new({
-        tab_page_id = tab_page_id,
+        tab_page_id = widget_tab_page_id,
         on_submit = function(request)
             return self:_submit_inline_request(request)
         end,
@@ -188,7 +189,8 @@ function SessionManager:new(tab_page_id, opts)
             self.config_options:show_approval_preset_selector()
         end,
         get_config_context = function()
-            return self.config_options and self.config_options:get_header_context()
+            return self.config_options
+                    and self.config_options:get_header_context()
                 or nil
         end,
     })
@@ -294,6 +296,7 @@ function SessionManager:_attach_widget(widget, snapshot)
     snapshot = snapshot or {}
     self:_destroy_widget_bindings()
     self.widget = widget
+    self.tab_page_id = widget.tab_page_id
     self.widget:set_submit_input_handler(function(input_text)
         self:_handle_input_submit(input_text)
     end)
@@ -416,7 +419,9 @@ function SessionManager:_attach_widget(widget, snapshot)
         state.session.config_options or {},
         self.agent and self.agent.provider_config or nil
     )
-    if state.session.current_mode_id and self.config_options.set_current_mode then
+    if
+        state.session.current_mode_id and self.config_options.set_current_mode
+    then
         self.config_options:set_current_mode(state.session.current_mode_id)
     end
     SlashCommands.setCommands(
@@ -1432,7 +1437,9 @@ function SessionManager:_get_workspace_root()
         end
     end
 
-    local tabnr = vim.api.nvim_tabpage_get_number(self.tab_page_id)
+    local widget_tab_page_id = self.widget and self.widget.tab_page_id
+        or self.tab_page_id
+    local tabnr = vim.api.nvim_tabpage_get_number(widget_tab_page_id)
     local cwd = vim.fn.getcwd(-1, tabnr)
     if cwd == nil or cwd == "" then
         cwd = vim.fn.getcwd()

@@ -15,7 +15,7 @@ describe("agentic", function()
     --- @type TestStub|nil
     local show_picker_stub
     --- @type TestStub|nil
-    local find_session_by_buf_stub
+    local current_session_stub
     --- @type integer
     local test_bufnr
 
@@ -95,9 +95,9 @@ describe("agentic", function()
             show_picker_stub = nil
         end
 
-        if find_session_by_buf_stub then
-            find_session_by_buf_stub:revert()
-            find_session_by_buf_stub = nil
+        if current_session_stub then
+            current_session_stub:revert()
+            current_session_stub = nil
         end
 
         if new_signal_stub then
@@ -115,8 +115,8 @@ describe("agentic", function()
     it("toggles the chat closed when no range is provided", function()
         local session = create_session({ is_open = true })
 
-        get_session_stub = spy.stub(SessionRegistry, "get_session_for_tab_page")
-        get_session_stub:invokes(function(_tab_page_id, callback)
+        get_session_stub = spy.stub(SessionRegistry, "get_or_create_session")
+        get_session_stub:invokes(function(callback)
             if callback then
                 callback(session)
             end
@@ -132,8 +132,8 @@ describe("agentic", function()
     it("prefills the prompt when AgenticChat is called with a range", function()
         local session = create_session({ is_open = true })
 
-        get_session_stub = spy.stub(SessionRegistry, "get_session_for_tab_page")
-        get_session_stub:invokes(function(_tab_page_id, callback)
+        get_session_stub = spy.stub(SessionRegistry, "get_or_create_session")
+        get_session_stub:invokes(function(callback)
             if callback then
                 callback(session)
             end
@@ -172,25 +172,22 @@ describe("agentic", function()
 
     it("routes AgenticChat restore through the session picker", function()
         local session = create_session()
-        local tab_page_id = vim.api.nvim_get_current_tabpage()
 
-        find_session_by_buf_stub =
-            spy.stub(SessionRegistry, "find_session_by_buf")
-        find_session_by_buf_stub:returns(session)
+        current_session_stub = spy.stub(SessionRegistry, "get_current_session")
+        current_session_stub:returns(session)
         show_picker_stub = spy.stub(SessionRestore, "show_picker")
 
         vim.cmd("AgenticChat restore")
 
         assert.spy(show_picker_stub).was.called(1)
-        assert.equal(tab_page_id, show_picker_stub.calls[1][1])
-        assert.equal(session, show_picker_stub.calls[1][2])
+        assert.equal(session, show_picker_stub.calls[1][1])
     end)
 
     it("passes the provided range to AgenticInline", function()
         local session = create_session()
 
-        get_session_stub = spy.stub(SessionRegistry, "get_session_for_tab_page")
-        get_session_stub:invokes(function(_tab_page_id, callback)
+        get_session_stub = spy.stub(SessionRegistry, "get_or_create_session")
+        get_session_stub:invokes(function(callback)
             if callback then
                 callback(session)
             end

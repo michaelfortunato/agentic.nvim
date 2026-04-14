@@ -129,7 +129,9 @@ describe("Open and Close Chat Widget", function()
     end)
 
     it("loads another live session into the current chat widget", function()
-        child.lua([[ require("agentic").toggle({ auto_add_to_context = false }) ]])
+        child.lua(
+            [[ require("agentic").toggle({ auto_add_to_context = false }) ]]
+        )
         child.flush()
 
         child.lua([[
@@ -198,7 +200,10 @@ end)()
         )
         assert.same({ "first draft" }, after_swap.first_input_lines)
         assert.same({ "second draft" }, after_swap.second_input_lines)
-        assert.equal(after_swap.first_instance_id, after_swap.current_instance_id)
+        assert.equal(
+            after_swap.first_instance_id,
+            after_swap.current_instance_id
+        )
     end)
 
     it("handles tabclose while in insert mode without errors", function()

@@ -22,15 +22,9 @@ local function check_conflict(current_session)
 end
 
 --- @param session_id string
---- @param tab_page_id integer
 --- @param has_conflict boolean
 --- @param current_session agentic.SessionManager|nil
-local function do_restore(
-    session_id,
-    tab_page_id,
-    has_conflict,
-    current_session
-)
+local function do_restore(session_id, has_conflict, current_session)
     PersistedSession.load(session_id, function(history, err)
         if err or not history then
             Logger.notify(
@@ -42,7 +36,7 @@ local function do_restore(
 
         local session = current_session
         if session == nil then
-            session = SessionRegistry.new_session(tab_page_id)
+            session = SessionRegistry.new_session()
         end
 
         if session == nil then
@@ -64,12 +58,10 @@ local function do_restore(
 end
 
 --- @param session_id string
---- @param tab_page_id integer
 --- @param has_conflict boolean
 --- @param current_session agentic.SessionManager|nil
 local function restore_with_conflict_check(
     session_id,
-    tab_page_id,
     has_conflict,
     current_session
 )
@@ -81,23 +73,23 @@ local function restore_with_conflict_check(
             prompt = "Current session has content. What would you like to do?",
         }, function(choice)
             if choice == "Clear current session and restore" then
-                do_restore(
-                    session_id,
-                    tab_page_id,
-                    has_conflict,
-                    current_session
-                )
+                do_restore(session_id, has_conflict, current_session)
             end
         end)
     else
-        do_restore(session_id, tab_page_id, has_conflict, current_session)
+        do_restore(session_id, has_conflict, current_session)
     end
 end
 
---- Show session picker and restore selected session
---- @param tab_page_id integer
+--- Show session picker and restore selected session.
+--- Compatibility: an older numeric first argument is ignored.
+--- @param arg integer|agentic.SessionManager|nil
 --- @param current_session agentic.SessionManager|nil
-function SessionRestore.show_picker(tab_page_id, current_session)
+function SessionRestore.show_picker(arg, current_session)
+    if type(arg) ~= "number" then
+        current_session = arg --[[@as agentic.SessionManager|nil]]
+    end
+
     PersistedSession.list_sessions(function(sessions)
         if #sessions == 0 then
             Logger.notify("No saved sessions found", vim.log.levels.INFO)
@@ -124,7 +116,6 @@ function SessionRestore.show_picker(tab_page_id, current_session)
             if choice then
                 restore_with_conflict_check(
                     choice.session_id,
-                    tab_page_id,
                     check_conflict(current_session),
                     current_session
                 )

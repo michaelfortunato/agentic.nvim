@@ -14,13 +14,6 @@ local SessionRegistry = {
     _window_active_sessions = {},
 }
 
---- @param tab_page_id integer|nil
---- @return integer
-local function normalize_tab_page_id(tab_page_id)
-    return tab_page_id ~= nil and tab_page_id
-        or vim.api.nvim_get_current_tabpage()
-end
-
 --- @param sessions agentic.SessionManager[]
 local function sort_sessions(sessions)
     table.sort(sessions, function(left, right)
@@ -58,21 +51,48 @@ function SessionRegistry.set_active_session(session, winid)
         session.instance_id
 end
 
---- @param tab_page_id integer|nil
 --- @return agentic.SessionManager[]
-function SessionRegistry.get_tab_sessions(tab_page_id)
-    local tab_id = normalize_tab_page_id(tab_page_id)
-
+function SessionRegistry.get_sessions()
     --- @type agentic.SessionManager[]
     local sessions = {}
     for _, session in pairs(SessionRegistry.sessions) do
-        if session and session.tab_page_id == tab_id then
+        if session then
             sessions[#sessions + 1] = session
         end
     end
 
     sort_sessions(sessions)
     return sessions
+end
+
+--- @param tab_page_id integer|nil
+--- @return agentic.SessionManager[]
+function SessionRegistry.get_widget_sessions(tab_page_id)
+    local resolved_tab_page_id = tab_page_id
+        or vim.api.nvim_get_current_tabpage()
+    --- @type agentic.SessionManager[]
+    local sessions = {}
+    for _, session in pairs(SessionRegistry.sessions) do
+        local widget = session and session.widget or nil
+        if
+            session
+            and widget
+            and widget.tab_page_id == resolved_tab_page_id
+        then
+            sessions[#sessions + 1] = session
+        end
+    end
+
+    sort_sessions(sessions)
+    return sessions
+end
+
+--- Compatibility wrapper for older callers. This lists sessions whose current
+--- widget lives in the given tab.
+--- @param tab_page_id integer|nil
+--- @return agentic.SessionManager[]
+function SessionRegistry.get_tab_sessions(tab_page_id)
+    return SessionRegistry.get_widget_sessions(tab_page_id)
 end
 
 --- @param bufnr integer|nil
@@ -128,36 +148,25 @@ local function get_active_session_for_window(winid)
     return nil
 end
 
---- @param tab_page_id integer|nil
 --- @return agentic.SessionManager|nil
-local function resolve_context_session(tab_page_id)
+local function resolve_context_session()
     local current_session =
         SessionRegistry.find_session_by_buf(vim.api.nvim_get_current_buf())
-    if
-        current_session
-        and (tab_page_id == nil or current_session.tab_page_id == tab_page_id)
-    then
+    if current_session then
         return current_session
     end
 
     local current_winid = vim.api.nvim_get_current_win()
     local active_window_session = get_active_session_for_window(current_winid)
-    if
-        active_window_session
-        and (
-            tab_page_id == nil
-            or active_window_session.tab_page_id == tab_page_id
-        )
-    then
+    if active_window_session then
         return active_window_session
     end
 
     return nil
 end
 
---- @param tab_page_id integer
 --- @return agentic.SessionManager|nil
-local function create_session(tab_page_id)
+local function create_session()
     if not ACPHealth.check_configured_provider() then
         Logger.debug("Session creation aborted: No configured ACP provider")
         return nil
@@ -167,7 +176,7 @@ local function create_session(tab_page_id)
 
     SessionRegistry._next_instance_id = SessionRegistry._next_instance_id + 1
     local instance_id = SessionRegistry._next_instance_id
-    local instance = SessionManager:new(tab_page_id, {
+    local instance = SessionManager:new({
         instance_id = instance_id,
     }) --[[@as agentic.SessionManager|nil]]
 
@@ -198,57 +207,73 @@ end
 --- @return string
 local function get_session_picker_label(session)
     local state = session
-        and session.session_state
-        and session.session_state.get_state
-        and session.session_state:get_state()
+            and session.session_state
+            and session.session_state.get_state
+            and session.session_state:get_state()
         or nil
     local title = state
-        and state.session
-        and vim.trim(state.session.title or "")
+            and state.session
+            and vim.trim(state.session.title or "")
         or ""
     local session_id = session and session.session_id or nil
     local session_label = title ~= "" and title or "(untitled session)"
     local suffix = session_id and ("ACP " .. session_id)
         or "ACP session pending"
+    local widget_tab_label = session
+            and session.widget
+            and session.widget.tab_page_id
+        or nil
 
     return string.format(
-        "#%s · Tab %d · %s · %s",
+        "#%s · %s%s%s",
         tostring(session and session.instance_id or "?"),
-        session and session.tab_page_id or 0,
         session_label,
-        suffix
+        widget_tab_label and (" · Widget Tab " .. tostring(widget_tab_label))
+            or "",
+        " · " .. suffix
     )
 end
 
---- @param tab_page_id integer|nil
+--- @param arg integer|fun(session: agentic.SessionManager)|nil
 --- @param callback fun(session: agentic.SessionManager)|nil
 --- @return agentic.SessionManager|nil session resolved from the current widget or invoking editor window
-function SessionRegistry.get_current_session(tab_page_id, callback)
-    local tab_id = normalize_tab_page_id(tab_page_id)
-    local instance = resolve_context_session(tab_id)
+function SessionRegistry.get_current_session(arg, callback)
+    if type(arg) == "function" then
+        callback = arg
+    end
+
+    local instance = resolve_context_session()
     return invoke_callback(instance, callback)
 end
 
---- @param tab_page_id integer|nil
 --- @param callback fun(session: agentic.SessionManager)|nil
 --- @return agentic.SessionManager|nil session resolved from the current widget/editor context or a newly-created one
-function SessionRegistry.get_session_for_tab_page(tab_page_id, callback)
-    local tab_id = normalize_tab_page_id(tab_page_id)
-    local instance = resolve_context_session(tab_id)
+function SessionRegistry.get_or_create_session(callback)
+    local instance = resolve_context_session()
 
     if not instance then
-        instance = create_session(tab_id)
+        instance = create_session()
     end
 
     return invoke_callback(instance, callback)
 end
 
---- Creates an additional session in the given tab page.
---- @param tab_page_id integer|nil
+--- Compatibility wrapper for older callers. Sessions are not tab-scoped.
+--- @param _tab_page_id integer|nil
+--- @param callback fun(session: agentic.SessionManager)|nil
 --- @return agentic.SessionManager|nil
-function SessionRegistry.new_session(tab_page_id)
-    local tab_id = normalize_tab_page_id(tab_page_id)
-    return create_session(tab_id)
+function SessionRegistry.get_session_for_tab_page(_tab_page_id, callback)
+    if type(_tab_page_id) == "function" then
+        callback = _tab_page_id
+    end
+
+    return SessionRegistry.get_or_create_session(callback)
+end
+
+--- Creates an additional session using the current UI context for its first widget.
+--- @return agentic.SessionManager|nil
+function SessionRegistry.new_session()
+    return create_session()
 end
 
 --- @param target agentic.SessionManager|integer|nil
@@ -263,15 +288,12 @@ local function resolve_session_target(target)
         if session then
             return session
         end
-
-        return resolve_context_session(target)
     end
 
-    return SessionRegistry.get_current_session(nil)
+    return SessionRegistry.get_current_session()
 end
 
 --- Destroys a session instance and removes it from the registry.
---- If a tabpage id is passed, destroys the session resolved from the current UI context in that tab.
 --- @param target agentic.SessionManager|integer|nil
 function SessionRegistry.destroy_session(target)
     local session = resolve_session_target(target)
@@ -300,26 +322,31 @@ function SessionRegistry.destroy_session(target)
     end
 end
 
---- Destroys all tracked sessions in a tab page.
---- @param tab_page_id integer|nil
-function SessionRegistry.destroy_sessions_for_tab(tab_page_id)
-    local tab_id = normalize_tab_page_id(tab_page_id)
-    local sessions = SessionRegistry.get_tab_sessions(tab_id)
+--- Destroys all tracked sessions whose current widget lives in the target tab page.
+--- This is a widget cleanup helper, not a session-scoping rule.
+--- @param tab_page_id integer
+function SessionRegistry.destroy_widget_sessions_for_tab(tab_page_id)
+    local sessions = SessionRegistry.get_widget_sessions(tab_page_id)
 
     for _, session in ipairs(sessions) do
         SessionRegistry.destroy_session(session)
     end
 end
 
+--- Compatibility wrapper for older callers.
+--- @param tab_page_id integer
+function SessionRegistry.destroy_sessions_for_tab(tab_page_id)
+    SessionRegistry.destroy_widget_sessions_for_tab(tab_page_id)
+end
+
 --- @param current_session agentic.SessionManager|nil
 --- @param on_selected fun(session: agentic.SessionManager|nil)
 --- @return boolean shown
 function SessionRegistry.select_live_session(current_session, on_selected)
-    local tab_id = normalize_tab_page_id(nil)
     --- @type {session: agentic.SessionManager, label: string}[]
     local items = {}
 
-    for _, session in ipairs(SessionRegistry.get_tab_sessions(tab_id)) do
+    for _, session in ipairs(SessionRegistry.get_sessions()) do
         if session ~= current_session then
             items[#items + 1] = {
                 session = session,
@@ -352,7 +379,7 @@ function SessionRegistry.load_session_into_current_widget(target_session)
         return false
     end
 
-    local current_session = SessionRegistry.get_current_session(nil)
+    local current_session = SessionRegistry.get_current_session()
     if
         not current_session
         or current_session == target_session
