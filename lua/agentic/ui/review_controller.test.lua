@@ -6,6 +6,7 @@ local Config = require("agentic.config")
 local DiffPreview = require("agentic.ui.diff_preview")
 local FileSystem = require("agentic.utils.file_system")
 local HunkNavigation = require("agentic.ui.hunk_navigation")
+local Logger = require("agentic.utils.logger")
 local ReviewState = require("agentic.ui.diff_preview.review_state")
 local ReviewController = require("agentic.ui.review_controller")
 local SessionEvents = require("agentic.session.session_events")
@@ -19,6 +20,7 @@ describe("agentic.ui.ReviewController", function()
     local permission_manager
     local bufnr
     local file_path
+    local notify_spy
 
     --- @param predicate fun(): boolean
     local function wait_for(predicate)
@@ -30,6 +32,7 @@ describe("agentic.ui.ReviewController", function()
         read_stub:invokes(function()
             return { "local x = 1", "print(x)", "" }, nil
         end)
+        notify_spy = spy.on(Logger, "notify")
         original_layout = Config.diff_preview.layout
         Config.diff_preview.layout = "inline"
 
@@ -75,6 +78,7 @@ describe("agentic.ui.ReviewController", function()
         end
 
         read_stub:revert()
+        notify_spy:revert()
         Config.diff_preview.layout = original_layout
     end)
 
@@ -301,6 +305,161 @@ describe("agentic.ui.ReviewController", function()
 
             assert.is_not_nil(get_map("m").callback)
             assert.is_not_nil(get_map("n").callback)
+        end
+    )
+
+    it(
+        "notifies when an active diff review is restored after detaching the buffer",
+        function()
+            local review_key =
+                ReviewState.create_review_key("sess-detach", "tc-review-detach")
+
+            session_state:dispatch(SessionEvents.append_interaction_request({
+                kind = "user",
+                text = "review this edit",
+                timestamp = 1,
+                content = {
+                    { type = "text", text = "review this edit" },
+                },
+            }))
+            session_state:dispatch(
+                SessionEvents.upsert_interaction_tool_call("Codex ACP", {
+                    tool_call_id = "tc-review-detach",
+                    kind = "edit",
+                    status = "pending",
+                    file_path = file_path,
+                    diff = {
+                        old = { "local x = 1", "print(x)", "" },
+                        new = { "local x = 2", "print(x)", "" },
+                    },
+                })
+            )
+            session_state:dispatch(
+                SessionEvents.set_review_target("tc-review-detach")
+            )
+            session_state:dispatch(SessionEvents.enqueue_permission({
+                sessionId = "sess-detach",
+                toolCall = {
+                    toolCallId = "tc-review-detach",
+                },
+                options = {
+                    {
+                        optionId = "allow-once",
+                        name = "Allow once",
+                        kind = "allow_once",
+                    },
+                    {
+                        optionId = "reject-once",
+                        name = "Reject once",
+                        kind = "reject_once",
+                    },
+                },
+            }, function() end))
+            session_state:dispatch(SessionEvents.show_next_permission())
+
+            notify_spy:reset()
+            DiffPreview.clear_diff(bufnr, {
+                reason = "buffer_detached",
+                review_key = review_key,
+            })
+
+            wait_for(function()
+                local diff_marks = vim.api.nvim_buf_get_extmarks(
+                    bufnr,
+                    HunkNavigation.NS_DIFF,
+                    0,
+                    -1,
+                    { details = true }
+                )
+                return notify_spy.call_count == 1 and #diff_marks > 0
+            end)
+
+            assert.equal(
+                "This diff review is still pending for "
+                    .. vim.fs.basename(file_path)
+                    .. ". Accept or reject it before leaving the preview.",
+                notify_spy.calls[1][1]
+            )
+            assert.equal(vim.log.levels.WARN, notify_spy.calls[1][2])
+            assert
+                .spy(permission_manager.show_current_request_chooser).was
+                .called(0)
+        end
+    )
+
+    it(
+        "suppresses approximate preview notifications when restoring enforced review",
+        function()
+            local review_key =
+                ReviewState.create_review_key("sess-approx", "tc-review-approx")
+
+            session_state:dispatch(SessionEvents.append_interaction_request({
+                kind = "user",
+                text = "review this edit",
+                timestamp = 1,
+                content = {
+                    { type = "text", text = "review this edit" },
+                },
+            }))
+            session_state:dispatch(
+                SessionEvents.upsert_interaction_tool_call("Codex ACP", {
+                    tool_call_id = "tc-review-approx",
+                    kind = "edit",
+                    status = "pending",
+                    file_path = file_path,
+                    diff = {
+                        old = { "nonexistent content that wont match" },
+                        new = { "replacement" },
+                    },
+                })
+            )
+            session_state:dispatch(
+                SessionEvents.set_review_target("tc-review-approx")
+            )
+            session_state:dispatch(SessionEvents.enqueue_permission({
+                sessionId = "sess-approx",
+                toolCall = {
+                    toolCallId = "tc-review-approx",
+                },
+                options = {
+                    {
+                        optionId = "allow-once",
+                        name = "Allow once",
+                        kind = "allow_once",
+                    },
+                    {
+                        optionId = "reject-once",
+                        name = "Reject once",
+                        kind = "reject_once",
+                    },
+                },
+            }, function() end))
+            session_state:dispatch(SessionEvents.show_next_permission())
+
+            notify_spy:reset()
+            DiffPreview.clear_diff(bufnr, {
+                reason = "buffer_detached",
+                review_key = review_key,
+            })
+
+            wait_for(function()
+                local diff_marks = vim.api.nvim_buf_get_extmarks(
+                    bufnr,
+                    HunkNavigation.NS_DIFF,
+                    0,
+                    -1,
+                    { details = true }
+                )
+                return notify_spy.call_count == 1 and #diff_marks > 0
+            end)
+
+            assert.equal(
+                "This diff review is still pending for "
+                    .. vim.fs.basename(file_path)
+                    .. ". Accept or reject it before leaving the preview.",
+                notify_spy.calls[1][1]
+            )
+            assert.equal(vim.log.levels.WARN, notify_spy.calls[1][2])
         end
     )
 

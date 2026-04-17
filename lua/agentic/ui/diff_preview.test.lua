@@ -99,6 +99,13 @@ describe("diff_preview", function()
                 assert.truthy(drift_text:find("Context drift", 1, true) ~= nil)
                 assert.spy(get_winid_spy).was.called(0)
                 assert.spy(notify_spy).was.called(1)
+                assert.equal(
+                    "Diff preview: could not re-anchor diff exactly in "
+                        .. file_path
+                        .. "; showing approximate preview",
+                    notify_spy.calls[1][1]
+                )
+                assert.equal(vim.log.levels.WARN, notify_spy.calls[1][2])
 
                 DiffPreview.clear_diff(file_bufnr)
                 vim.api.nvim_buf_delete(file_bufnr, { force = true })

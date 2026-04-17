@@ -62,6 +62,20 @@ local function get_review_file_path(tracker)
     return nil
 end
 
+--- @param file_path string|nil
+local function notify_review_restore(file_path)
+    if not file_path or file_path == "" then
+        return
+    end
+
+    Logger.notify(
+        "This diff review is still pending for "
+            .. vim.fs.basename(file_path)
+            .. ". Accept or reject it before leaving the preview.",
+        vim.log.levels.WARN
+    )
+end
+
 --- @param current_permission agentic.ui.PermissionManager.PermissionRequest|nil
 --- @param tool_call_id string|nil
 --- @return string|nil
@@ -203,8 +217,11 @@ function ReviewController:_handle_state_event(state, event)
 end
 
 --- @param state agentic.session.State
+--- @param opts { suppress_approximate_notify?: boolean|nil }|nil
 --- @return agentic.ui.DiffPreview.ShowResult
-function ReviewController:_show_active_review(state)
+function ReviewController:_show_active_review(state, opts)
+    opts = opts or {}
+
     if
         not Config.diff_preview.enabled
         or vim.api.nvim_get_current_tabpage() ~= self.widget.tab_page_id
@@ -258,6 +275,7 @@ function ReviewController:_show_active_review(state)
         review_key = review_key,
         tool_call_id = tracker_tool_call_id,
         force_inline = review_actions ~= nil,
+        suppress_approximate_notify = opts.suppress_approximate_notify == true,
         on_detach = function(detach)
             self:_handle_preview_detach(detach)
         end,
@@ -314,7 +332,21 @@ function ReviewController:_handle_preview_detach(detach)
         return
     end
 
-    local result = self:_show_active_review(state)
+    if
+        detach.reason == "window_closed"
+        or detach.reason == "buffer_detached"
+    then
+        notify_review_restore(
+            get_review_file_path(
+                SessionSelectors.get_tool_call(state, detach.tool_call_id)
+            )
+        )
+    end
+
+    local result = self:_show_active_review(state, {
+        suppress_approximate_notify = detach.reason == "window_closed"
+            or detach.reason == "buffer_detached",
+    })
     if not result.interactive then
         self.permission_manager:show_current_request_chooser()
     end

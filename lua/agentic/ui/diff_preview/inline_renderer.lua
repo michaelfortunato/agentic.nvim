@@ -127,7 +127,7 @@ end
 --- @param file_path string
 local function notify_approximate_preview(file_path)
     Logger.notify(
-        "Diff preview: exact location changed in "
+        "Diff preview: could not re-anchor diff exactly in "
             .. file_path
             .. "; showing approximate preview",
         vim.log.levels.WARN
@@ -166,7 +166,9 @@ function M.resolve_diff_blocks(opts)
         return diff_blocks, false
     end
 
-    notify_approximate_preview(opts.file_path)
+    if not opts.suppress_approximate_notify then
+        notify_approximate_preview(opts.file_path)
+    end
     return fallback_blocks, true
 end
 

@@ -28,6 +28,7 @@ M.NS_REVIEW = ReviewState.NS_REVIEW
 --- @field review_key? string|nil
 --- @field tool_call_id? string|nil
 --- @field force_inline? boolean|nil
+--- @field suppress_approximate_notify? boolean|nil
 --- @field on_detach? fun(payload: agentic.ui.DiffPreview.DetachPayload)|nil
 
 --- @class agentic.ui.DiffPreview.ShowResult
