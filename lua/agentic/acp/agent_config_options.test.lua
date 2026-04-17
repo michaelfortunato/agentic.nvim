@@ -308,6 +308,43 @@ describe("agentic.acp.AgentConfigOptions", function()
             assert.spy(generic_change).was.called_with("mode-1", "plan")
         end)
 
+        it(
+            "moves the current option to the front without mutating source data",
+            function()
+                local generic_change = spy.new(function() end)
+                local fresh = AgentConfigOptions:new(
+                    { chat = test_bufnr },
+                    generic_change
+                )
+                local render = {}
+
+                fresh:set_options({ model_option })
+
+                chooser_show_stub:invokes(function(items, opts, on_choice)
+                    render = vim.tbl_map(opts.format_item, items)
+                    on_choice(nil)
+                end)
+
+                assert.is_true(fresh:show_model_selector())
+                assert.same({
+                    "● GPT-5.4: Fast",
+                    "  GPT-5.5: Newer",
+                }, render)
+                assert.same({
+                    {
+                        value = "gpt-5.4",
+                        name = "GPT-5.4",
+                        description = "Fast",
+                    },
+                    {
+                        value = "gpt-5.5",
+                        name = "GPT-5.5",
+                        description = "Newer",
+                    },
+                }, model_option.options)
+            end
+        )
+
         it("flattens grouped select options from the ACP schema", function()
             local generic_change = spy.new(function() end)
             local fresh =

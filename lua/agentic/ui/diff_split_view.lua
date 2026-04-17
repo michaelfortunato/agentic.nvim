@@ -4,6 +4,10 @@ local FileSystem = require("agentic.utils.file_system")
 local Logger = require("agentic.utils.logger")
 local ToolCallDiff = require("agentic.ui.tool_call_diff")
 
+--- UI Sync Scopes
+--- - Tab-local: active split diff state is stored in vim.t[tabpage]
+--- - Buffer-local: original/scratch buffer modifiable state restoration
+
 --- Handles side-by-side diff view using Neovim's native :diffthis command
 --- @class agentic.ui.DiffSplitView
 local M = {}

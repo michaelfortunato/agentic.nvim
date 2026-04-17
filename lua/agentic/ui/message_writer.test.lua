@@ -1,4 +1,4 @@
---- @diagnostic disable: invisible
+---@diagnostic disable: invisible, need-check-nil, undefined-field
 local assert = require("tests.helpers.assert")
 local spy = require("tests.helpers.spy")
 local Config = require("agentic.config")
@@ -257,6 +257,7 @@ describe("agentic.ui.MessageWriter", function()
             index = opts.index or 1,
             request = {
                 kind = opts.request_kind or "user",
+                surface = opts.request_surface or "chat",
                 text = request_text,
                 timestamp = opts.request_timestamp,
                 content = request_content,
@@ -400,9 +401,7 @@ describe("agentic.ui.MessageWriter", function()
                 local threshold = Config.auto_scroll
                         and Config.auto_scroll.threshold
                     or 0
-                local visible_lines = vim.api.nvim_win_call(winid, function()
-                    return vim.fn.line("w$")
-                end)
+                local visible_lines = vim.api.nvim_win_get_height(winid)
 
                 setup_buffer(visible_lines + threshold + 10, 1)
                 assert.is_false(writer:_check_auto_scroll(bufnr))
@@ -1819,7 +1818,10 @@ describe("agentic.ui.MessageWriter", function()
                     end
                 end
 
-                assert.is_not_nil(title_line)
+                if title_line == nil then
+                    error("expected truncated title line")
+                end
+
                 assert.equal("...", title_line:sub(-3))
                 assert.is_true(
                     vim.fn.strdisplaywidth(title_line)

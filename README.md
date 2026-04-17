@@ -488,6 +488,7 @@ header parts:
 | `:lua require("agentic").add_current_line_diagnostics()`     | Add diagnostics at cursor line to context                         |
 | `:lua require("agentic").add_buffer_diagnostics()`           | Add all diagnostics from current buffer to context                |
 | `:lua require("agentic").inline_chat()`                      | Open inline chat for the current visual selection                 |
+| `:lua require("agentic").inline_clear_current_buffer()`      | Clear Agentic inline artifacts from the current buffer           |
 | `:lua require("agentic").new_session()`                      | Start new chat session, destroying and cleaning the current one   |
 | `:lua require("agentic").stop_generation()`                  | Stop current generation or tool execution (session stays active)  |
 | `:lua require("agentic").restore_session()`                  | Show session picker to restore a previous session and continue    |
@@ -502,6 +503,7 @@ header parts:
 | `:AgenticChat new`       | Start a new chat session. With a range, prefills the input from the range                  |
 | `:AgenticChat restore`   | Open the saved-session picker and restore a previous chat                                  |
 | `:AgenticInline`         | Open inline chat for the current visual selection or an explicit command range             |
+| `:AgenticInlineClear`    | Clear Agentic inline ghost text, thread markers, and diff preview state for the buffer     |
 
 `:'<,'>AgenticChat` and `:'<,'>AgenticChat new` use the selected line range to prefill the
 prompt input buffer. This is useful when you want to turn an existing note,
@@ -684,6 +686,9 @@ range to the active ACP session as structured selection context.
 - File edits still go through the normal ACP tool-call and approval flow, so
   reviewable diffs appear inline in the buffer when the provider requests
   permission.
+- Accepting or rejecting an inline review clears the ghost text immediately.
+  Rejecting also reopens the inline prompt on the same tracked range so you can
+  add a follow-up note in a fresh inline turn.
 - On Neovim 0.12+, Agentic also emits native progress messages for inline
   requests via `nvim_echo(..., { kind = "progress", ... })`.
 

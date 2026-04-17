@@ -211,11 +211,11 @@ end
 
 --- @class agentic.session.PromptBuilder.Submission
 --- @field prompt agentic.acp.Content[]
---- @field request {kind: "user"|"review", text: string, timestamp: integer, content: agentic.acp.Content[]}
+--- @field request {kind: "user"|"review", surface: "chat"|"inline", text: string, timestamp: integer, content: agentic.acp.Content[]}
 --- @field consumed_restored_turns boolean
 --- @field consumed_first_message boolean
 
---- @param opts {input_text: string, provider_name: string, restored_turns_to_send?: agentic.session.InteractionTurn[]|nil, include_system_info?: boolean|nil, code_selection?: agentic.ui.CodeSelection|nil, file_list?: agentic.ui.FileList|nil, diagnostics_list?: agentic.ui.DiagnosticsList|nil, chat_winid?: integer|nil, selections?: agentic.Selection[]|nil, inline_instructions?: string|nil}
+--- @param opts {input_text: string, provider_name: string, restored_turns_to_send?: agentic.session.InteractionTurn[]|nil, include_system_info?: boolean|nil, code_selection?: agentic.ui.CodeSelection|nil, file_list?: agentic.ui.FileList|nil, diagnostics_list?: agentic.ui.DiagnosticsList|nil, chat_winid?: integer|nil, selections?: agentic.Selection[]|nil, inline_instructions?: string|nil, surface?: "chat"|"inline"|nil}
 --- @return agentic.session.PromptBuilder.Submission
 function PromptBuilder.build_submission(opts)
     local prompt = {}
@@ -259,6 +259,7 @@ function PromptBuilder.build_submission(opts)
         prompt = prompt,
         request = {
             kind = opts.input_text:match("^/review%s*") and "review" or "user",
+            surface = opts.surface or "chat",
             text = opts.input_text,
             timestamp = os.time(),
             content = vim.deepcopy(prompt),

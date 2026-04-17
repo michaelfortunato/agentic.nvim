@@ -87,10 +87,10 @@ describe("agentic.ui.ChatWidget", function()
             it(
                 "initializes prompt header hints from the current keymaps",
                 function()
-                    assert.equal("?: keymaps", widget._headers.chat.suffix)
+                    assert.equal("?: keymaps", widget.headers.chat.suffix)
                     assert.equal(
                         "?: keymaps · <CR>: submit",
-                        widget._headers.input.suffix
+                        widget.headers.input.suffix
                     )
                 end
             )
@@ -214,6 +214,7 @@ describe("agentic.ui.ChatWidget", function()
                                 index = 1,
                                 request = {
                                     kind = "user",
+                                    surface = "chat",
                                     text = "",
                                     content = {},
                                     content_nodes = {},
@@ -373,6 +374,16 @@ describe("agentic.ui.ChatWidget", function()
                 assert.is_true(vim.api.nvim_win_is_valid(widget.win_nrs.chat))
             end)
 
+            it("refresh_layout recreates widget windows", function()
+                widget:show()
+                local first_chat_win = widget.win_nrs.chat
+
+                widget:refresh_layout({ focus_prompt = false })
+
+                assert.are_not.equal(first_chat_win, widget.win_nrs.chat)
+                assert.is_true(vim.api.nvim_win_is_valid(widget.win_nrs.chat))
+            end)
+
             it("windows are created in correct tabpage", function()
                 widget:show()
 
@@ -385,6 +396,27 @@ describe("agentic.ui.ChatWidget", function()
                     vim.api.nvim_win_get_tabpage(widget.win_nrs.input)
                 )
             end)
+
+            it(
+                "identifies widget buffers and fallback editor windows",
+                function()
+                    local original_win = vim.api.nvim_get_current_win()
+                    local original_buf = vim.api.nvim_get_current_buf()
+
+                    widget:show({ focus_prompt = false })
+
+                    assert.is_true(widget:owns_buffer(widget.buf_nrs.chat))
+                    assert.is_false(widget:owns_buffer(original_buf))
+                    assert.equal(
+                        original_win,
+                        widget:find_first_non_widget_window()
+                    )
+                    assert.equal(
+                        original_win,
+                        widget:find_first_editor_window()
+                    )
+                end
+            )
 
             it("hide() stops insert mode", function()
                 widget:show()
@@ -718,6 +750,27 @@ describe("agentic.ui.ChatWidget", function()
                 assert.is_nil(widget.win_nrs.todos)
             end)
 
+            it(
+                "hide() creates a fallback window when only widget windows remain",
+                function()
+                    widget:show({ focus_prompt = false })
+
+                    local original_win = widget:find_first_editor_window()
+                    assert.truthy(original_win)
+                    vim.api.nvim_win_close(original_win, true)
+
+                    assert.has_no_errors(function()
+                        widget:hide()
+                    end)
+
+                    local remaining_wins =
+                        vim.api.nvim_tabpage_list_wins(tab_page_id)
+                    assert.equal(1, #remaining_wins)
+                    assert.is_nil(widget.win_nrs.chat)
+                    assert.is_nil(widget.win_nrs.input)
+                end
+            )
+
             it("caps window height at max_height", function()
                 local lines = {}
                 for i = 1, 23 do
@@ -982,6 +1035,75 @@ describe("agentic.ui.ChatWidget", function()
                 assert.is_true(input_pos[1] > queue_pos[1])
             end
         )
+    end)
+
+    describe("sync scopes", function()
+        local first_widget
+        local second_widget
+        local first_tab
+        local second_tab
+        local original_position
+
+        before_each(function()
+            original_position = Config.windows.position
+            Config.windows.position = "right"
+
+            vim.cmd("tabnew")
+            first_tab = vim.api.nvim_get_current_tabpage()
+            first_widget = ChatWidget:new(first_tab, function() end)
+            first_widget:show({ focus_prompt = false })
+
+            vim.cmd("tabnew")
+            second_tab = vim.api.nvim_get_current_tabpage()
+            second_widget = ChatWidget:new(second_tab, function() end)
+            second_widget:show({ focus_prompt = false })
+        end)
+
+        after_each(function()
+            if second_widget then
+                pcall(function()
+                    second_widget:destroy()
+                end)
+            end
+
+            if first_widget then
+                pcall(function()
+                    first_widget:destroy()
+                end)
+            end
+
+            pcall(function()
+                vim.cmd("tabonly")
+            end)
+            Config.windows.position = original_position
+        end)
+
+        it("keeps header state isolated per widget tabpage", function()
+            first_widget:render_header("chat", "First tab")
+            second_widget:render_header("chat", "Second tab")
+            second_widget:_set_header_overlay("chat", "Unread below")
+
+            assert.equal(
+                "First tab",
+                first_widget:_get_effective_header_context("chat")
+            )
+            assert.equal(
+                "Unread below · Second tab",
+                second_widget:_get_effective_header_context("chat")
+            )
+
+            vim.api.nvim_set_current_tabpage(first_tab)
+            assert.equal(
+                "First tab",
+                first_widget:_get_effective_header_context("chat")
+            )
+
+            vim.api.nvim_set_current_tabpage(second_tab)
+            assert.equal(
+                "Unread below · Second tab",
+                second_widget:_get_effective_header_context("chat")
+            )
+        end)
     end)
 
     describe("rotate_layout", function()

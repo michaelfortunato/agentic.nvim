@@ -1,3 +1,4 @@
+---@diagnostic disable: undefined-doc-name, inject-field, undefined-field, assign-type-mismatch, param-type-mismatch
 --- Synthesized ACP interaction tree used by Agentic.
 ---
 --- ACP exposes prompt turns as one request plus a stream of `session/update`
@@ -76,6 +77,7 @@
 
 --- @class agentic.session.InteractionRequest
 --- @field kind "user"|"review"
+--- @field surface "chat"|"inline"
 --- @field text string
 --- @field timestamp integer|nil
 --- @field content agentic.acp.Content[]
@@ -385,7 +387,7 @@ local function content_node_to_content(node)
     return nil
 end
 
---- @param request {kind?: "user"|"review"|nil, text?: string|nil, timestamp?: integer|nil, content?: agentic.acp.Content[]|agentic.acp.Content|nil, content_nodes?: agentic.session.InteractionContentNode[]|nil, nodes?: agentic.session.InteractionRequestNode[]|nil}
+--- @param request {kind?: "user"|"review"|nil, surface?: "chat"|"inline"|nil, text?: string|nil, timestamp?: integer|nil, content?: agentic.acp.Content[]|agentic.acp.Content|nil, content_nodes?: agentic.session.InteractionContentNode[]|nil, nodes?: agentic.session.InteractionRequestNode[]|nil}
 --- @return agentic.session.InteractionRequest
 local function make_request(request)
     local content = normalize_content_list(request.content)
@@ -407,6 +409,7 @@ local function make_request(request)
     return {
         kind = request.kind
             or (is_review_request(request.text or "") and "review" or "user"),
+        surface = request.surface or "chat",
         text = request.text or "",
         timestamp = request.timestamp,
         content = content,
@@ -425,26 +428,6 @@ local function collect_text_content(content)
         end
     end
     return table.concat(parts, "")
-end
-
---- @param message {content?: agentic.acp.Content|agentic.acp.Content[]|nil, text?: string|nil}
---- @return agentic.acp.Content[]
-local function normalize_agent_content(message)
-    local normalized = normalize_content_list(message.content)
-    if not vim.tbl_isempty(normalized) then
-        return normalized
-    end
-
-    if message.text and message.text ~= "" then
-        return {
-            {
-                type = "text",
-                text = message.text,
-            },
-        }
-    end
-
-    return {}
 end
 
 --- @param existing agentic.session.PersistedSession.ToolCall|nil
@@ -598,7 +581,7 @@ function InteractionModel.from_persisted_session(opts)
 end
 
 --- @param turns agentic.session.InteractionTurn[]
---- @param request {kind?: "user"|"review"|nil, text?: string|nil, timestamp?: integer|nil, content?: agentic.acp.Content[]|agentic.acp.Content|nil}
+--- @param request {kind?: "user"|"review"|nil, surface?: "chat"|"inline"|nil, text?: string|nil, timestamp?: integer|nil, content?: agentic.acp.Content[]|agentic.acp.Content|nil}
 function InteractionModel.append_request(turns, request)
     turns[#turns + 1] = {
         index = #turns + 1,

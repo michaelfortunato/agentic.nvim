@@ -47,9 +47,11 @@ describe("agentic.session.PromptBuilder", function()
             include_system_info = false,
             selections = { selection },
             inline_instructions = PromptBuilder.build_inline_instructions(),
+            surface = "inline",
         })
 
         assert.equal("Refactor this selection", submission.prompt[1].text)
+        assert.equal("inline", submission.request.surface)
         assert.equal(
             PromptBuilder.build_inline_instructions(),
             submission.prompt[2].text
@@ -65,6 +67,16 @@ describe("agentic.session.PromptBuilder", function()
             submission.prompt[4].text:match("<col_start>7</col_start>")
         )
         assert.truthy(submission.prompt[4].text:match("<col_end>12</col_end>"))
+    end)
+
+    it("defaults regular submissions to the chat surface", function()
+        local submission = PromptBuilder.build_submission({
+            input_text = "Explain this file",
+            provider_name = "Codex",
+            include_system_info = false,
+        })
+
+        assert.equal("chat", submission.request.surface)
     end)
 
     it(

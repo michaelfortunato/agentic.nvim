@@ -1,3 +1,4 @@
+---@diagnostic disable: missing-fields, undefined-doc-name, undefined-field
 local assert = require("tests.helpers.assert")
 local spy = require("tests.helpers.spy")
 

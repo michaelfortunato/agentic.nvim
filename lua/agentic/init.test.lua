@@ -16,12 +16,23 @@ describe("agentic", function()
     local show_picker_stub
     --- @type TestStub|nil
     local current_session_stub
+    --- @type TestStub|nil
+    local clear_inline_buffer_stub
     --- @type integer
     local test_bufnr
+
+    local function clear_window_active_session_state()
+        for _, winid in ipairs(vim.api.nvim_list_wins()) do
+            if vim.api.nvim_win_is_valid(winid) then
+                vim.w[winid]._agentic_active_session_instance_id = nil
+            end
+        end
+    end
 
     local function delete_commands()
         pcall(vim.api.nvim_del_user_command, "AgenticChat")
         pcall(vim.api.nvim_del_user_command, "AgenticInline")
+        pcall(vim.api.nvim_del_user_command, "AgenticInlineClear")
     end
 
     --- @param opts {is_open?: boolean}|nil
@@ -76,9 +87,7 @@ describe("agentic", function()
             SessionRegistry.sessions[key] = nil
         end
 
-        for key in pairs(SessionRegistry._window_active_sessions or {}) do
-            SessionRegistry._window_active_sessions[key] = nil
-        end
+        clear_window_active_session_state()
 
         if get_session_stub then
             get_session_stub:revert()
@@ -98,6 +107,11 @@ describe("agentic", function()
         if current_session_stub then
             current_session_stub:revert()
             current_session_stub = nil
+        end
+
+        if clear_inline_buffer_stub then
+            clear_inline_buffer_stub:revert()
+            clear_inline_buffer_stub = nil
         end
 
         if new_signal_stub then
@@ -205,4 +219,16 @@ describe("agentic", function()
         assert.same({ "second line", "third line" }, selection.lines)
         assert.truthy(selection.file_path:match("agentic_init_test%.lua$"))
     end)
+
+    it(
+        "clears current-buffer inline artifacts through AgenticInlineClear",
+        function()
+            clear_inline_buffer_stub =
+                spy.stub(SessionRegistry, "clear_inline_buffer")
+
+            vim.cmd("AgenticInlineClear")
+
+            assert.spy(clear_inline_buffer_stub).was.called_with(test_bufnr)
+        end
+    )
 end)

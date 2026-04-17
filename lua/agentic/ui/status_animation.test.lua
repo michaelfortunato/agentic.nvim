@@ -1,3 +1,4 @@
+---@diagnostic disable: need-check-nil
 local assert = require("tests.helpers.assert")
 
 describe("agentic.ui.StatusAnimation", function()

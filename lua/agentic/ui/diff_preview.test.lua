@@ -339,6 +339,80 @@ describe("diff_preview", function()
         )
 
         it(
+            "tracks active diff preview state independently per tabpage",
+            function()
+                local first_path = vim.fn.tempname() .. ".lua"
+                local second_path = vim.fn.tempname() .. ".lua"
+
+                vim.cmd("tabnew")
+                local first_tab = vim.api.nvim_get_current_tabpage()
+                local first_bufnr = vim.api.nvim_create_buf(true, false)
+                vim.api.nvim_win_set_buf(
+                    vim.api.nvim_get_current_win(),
+                    first_bufnr
+                )
+                vim.api.nvim_buf_set_name(first_bufnr, first_path)
+                vim.api.nvim_buf_set_lines(first_bufnr, 0, -1, false, {
+                    "local first = 1",
+                    "return first",
+                })
+
+                DiffPreview.show_diff({
+                    file_path = first_path,
+                    diff = {
+                        old = { "local first = 1", "return first" },
+                        new = { "local first = 2", "return first" },
+                    },
+                    get_winid = get_winid_spy --[[@as function]],
+                })
+
+                vim.cmd("tabnew")
+                local second_tab = vim.api.nvim_get_current_tabpage()
+                local second_bufnr = vim.api.nvim_create_buf(true, false)
+                vim.api.nvim_win_set_buf(
+                    vim.api.nvim_get_current_win(),
+                    second_bufnr
+                )
+                vim.api.nvim_buf_set_name(second_bufnr, second_path)
+                vim.api.nvim_buf_set_lines(second_bufnr, 0, -1, false, {
+                    "local second = 1",
+                    "return second",
+                })
+
+                DiffPreview.show_diff({
+                    file_path = second_path,
+                    diff = {
+                        old = { "local second = 1", "return second" },
+                        new = { "local second = 2", "return second" },
+                    },
+                    get_winid = get_winid_spy --[[@as function]],
+                })
+
+                assert.equal(
+                    first_bufnr,
+                    DiffPreview.get_active_diff_buffer(first_tab)
+                )
+                assert.equal(
+                    second_bufnr,
+                    DiffPreview.get_active_diff_buffer(second_tab)
+                )
+
+                vim.api.nvim_set_current_tabpage(first_tab)
+                assert.equal(first_bufnr, DiffPreview.get_active_diff_buffer())
+
+                vim.api.nvim_set_current_tabpage(second_tab)
+                assert.equal(second_bufnr, DiffPreview.get_active_diff_buffer())
+
+                DiffPreview.clear_diff(second_bufnr)
+                vim.api.nvim_buf_delete(second_bufnr, { force = true })
+                vim.api.nvim_set_current_tabpage(first_tab)
+                DiffPreview.clear_diff(first_bufnr)
+                vim.api.nvim_buf_delete(first_bufnr, { force = true })
+                vim.cmd("tabonly")
+            end
+        )
+
+        it(
             "installs review approval keymaps and restores prior buffer-local mappings",
             function()
                 local file_path = vim.fn.tempname() .. ".lua"
@@ -1010,6 +1084,12 @@ describe("diff_preview", function()
                 vim.api.nvim_win_set_buf(diff_winid, file_bufnr)
                 vim.api.nvim_buf_set_name(file_bufnr, file_path)
                 vim.api.nvim_buf_set_lines(file_bufnr, 0, -1, false, file_lines)
+                local original_rhs = vim.api.nvim_buf_call(
+                    file_bufnr,
+                    function()
+                        return vim.fn.maparg("m", "n", false, true).rhs
+                    end
+                )
 
                 vim.cmd("vsplit")
                 local widget_winid = vim.api.nvim_get_current_win()
@@ -1078,6 +1158,13 @@ describe("diff_preview", function()
                 assert.equal(7, vim.api.nvim_win_get_cursor(diff_winid)[1])
 
                 DiffPreview.clear_diff(file_bufnr)
+                local restored_map = vim.api.nvim_buf_call(
+                    file_bufnr,
+                    function()
+                        return vim.fn.maparg("m", "n", false, true)
+                    end
+                )
+                assert.equal(original_rhs, restored_map.rhs)
                 vim.cmd("only")
                 vim.api.nvim_buf_delete(widget_bufnr, { force = true })
                 vim.api.nvim_buf_delete(file_bufnr, { force = true })

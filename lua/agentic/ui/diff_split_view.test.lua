@@ -143,6 +143,47 @@ describe("DiffSplitView", function()
             end
         )
 
+        it("keeps split state isolated per tabpage", function()
+            local first_file_path = vim.fn.tempname() .. ".lua"
+            local second_file_path = vim.fn.tempname() .. ".lua"
+            local first_tab = test_tabpage
+
+            local first_success = DiffSplitView.show_split_diff({
+                file_path = first_file_path,
+                diff = { old = { "local x = 1" }, new = { "local x = 2" } },
+                get_winid = function()
+                    return vim.api.nvim_get_current_win()
+                end,
+            })
+            assert.is_true(first_success)
+
+            local first_state = DiffSplitView.get_split_state(first_tab)
+            assert.is_not_nil(first_state)
+
+            vim.cmd("tabnew")
+            local second_tab = vim.api.nvim_get_current_tabpage()
+
+            local second_success = DiffSplitView.show_split_diff({
+                file_path = second_file_path,
+                diff = { old = { "local x = 1" }, new = { "local x = 2" } },
+                get_winid = function()
+                    return vim.api.nvim_get_current_win()
+                end,
+            })
+            assert.is_true(second_success)
+
+            local second_state = DiffSplitView.get_split_state(second_tab)
+            assert.is_not_nil(second_state)
+            assert.is_not_nil(DiffSplitView.get_split_state(first_tab))
+
+            DiffSplitView.clear_split_diff(second_tab)
+            assert.is_nil(DiffSplitView.get_split_state(second_tab))
+            assert.is_not_nil(DiffSplitView.get_split_state(first_tab))
+
+            vim.api.nvim_set_current_tabpage(first_tab)
+            vim.cmd("tabonly")
+        end)
+
         it("respects configured split width constraints", function()
             Config.diff_preview.split_width_ratio = 0.8
             Config.diff_preview.split_min_width = 10

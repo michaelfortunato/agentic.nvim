@@ -221,6 +221,27 @@ function SessionSelectors.get_interaction_session(state)
 end
 
 --- @param state agentic.session.State
+--- @return "chat"|"inline"|nil
+function SessionSelectors.get_latest_request_surface(state)
+    local turns = state and state.interaction and state.interaction.turns or {}
+    local turn = turns[#turns]
+    local request = turn and turn.request or nil
+    local surface = request and request.surface or nil
+
+    if surface == "chat" or surface == "inline" then
+        return surface
+    end
+
+    return nil
+end
+
+--- @param state agentic.session.State
+--- @return boolean
+function SessionSelectors.has_inline_surface(state)
+    return SessionSelectors.get_latest_request_surface(state) == "inline"
+end
+
+--- @param state agentic.session.State
 --- @return agentic.acp.PlanEntry[]
 function SessionSelectors.get_latest_plan_entries(state)
     local turns = state and state.interaction and state.interaction.turns or {}

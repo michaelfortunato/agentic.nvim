@@ -1,5 +1,8 @@
 local Logger = require("agentic.utils.logger")
 
+--- @class agentic.utils.BufHelpers.KeymapOpts: vim.keymap.set.Opts
+--- @field buffer? integer
+
 --- @class agentic.utils.BufHelpers
 local BufHelpers = {}
 
@@ -64,9 +67,10 @@ end
 --- @param rhs string|fun():any
 --- @param opts vim.keymap.set.Opts|nil
 function BufHelpers.keymap_set(bufnr, mode, lhs, rhs, opts)
-    opts = opts or {}
-    opts.buffer = bufnr
-    vim.keymap.set(mode, lhs, rhs, opts)
+    --- @type agentic.utils.BufHelpers.KeymapOpts
+    local keymap_opts = vim.tbl_deep_extend("force", {}, opts or {})
+    keymap_opts.buffer = bufnr
+    vim.keymap.set(mode, lhs, rhs, keymap_opts)
 end
 
 --- Sets multiple keymaps from a KeymapValue config entry for a specific buffer.

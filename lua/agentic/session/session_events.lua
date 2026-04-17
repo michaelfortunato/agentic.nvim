@@ -68,7 +68,7 @@ function SessionEvents.load_persisted_session(persisted_session, opts)
     }
 end
 
---- @param request {kind?: "user"|"review"|nil, text?: string|nil, timestamp?: integer|nil, content?: agentic.acp.Content[]|agentic.acp.Content|nil}
+--- @param request {kind?: "user"|"review"|nil, surface?: "chat"|"inline"|nil, text?: string|nil, timestamp?: integer|nil, content?: agentic.acp.Content[]|agentic.acp.Content|nil}
 --- @return table
 function SessionEvents.append_interaction_request(request)
     return {

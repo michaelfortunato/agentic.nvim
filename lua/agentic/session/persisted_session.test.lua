@@ -1,3 +1,4 @@
+---@diagnostic disable: assign-type-mismatch, missing-fields
 local assert = require("tests.helpers.assert")
 local spy = require("tests.helpers.spy")
 
@@ -70,11 +71,14 @@ describe("PersistedSession", function()
         cwd_stub:returns(path or TEST_CWD)
     end
 
-    local function make_turn(text)
+    --- @param text string
+    --- @param surface "chat"|"inline"|nil
+    local function make_turn(text, surface)
         return {
             index = 1,
             request = {
                 kind = "user",
+                surface = surface or "chat",
                 text = text,
                 timestamp = 1,
                 content = {
@@ -189,7 +193,7 @@ describe("PersistedSession", function()
             original.available_commands = {
                 { name = "review", description = "Review changes" },
             }
-            original.turns = { make_turn("Test message") }
+            original.turns = { make_turn("Test message", "inline") }
 
             local save_done = false
             local save_err = nil
@@ -216,6 +220,7 @@ describe("PersistedSession", function()
             assert.equal("plan", parsed.current_mode_id)
             assert.equal(1, #parsed.turns)
             assert.equal("Test message", parsed.turns[1].request.text)
+            assert.equal("inline", parsed.turns[1].request.surface)
 
             local loaded = nil
             local load_err = nil
@@ -241,6 +246,7 @@ describe("PersistedSession", function()
             assert.equal("plan", loaded.current_mode_id)
             assert.equal(1, #loaded.turns)
             assert.equal("Test message", loaded.turns[1].request.text)
+            assert.equal("inline", loaded.turns[1].request.surface)
         end)
 
         it("returns error for missing or corrupted files", function()

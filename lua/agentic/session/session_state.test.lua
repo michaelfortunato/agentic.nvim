@@ -28,6 +28,7 @@ describe("agentic.session.SessionState", function()
 
         store:dispatch(SessionEvents.append_interaction_request({
             kind = "user",
+            surface = "inline",
             text = "hello",
             timestamp = 123,
             content = {
@@ -43,6 +44,7 @@ describe("agentic.session.SessionState", function()
         assert.equal("plan", persisted.current_mode_id)
         assert.equal(1, #persisted.turns)
         assert.equal("hello", persisted.turns[1].request.text)
+        assert.equal("inline", persisted.turns[1].request.surface)
     end)
 
     it("appends agent chunks onto the current turn response message", function()

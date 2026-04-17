@@ -155,6 +155,7 @@ end
 local function register_user_commands()
     pcall(vim.api.nvim_del_user_command, "AgenticChat")
     pcall(vim.api.nvim_del_user_command, "AgenticInline")
+    pcall(vim.api.nvim_del_user_command, "AgenticInlineClear")
 
     vim.api.nvim_create_user_command("AgenticChat", function(command_opts)
         handle_chat_command(
@@ -178,6 +179,13 @@ local function register_user_commands()
         nargs = 0,
         range = true,
         desc = "Open Agentic inline chat for the current or provided selection",
+    })
+
+    vim.api.nvim_create_user_command("AgenticInlineClear", function()
+        Agentic.inline_clear_current_buffer()
+    end, {
+        nargs = 0,
+        desc = "Clear Agentic inline artifacts for the current buffer",
     })
 end
 
@@ -420,6 +428,15 @@ function Agentic.load_session()
             vim.log.levels.INFO
         )
     end
+end
+
+function Agentic.inline_clear_current_buffer()
+    local bufnr = vim.api.nvim_get_current_buf()
+    SessionRegistry.clear_inline_buffer(bufnr)
+    Logger.notify(
+        "Cleared Agentic inline artifacts for the current buffer.",
+        vim.log.levels.INFO
+    )
 end
 
 --- Used to make sure we don't set multiple signal handlers or autocmds, if the user calls setup multiple times

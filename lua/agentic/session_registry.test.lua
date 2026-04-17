@@ -1,4 +1,4 @@
----@diagnostic disable: assign-type-mismatch, need-check-nil
+---@diagnostic disable: assign-type-mismatch, need-check-nil, invisible
 local assert = require("tests.helpers.assert")
 local spy = require("tests.helpers.spy")
 
@@ -12,11 +12,21 @@ describe("agentic.SessionRegistry", function()
     local logger_stub
     local session_manager_mock
     local original_loaded
+    --- @type TestStub|nil
+    local diff_clear_stub
 
     --- @type integer[]
     local created_bufnrs
 
-    --- @param opts {instance_id?: integer|nil, tab_page_id?: integer|nil}|nil
+    local function clear_window_active_session_state()
+        for _, winid in ipairs(vim.api.nvim_list_wins()) do
+            if vim.api.nvim_win_is_valid(winid) then
+                vim.w[winid]._agentic_active_session_instance_id = nil
+            end
+        end
+    end
+
+    --- @param opts {instance_id?: integer|nil, tab_page_id?: integer|nil, session_id?: string|nil, is_open?: boolean|nil, state?: table|nil}|nil
     --- @return table
     local function create_mock_session(opts)
         opts = opts or {}
@@ -24,24 +34,51 @@ describe("agentic.SessionRegistry", function()
         local widget_bufnr = vim.api.nvim_create_buf(false, true)
         created_bufnrs[#created_bufnrs + 1] = widget_bufnr
 
+        local input_winid = vim.api.nvim_get_current_win()
+
         local session = {
             instance_id = opts.instance_id,
-            session_id = nil,
+            session_id = opts.session_id
+                or ("session-" .. tostring(opts.instance_id or 0)),
             session_state = {
+                label = "state-" .. tostring(opts.instance_id or 0),
                 get_state = function()
-                    return {
-                        session = {
-                            title = "",
-                        },
-                    }
+                    return opts.state
+                        or {
+                            session = {
+                                title = "Session "
+                                    .. tostring(opts.instance_id or 0),
+                            },
+                            interaction = {
+                                turns = {},
+                            },
+                            permissions = {
+                                current_request = nil,
+                                queue = {},
+                            },
+                            review = {
+                                active_tool_call_id = nil,
+                            },
+                        }
                 end,
             },
             widget = {
                 tab_page_id = opts.tab_page_id
                     or vim.api.nvim_get_current_tabpage(),
+                _open = opts.is_open == true,
                 buf_nrs = {
                     chat = widget_bufnr,
                 },
+                win_nrs = {
+                    input = input_winid,
+                    chat = input_winid,
+                },
+            },
+            inline_chat = {
+                has_pending_or_active_requests = function()
+                    return false
+                end,
+                clear_buffer = spy.new(function() end),
             },
             destroy = spy.new(function() end),
         }
@@ -49,6 +86,33 @@ describe("agentic.SessionRegistry", function()
         session.widget.owns_buffer = function(_, bufnr)
             return bufnr == widget_bufnr
         end
+
+        session.widget.is_open = function(self)
+            return self._open == true
+        end
+
+        session.widget.show = spy.new(function(self)
+            self._open = true
+        end)
+
+        session.widget.focus_input = spy.new(function(self)
+            if
+                self.win_nrs.input
+                and vim.api.nvim_win_is_valid(self.win_nrs.input)
+            then
+                vim.api.nvim_set_current_win(self.win_nrs.input)
+            end
+        end)
+
+        session.widget.find_first_editor_window = function()
+            return session._editor_winid
+        end
+
+        session.swap_widget = spy.new(function(self, other)
+            local widget = self.widget
+            self.widget = other.widget
+            other.widget = widget
+        end)
 
         return session
     end
@@ -117,17 +181,21 @@ describe("agentic.SessionRegistry", function()
             end
         end
 
-        local active_sessions = SessionRegistry
-                and rawget(SessionRegistry, "_window_active_sessions")
-            or nil
-        if active_sessions then
-            for key in pairs(active_sessions) do
-                active_sessions[key] = nil
-            end
-        end
+        clear_window_active_session_state()
+        pcall(function()
+            vim.cmd("silent! tabonly")
+        end)
+        pcall(function()
+            vim.cmd("silent! only")
+        end)
 
         if SessionRegistry then
             rawset(SessionRegistry, "_next_instance_id", 0)
+        end
+
+        if diff_clear_stub then
+            diff_clear_stub:revert()
+            diff_clear_stub = nil
         end
 
         for _, bufnr in ipairs(created_bufnrs) do
@@ -211,6 +279,49 @@ describe("agentic.SessionRegistry", function()
 
             assert.equal(session, resolved)
         end)
+
+        it(
+            "resolves editor-window affinity independently per window",
+            function()
+                local first = SessionRegistry.new_session()
+                local second = SessionRegistry.new_session()
+                local first_winid = vim.api.nvim_get_current_win()
+
+                vim.cmd("vsplit")
+                local second_winid = vim.api.nvim_get_current_win()
+
+                SessionRegistry.set_active_session(first, first_winid)
+                SessionRegistry.set_active_session(second, second_winid)
+
+                vim.api.nvim_set_current_win(first_winid)
+                assert.equal(first, SessionRegistry.get_current_session())
+
+                vim.api.nvim_set_current_win(second_winid)
+                assert.equal(second, SessionRegistry.get_current_session())
+
+                vim.cmd("silent! only")
+            end
+        )
+
+        it(
+            "clears stale window-local affinity when the window becomes invalid",
+            function()
+                local session = SessionRegistry.new_session()
+                local first_winid = vim.api.nvim_get_current_win()
+
+                vim.cmd("vsplit")
+                local temporary_winid = vim.api.nvim_get_current_win()
+
+                SessionRegistry.set_active_session(session, temporary_winid)
+                vim.api.nvim_win_close(temporary_winid, true)
+                vim.api.nvim_set_current_win(first_winid)
+
+                assert.is_nil(SessionRegistry.get_current_session())
+                assert.is_nil(
+                    vim.w[first_winid]._agentic_active_session_instance_id
+                )
+            end
+        )
     end)
 
     describe("session lists", function()
@@ -292,6 +403,80 @@ describe("agentic.SessionRegistry", function()
             assert.is_nil(SessionRegistry.sessions[second.instance_id])
             assert.is_not_nil(SessionRegistry.sessions[third.instance_id])
         end)
+    end)
+
+    describe("load_session_into_current_widget", function()
+        it(
+            "swaps widget bindings without swapping session identity or state",
+            function()
+                local current_session = SessionRegistry.new_session()
+                local target_session = SessionRegistry.new_session()
+                local left_winid = vim.api.nvim_get_current_win()
+
+                vim.cmd("vsplit")
+                local right_winid = vim.api.nvim_get_current_win()
+
+                current_session._editor_winid = left_winid
+                target_session._editor_winid = right_winid
+
+                local current_session_id = current_session.session_id
+                local target_session_id = target_session.session_id
+                local current_state = current_session.session_state
+                local target_state = target_session.session_state
+                local current_widget = current_session.widget
+                local target_widget = target_session.widget
+
+                SessionRegistry.set_active_session(current_session, left_winid)
+                vim.api.nvim_set_current_win(left_winid)
+                assert.is_true(
+                    SessionRegistry.load_session_into_current_widget(
+                        target_session
+                    )
+                )
+
+                assert.equal(current_session_id, current_session.session_id)
+                assert.equal(target_session_id, target_session.session_id)
+                assert.equal(current_state, current_session.session_state)
+                assert.equal(target_state, target_session.session_state)
+                assert.equal(target_widget, current_session.widget)
+                assert.equal(current_widget, target_session.widget)
+                assert.equal(
+                    target_session,
+                    SessionRegistry.get_current_session()
+                )
+
+                vim.api.nvim_set_current_win(right_winid)
+                assert.equal(
+                    current_session,
+                    SessionRegistry.get_current_session()
+                )
+
+                vim.cmd("silent! only")
+            end
+        )
+    end)
+
+    describe("clear_inline_buffer", function()
+        it(
+            "clears inline artifacts across sessions and the diff preview",
+            function()
+                local first = SessionRegistry.new_session()
+                local second = SessionRegistry.new_session()
+                local DiffPreview = require("agentic.ui.diff_preview")
+
+                diff_clear_stub = spy.stub(DiffPreview, "clear_diff")
+
+                SessionRegistry.clear_inline_buffer(17)
+
+                assert
+                    .spy(first.inline_chat.clear_buffer --[[@as TestSpy]]).was
+                    .called_with(first.inline_chat, 17)
+                assert
+                    .spy(second.inline_chat.clear_buffer --[[@as TestSpy]]).was
+                    .called_with(second.inline_chat, 17)
+                assert.spy(diff_clear_stub).was.called_with(17)
+            end
+        )
     end)
 
     describe("sessions weak table", function()

@@ -1,0 +1,284 @@
+---@diagnostic disable: invisible
+local BufHelpers = require("agentic.utils.buf_helpers")
+local Config = require("agentic.config")
+local KeymapHelp = require("agentic.ui.keymap_help")
+local Logger = require("agentic.utils.logger")
+local Theme = require("agentic.theme")
+
+local Utils = require("agentic.ui.inline_chat.utils")
+
+local M = {}
+
+local KEYMAP_HELP_KEY = "?"
+
+--- @param bufnr integer|nil
+--- @param winid integer|nil
+--- @return integer resolved_bufnr
+--- @return integer resolved_winid
+local function resolve_source_context(bufnr, winid)
+    local current_winid = vim.api.nvim_get_current_win()
+    local current_bufnr = vim.api.nvim_get_current_buf()
+
+    local resolved_winid = winid
+    if
+        resolved_winid == nil
+        and bufnr ~= nil
+        and vim.api.nvim_buf_is_valid(bufnr)
+    then
+        local visible_winid = vim.fn.bufwinid(bufnr)
+        if visible_winid ~= -1 and vim.api.nvim_win_is_valid(visible_winid) then
+            resolved_winid = visible_winid
+        end
+    end
+
+    if
+        resolved_winid == nil or not vim.api.nvim_win_is_valid(resolved_winid)
+    then
+        resolved_winid = current_winid
+    end
+
+    local resolved_bufnr = bufnr
+    if
+        resolved_bufnr == nil
+        or not vim.api.nvim_buf_is_valid(resolved_bufnr)
+    then
+        resolved_bufnr = vim.api.nvim_win_get_buf(resolved_winid)
+    end
+
+    if not vim.api.nvim_buf_is_valid(resolved_bufnr) then
+        resolved_bufnr = current_bufnr
+    end
+
+    return resolved_bufnr, resolved_winid
+end
+
+--- @param self agentic.ui.InlineChat
+--- @return boolean
+function M.is_prompt_open(self)
+    return self._prompt ~= nil
+        and vim.api.nvim_win_is_valid(self._prompt.prompt_winid)
+end
+
+--- @param self agentic.ui.InlineChat
+--- @param selection agentic.Selection
+--- @param opts {source_bufnr?: integer|nil, source_winid?: integer|nil}|nil
+--- @return boolean opened
+function M.open(self, selection, opts)
+    opts = opts or {}
+    M.close_prompt(self, true)
+
+    local source_bufnr, source_winid =
+        resolve_source_context(opts.source_bufnr, opts.source_winid)
+
+    if vim.api.nvim_get_current_win() ~= source_winid then
+        vim.api.nvim_set_current_win(source_winid)
+    end
+
+    local normalized_selection =
+        Utils.normalize_selection(source_bufnr, selection)
+    local prompt_bufnr = vim.api.nvim_create_buf(false, true)
+    local prompt_width = math.max(24, Config.inline.prompt_width)
+    local win_width = vim.api.nvim_win_get_width(source_winid)
+    local width = math.min(prompt_width, math.max(24, win_width - 6))
+    local height = math.max(1, Config.inline.prompt_height)
+    local footer = M.build_prompt_footer()
+
+    vim.bo[prompt_bufnr].buftype = "nofile"
+    vim.bo[prompt_bufnr].bufhidden = "wipe"
+    vim.bo[prompt_bufnr].buflisted = false
+    vim.bo[prompt_bufnr].swapfile = false
+    vim.bo[prompt_bufnr].modifiable = true
+    vim.bo[prompt_bufnr].filetype = "AgenticInput"
+
+    vim.api.nvim_buf_set_lines(prompt_bufnr, 0, -1, false, { "" })
+
+    local ok, prompt_winid = pcall(vim.api.nvim_open_win, prompt_bufnr, true, {
+        relative = "cursor",
+        row = 1,
+        col = 0,
+        width = width,
+        height = height,
+        style = "minimal",
+        border = "rounded",
+        title = " Inline " .. Utils.format_range(normalized_selection) .. " ",
+        title_pos = "left",
+        footer = footer ~= "" and footer or nil,
+        footer_pos = "right",
+        zindex = 250,
+    })
+
+    if not ok then
+        Logger.notify(
+            "Failed to open inline prompt window.",
+            vim.log.levels.ERROR
+        )
+        pcall(vim.api.nvim_buf_delete, prompt_bufnr, { force = true })
+        return false
+    end
+
+    vim.wo[prompt_winid].wrap = true
+    vim.wo[prompt_winid].linebreak = true
+    vim.wo[prompt_winid].winhighlight = "FloatBorder:"
+        .. Theme.HL_GROUPS.REVIEW_BANNER_ACCENT
+
+    self._prompt = {
+        prompt_bufnr = prompt_bufnr,
+        prompt_winid = prompt_winid,
+        selection = normalized_selection,
+        source_bufnr = source_bufnr,
+        source_winid = source_winid,
+    }
+
+    M.bind_keymaps(self)
+    vim.cmd("startinsert")
+    return true
+end
+
+--- @param self agentic.ui.InlineChat
+function M.bind_keymaps(self)
+    local prompt = self._prompt
+    if not prompt then
+        return
+    end
+
+    local submit = function()
+        self:_submit_prompt()
+    end
+
+    BufHelpers.keymap_set(prompt.prompt_bufnr, { "i", "n" }, "<CR>", submit, {
+        desc = "Agentic: Submit inline prompt",
+    })
+
+    BufHelpers.multi_keymap_set(
+        Config.keymaps.prompt.submit,
+        prompt.prompt_bufnr,
+        submit,
+        { desc = "Agentic: Submit inline prompt" }
+    )
+
+    BufHelpers.multi_keymap_set(
+        Config.keymaps.widget.close,
+        prompt.prompt_bufnr,
+        function()
+            self:_close_prompt(true)
+        end,
+        { desc = "Agentic: Close inline prompt" }
+    )
+
+    BufHelpers.keymap_set(prompt.prompt_bufnr, "n", "<Esc>", function()
+        self:_close_prompt(true)
+    end, { desc = "Agentic: Close inline prompt" })
+
+    BufHelpers.multi_keymap_set(KEYMAP_HELP_KEY, prompt.prompt_bufnr, function()
+        KeymapHelp.show_for_buffer(prompt.prompt_bufnr)
+    end, { desc = "Agentic: Show available keymaps" })
+
+    BufHelpers.multi_keymap_set(
+        Config.keymaps.widget.change_mode,
+        prompt.prompt_bufnr,
+        function()
+            self._on_change_mode()
+        end,
+        { desc = "Agentic: Inline mode selector" }
+    )
+
+    BufHelpers.multi_keymap_set(
+        Config.keymaps.widget.switch_model,
+        prompt.prompt_bufnr,
+        function()
+            self._on_change_model()
+        end,
+        { desc = "Agentic: Inline model selector" }
+    )
+
+    BufHelpers.multi_keymap_set(
+        Config.keymaps.widget.switch_thought_level,
+        prompt.prompt_bufnr,
+        function()
+            self._on_change_thought_level()
+        end,
+        { desc = "Agentic: Inline reasoning selector" }
+    )
+
+    BufHelpers.multi_keymap_set(
+        Config.keymaps.widget.switch_approval_preset,
+        prompt.prompt_bufnr,
+        function()
+            self._on_change_approval_preset()
+        end,
+        { desc = "Agentic: Inline approval selector" }
+    )
+end
+
+--- @param self agentic.ui.InlineChat
+function M.submit_prompt(self)
+    local prompt = self._prompt
+    if not prompt or not vim.api.nvim_buf_is_valid(prompt.prompt_bufnr) then
+        return
+    end
+
+    local lines = vim.api.nvim_buf_get_lines(prompt.prompt_bufnr, 0, -1, false)
+    local text = Utils.sanitize_text(table.concat(lines, "\n"))
+    if text == "" then
+        Logger.notify("Inline prompt is empty.", vim.log.levels.INFO)
+        return
+    end
+
+    local accepted = self._on_submit({
+        prompt = text,
+        selection = vim.deepcopy(prompt.selection),
+        source_bufnr = prompt.source_bufnr,
+        source_winid = prompt.source_winid,
+    })
+
+    if accepted then
+        if vim.fn.mode():sub(1, 1) == "i" then
+            vim.cmd.stopinsert()
+        end
+        M.close_prompt(self, true)
+    end
+end
+
+--- @param self agentic.ui.InlineChat
+--- @param restore_focus boolean
+function M.close_prompt(self, restore_focus)
+    local prompt = self._prompt
+    if not prompt then
+        return
+    end
+
+    self._prompt = nil
+
+    if
+        prompt.prompt_winid and vim.api.nvim_win_is_valid(prompt.prompt_winid)
+    then
+        pcall(vim.api.nvim_win_close, prompt.prompt_winid, true)
+    elseif vim.api.nvim_buf_is_valid(prompt.prompt_bufnr) then
+        pcall(vim.api.nvim_buf_delete, prompt.prompt_bufnr, { force = true })
+    end
+
+    if
+        restore_focus
+        and prompt.source_winid
+        and vim.api.nvim_win_is_valid(prompt.source_winid)
+    then
+        vim.api.nvim_set_current_win(prompt.source_winid)
+    end
+end
+
+--- @return string
+function M.build_prompt_footer()
+    local parts = {}
+    local submit_key = BufHelpers.find_keymap(Config.keymaps.prompt.submit, "i")
+        or "<CR>"
+
+    if submit_key then
+        parts[#parts + 1] = submit_key .. " submit"
+    end
+
+    parts[#parts + 1] = "? keymaps"
+
+    return table.concat(parts, "  ")
+end
+
+return M

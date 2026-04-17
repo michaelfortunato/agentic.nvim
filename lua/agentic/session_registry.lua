@@ -4,14 +4,19 @@ local DefaultConfig = require("agentic.config_default")
 local ACPHealth = require("agentic.acp.acp_health")
 local Chooser = require("agentic.ui.chooser")
 
+--- UI Sync Scopes
+--- - Global: session inventory and instance-id allocation
+--- - Window-local: editor-window session affinity via vim.w[winid]
+--- - Tab-local: widget inventory is derived from widget bindings, not session identity
+
+local ACTIVE_SESSION_WINDOW_KEY = "_agentic_active_session_instance_id"
+
 --- @class agentic.SessionRegistry
 --- @field sessions table<integer, agentic.SessionManager|nil> Weak map: instance id -> SessionManager instance
 --- @field _next_instance_id integer
---- @field _window_active_sessions table<integer, integer|nil> Editor window id -> instance id
 local SessionRegistry = {
     sessions = setmetatable({}, { __mode = "v" }),
     _next_instance_id = 0,
-    _window_active_sessions = {},
 }
 
 --- @param sessions agentic.SessionManager[]
@@ -35,6 +40,28 @@ local function normalize_window_id(winid)
     return winid
 end
 
+--- @param winid integer|nil
+--- @return integer|nil
+local function get_window_active_session_instance_id(winid)
+    local resolved_winid = normalize_window_id(winid)
+    if resolved_winid == nil then
+        return nil
+    end
+
+    return vim.w[resolved_winid][ACTIVE_SESSION_WINDOW_KEY]
+end
+
+--- @param winid integer|nil
+--- @param instance_id integer|nil
+local function set_window_active_session_instance_id(winid, instance_id)
+    local resolved_winid = normalize_window_id(winid)
+    if resolved_winid == nil then
+        return
+    end
+
+    vim.w[resolved_winid][ACTIVE_SESSION_WINDOW_KEY] = instance_id
+end
+
 --- @param session agentic.SessionManager|nil
 --- @param winid integer|nil
 function SessionRegistry.set_active_session(session, winid)
@@ -47,8 +74,7 @@ function SessionRegistry.set_active_session(session, winid)
         return
     end
 
-    SessionRegistry._window_active_sessions[resolved_winid] =
-        session.instance_id
+    set_window_active_session_instance_id(resolved_winid, session.instance_id)
 end
 
 --- @return agentic.SessionManager[]
@@ -135,7 +161,7 @@ local function get_active_session_for_window(winid)
     end
 
     local active_instance_id =
-        SessionRegistry._window_active_sessions[resolved_winid]
+        get_window_active_session_instance_id(resolved_winid)
     local active_session = active_instance_id ~= nil
             and SessionRegistry.sessions[active_instance_id]
         or nil
@@ -144,7 +170,7 @@ local function get_active_session_for_window(winid)
         return active_session
     end
 
-    SessionRegistry._window_active_sessions[resolved_winid] = nil
+    set_window_active_session_instance_id(resolved_winid, nil)
     return nil
 end
 
@@ -306,11 +332,10 @@ function SessionRegistry.destroy_session(target)
         SessionRegistry.sessions[instance_id] = nil
     end
 
-    for winid, active_instance_id in
-        pairs(SessionRegistry._window_active_sessions)
-    do
+    for _, winid in ipairs(vim.api.nvim_list_wins()) do
+        local active_instance_id = get_window_active_session_instance_id(winid)
         if active_instance_id == instance_id then
-            SessionRegistry._window_active_sessions[winid] = nil
+            set_window_active_session_instance_id(winid, nil)
         end
     end
 
@@ -402,6 +427,23 @@ function SessionRegistry.load_session_into_current_widget(target_session)
     SessionRegistry.set_active_session(current_session, target_editor_win)
 
     return true
+end
+
+--- @param bufnr integer|nil
+function SessionRegistry.clear_inline_buffer(bufnr)
+    if bufnr == nil then
+        return
+    end
+
+    local DiffPreview = require("agentic.ui.diff_preview")
+
+    for _, session in ipairs(SessionRegistry.get_sessions()) do
+        if session.inline_chat and session.inline_chat.clear_buffer then
+            session.inline_chat:clear_buffer(bufnr)
+        end
+    end
+
+    DiffPreview.clear_diff(bufnr)
 end
 
 --- @param on_selected fun(provider_name: agentic.UserConfig.ProviderName|nil) Callback that will be called with the selected provider name, if any

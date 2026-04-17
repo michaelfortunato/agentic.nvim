@@ -251,6 +251,36 @@ describe("agentic.ui.InlineChat", function()
         set_current_win_spy:revert()
     end)
 
+    it("closes the prompt and restores focus without submitting", function()
+        local inline = InlineChat:new({
+            tab_page_id = vim.api.nvim_get_current_tabpage(),
+            on_submit = function()
+                return true
+            end,
+        })
+
+        inline:open({
+            lines = { "local value = 1" },
+            start_line = 1,
+            end_line = 1,
+            file_path = "/tmp/inline_chat_test.lua",
+            file_type = "lua",
+        })
+
+        --- @diagnostic disable-next-line: invisible
+        local prompt = inline._prompt
+        assert.is_not_nil(prompt)
+        --- @cast prompt agentic.ui.InlineChat.PromptState
+
+        vim.api.nvim_set_current_win(prompt.prompt_winid)
+        --- @diagnostic disable-next-line: invisible
+        inline:_close_prompt(true)
+
+        assert.is_false(vim.api.nvim_win_is_valid(prompt.prompt_winid))
+        assert.equal(winid, vim.api.nvim_get_current_win())
+        assert.is_false(inline:is_prompt_open())
+    end)
+
     it("returns to normal mode after submitting with <CR>", function()
         local on_submit_spy = spy.new(function()
             return true
@@ -300,6 +330,51 @@ describe("agentic.ui.InlineChat", function()
         assert.equal(winid, vim.api.nvim_get_current_win())
     end)
 
+    it("normalizes stale columns before submitting the prompt", function()
+        vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, { "short" })
+
+        local on_submit_spy = spy.new(function()
+            return true
+        end)
+
+        local inline = InlineChat:new({
+            tab_page_id = vim.api.nvim_get_current_tabpage(),
+            on_submit = on_submit_spy --[[@as function]],
+        })
+
+        inline:open({
+            lines = { "short" },
+            start_line = 1,
+            end_line = 1,
+            start_col = 7,
+            end_col = 11,
+            file_path = "/tmp/inline_chat_test.lua",
+            file_type = "lua",
+        })
+
+        --- @diagnostic disable-next-line: invisible
+        local prompt = inline._prompt
+        assert.is_not_nil(prompt)
+        --- @cast prompt agentic.ui.InlineChat.PromptState
+        vim.api.nvim_buf_set_lines(
+            prompt.prompt_bufnr,
+            0,
+            -1,
+            false,
+            { "Refactor this line" }
+        )
+
+        --- @diagnostic disable-next-line: invisible
+        inline:_submit_prompt()
+
+        assert.spy(on_submit_spy).was.called(1)
+
+        local submitted_request = on_submit_spy.calls[1][1]
+        local selection = submitted_request.selection
+        assert.equal(5, selection.start_col)
+        assert.equal(5, selection.end_col)
+    end)
+
     it("renders the tracked visual range for inline selections", function()
         local inline = InlineChat:new({
             tab_page_id = vim.api.nvim_get_current_tabpage(),
@@ -331,6 +406,56 @@ describe("agentic.ui.InlineChat", function()
             )
         )
     end)
+
+    it(
+        "clamps stale inline columns before starting a second request",
+        function()
+            local inline = InlineChat:new({
+                tab_page_id = vim.api.nvim_get_current_tabpage(),
+                on_submit = function()
+                    return true
+                end,
+            })
+
+            --- @type agentic.Selection
+            local selection = {
+                lines = { "value" },
+                start_line = 1,
+                end_line = 1,
+                start_col = 7,
+                end_col = 11,
+                file_path = "/tmp/inline_chat_test.lua",
+                file_type = "lua",
+            }
+
+            inline:begin_request({
+                prompt = "First request",
+                selection = selection,
+                source_bufnr = bufnr,
+                source_winid = winid,
+            })
+            inline:complete({ stopReason = "end_turn" }, nil)
+
+            vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, { "short" })
+
+            assert.has_no_errors(function()
+                inline:begin_request({
+                    prompt = "Second request",
+                    selection = selection,
+                    source_bufnr = bufnr,
+                    source_winid = winid,
+                })
+            end)
+
+            local lines = get_rendered_lines()
+            assert.truthy(
+                vim.tbl_contains(
+                    lines,
+                    "  [Agentic Inline] inline_chat_test.lua:1:5-1:5 Starting inline request"
+                )
+            )
+        end
+    )
 
     it("renders multiple queued inline requests in the same tabpage", function()
         local inline = InlineChat:new({
@@ -663,6 +788,134 @@ describe("agentic.ui.InlineChat", function()
     )
 
     it(
+        "hides the ghost preview immediately after an inline approval",
+        function()
+            local inline = InlineChat:new({
+                tab_page_id = vim.api.nvim_get_current_tabpage(),
+                on_submit = function()
+                    return true
+                end,
+            })
+
+            inline:begin_request({
+                prompt = "Approve this edit",
+                selection = {
+                    lines = { "local value = 1" },
+                    start_line = 1,
+                    end_line = 1,
+                    file_path = "/tmp/inline_chat_test.lua",
+                    file_type = "lua",
+                },
+                source_bufnr = bufnr,
+                source_winid = winid,
+            })
+            inline:handle_tool_call({
+                kind = "edit",
+                file_path = "/tmp/inline_chat_test.lua",
+                argument = "replace value",
+            })
+            inline:handle_permission_request()
+
+            inline:handle_permission_resolution({
+                option_id = "allow_once",
+                options = {
+                    {
+                        optionId = "allow_once",
+                        kind = "allow_once",
+                        name = "Allow once",
+                    },
+                    {
+                        optionId = "reject_once",
+                        kind = "reject_once",
+                        name = "Reject once",
+                    },
+                },
+            })
+
+            assert.equal(0, #get_overlay_extmarks())
+
+            inline:refresh()
+            assert.equal(0, #get_overlay_extmarks())
+
+            inline:handle_session_update({
+                sessionUpdate = "agent_message_chunk",
+                content = {
+                    type = "text",
+                    text = "Approved and continuing",
+                },
+            })
+
+            assert.equal(0, #get_overlay_extmarks())
+        end
+    )
+
+    it(
+        "reopens the inline prompt on the tracked range after rejection",
+        function()
+            local inline = InlineChat:new({
+                tab_page_id = vim.api.nvim_get_current_tabpage(),
+                on_submit = function()
+                    return true
+                end,
+            })
+
+            inline:begin_request({
+                prompt = "Reject this edit",
+                selection = {
+                    lines = { "return value" },
+                    start_line = 2,
+                    end_line = 2,
+                    file_path = "/tmp/inline_chat_test.lua",
+                    file_type = "lua",
+                },
+                source_bufnr = bufnr,
+                source_winid = winid,
+            })
+            inline:handle_tool_call({
+                kind = "edit",
+                file_path = "/tmp/inline_chat_test.lua",
+                argument = "replace value",
+            })
+            inline:handle_permission_request()
+
+            inline:handle_permission_resolution({
+                option_id = "reject_once",
+                options = {
+                    {
+                        optionId = "allow_once",
+                        kind = "allow_once",
+                        name = "Allow once",
+                    },
+                    {
+                        optionId = "reject_once",
+                        kind = "reject_once",
+                        name = "Reject once",
+                    },
+                },
+            })
+
+            assert.equal(0, #get_overlay_extmarks())
+
+            wait_for(function()
+                return inline:is_prompt_open()
+            end)
+
+            --- @diagnostic disable-next-line: invisible
+            local prompt = inline._prompt
+            assert.is_not_nil(prompt)
+            --- @cast prompt agentic.ui.InlineChat.PromptState
+            assert.equal(bufnr, prompt.source_bufnr)
+            assert.equal(winid, prompt.source_winid)
+            assert.equal(2, prompt.selection.start_line)
+            assert.equal(2, prompt.selection.end_line)
+            assert.same({ "return value" }, prompt.selection.lines)
+
+            --- @diagnostic disable-next-line: invisible
+            inline:_close_prompt(true)
+        end
+    )
+
+    it(
         "keeps the inline overlay attached to the tracked range extmark",
         function()
             local inline = InlineChat:new({
@@ -729,6 +982,132 @@ describe("agentic.ui.InlineChat", function()
         inline:refresh()
 
         assert.equal(0, #get_overlay_extmarks())
+    end)
+
+    it(
+        "clears current-buffer inline artifacts without letting refresh re-render ghost text",
+        function()
+            local inline = InlineChat:new({
+                tab_page_id = vim.api.nvim_get_current_tabpage(),
+                on_submit = function()
+                    return true
+                end,
+            })
+
+            inline:begin_request({
+                prompt = "Clear this request",
+                selection = {
+                    lines = { "local value = 1" },
+                    start_line = 1,
+                    end_line = 1,
+                    file_path = "/tmp/inline_chat_test.lua",
+                    file_type = "lua",
+                },
+                source_bufnr = bufnr,
+                source_winid = winid,
+            })
+            inline:handle_session_update({
+                sessionUpdate = "agent_message_chunk",
+                content = {
+                    type = "text",
+                    text = "Preview text",
+                },
+            })
+
+            assert.equal(1, #get_overlay_extmarks())
+            assert.equal(1, #get_thread_extmarks())
+            assert.equal(1, vim.tbl_count(get_thread_store()))
+
+            inline:clear_buffer(bufnr)
+
+            assert.equal(0, #get_overlay_extmarks())
+            assert.equal(0, #get_thread_extmarks())
+            assert.equal(0, vim.tbl_count(get_thread_store()))
+
+            inline:refresh()
+
+            assert.equal(0, #get_overlay_extmarks())
+            assert.equal(0, #get_thread_extmarks())
+        end
+    )
+
+    it("keeps thread stores buffer-local across source buffers", function()
+        local second_bufnr = vim.api.nvim_create_buf(true, false)
+        vim.api.nvim_buf_set_name(
+            second_bufnr,
+            vim.fn.tempname() .. "/inline_chat_second_test.lua"
+        )
+        vim.api.nvim_buf_set_lines(second_bufnr, 0, -1, false, {
+            "local other = 2",
+            "return other",
+        })
+
+        vim.cmd("vsplit")
+        local second_winid = vim.api.nvim_get_current_win()
+        vim.api.nvim_win_set_buf(second_winid, second_bufnr)
+
+        local first_inline = InlineChat:new({
+            tab_page_id = vim.api.nvim_get_current_tabpage(),
+            on_submit = function()
+                return true
+            end,
+        })
+        local second_inline = InlineChat:new({
+            tab_page_id = vim.api.nvim_get_current_tabpage(),
+            on_submit = function()
+                return true
+            end,
+        })
+
+        first_inline:begin_request({
+            prompt = "First buffer request",
+            selection = {
+                lines = { "local value = 1" },
+                start_line = 1,
+                end_line = 1,
+                file_path = "/tmp/inline_chat_test.lua",
+                file_type = "lua",
+            },
+            source_bufnr = bufnr,
+            source_winid = winid,
+        })
+
+        second_inline:begin_request({
+            prompt = "Second buffer request",
+            selection = {
+                lines = { "local other = 2" },
+                start_line = 1,
+                end_line = 1,
+                file_path = "/tmp/inline_chat_second_test.lua",
+                file_type = "lua",
+            },
+            source_bufnr = second_bufnr,
+            source_winid = second_winid,
+        })
+
+        --- @type agentic.ui.InlineChat.ThreadStore
+        local first_store = vim.b[bufnr][InlineChat.THREAD_STORE_KEY] or {}
+        --- @type agentic.ui.InlineChat.ThreadStore
+        local second_store = vim.b[second_bufnr][InlineChat.THREAD_STORE_KEY]
+            or {}
+        --- @type agentic.ui.InlineChat.ThreadState|nil
+        local first_thread = vim.tbl_values(first_store)[1]
+        --- @type agentic.ui.InlineChat.ThreadState|nil
+        local second_thread = vim.tbl_values(second_store)[1]
+
+        assert.equal(1, vim.tbl_count(first_store))
+        assert.equal(1, vim.tbl_count(second_store))
+        assert.is_not_nil(first_thread)
+        assert.is_not_nil(second_thread)
+        --- @cast first_thread agentic.ui.InlineChat.ThreadState
+        --- @cast second_thread agentic.ui.InlineChat.ThreadState
+        assert.equal("First buffer request", first_thread.turns[1].prompt)
+        assert.equal("Second buffer request", second_thread.turns[1].prompt)
+
+        first_inline:clear()
+        second_inline:clear()
+        vim.cmd("only")
+        vim.api.nvim_buf_delete(second_bufnr, { force = true })
     end)
 
     it(

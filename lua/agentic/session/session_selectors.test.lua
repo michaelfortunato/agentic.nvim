@@ -206,4 +206,38 @@ describe("agentic.session.SessionSelectors", function()
             assert.equal("plan", interaction.turns[1].response.nodes[1].type)
         end
     )
+
+    it("returns the latest request surface from interaction state", function()
+        local state = initial_state()
+
+        InteractionModel.append_request(state.interaction.turns, {
+            text = "inline request",
+            surface = "inline",
+            timestamp = 10,
+            content = {
+                { type = "text", text = "inline request" },
+            },
+        })
+
+        assert.equal(
+            "inline",
+            SessionSelectors.get_latest_request_surface(state)
+        )
+        assert.is_true(SessionSelectors.has_inline_surface(state))
+    end)
+
+    it("defaults missing request surfaces to chat", function()
+        local state = initial_state()
+
+        InteractionModel.append_request(state.interaction.turns, {
+            text = "chat request",
+            timestamp = 10,
+            content = {
+                { type = "text", text = "chat request" },
+            },
+        })
+
+        assert.equal("chat", SessionSelectors.get_latest_request_surface(state))
+        assert.is_false(SessionSelectors.has_inline_surface(state))
+    end)
 end)

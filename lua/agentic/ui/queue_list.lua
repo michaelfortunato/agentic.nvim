@@ -193,37 +193,40 @@ function QueueList:_render()
         vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
     end)
 
+    local function set_highlight(line_idx, start_col, end_col, hl_group)
+        local line = lines[line_idx + 1] or ""
+        local target_end_col = end_col
+        if target_end_col == -1 then
+            target_end_col = #line
+        end
+
+        if target_end_col <= start_col then
+            return
+        end
+
+        vim.api.nvim_buf_set_extmark(
+            self._bufnr,
+            NS_QUEUE_LIST,
+            line_idx,
+            start_col,
+            {
+                end_row = line_idx,
+                end_col = target_end_col,
+                hl_group = hl_group,
+            }
+        )
+    end
+
     vim.api.nvim_buf_clear_namespace(self._bufnr, NS_QUEUE_LIST, 0, -1)
     if #self._items > 0 then
-        vim.api.nvim_buf_add_highlight(
-            self._bufnr,
-            NS_QUEUE_LIST,
-            "Title",
-            0,
-            0,
-            -1
-        )
-        vim.api.nvim_buf_add_highlight(
-            self._bufnr,
-            NS_QUEUE_LIST,
-            "Comment",
-            1,
-            0,
-            -1
-        )
+        set_highlight(0, 0, -1, "Title")
+        set_highlight(1, 0, -1, "Comment")
 
         for line_idx = self._header_line_count, #lines - 1 do
             local line = lines[line_idx + 1]
             local prefix_end = line and line:find("%. ", 1, true)
             if prefix_end then
-                vim.api.nvim_buf_add_highlight(
-                    self._bufnr,
-                    NS_QUEUE_LIST,
-                    "Comment",
-                    line_idx,
-                    0,
-                    prefix_end
-                )
+                set_highlight(line_idx, 0, prefix_end, "Comment")
             end
         end
     end

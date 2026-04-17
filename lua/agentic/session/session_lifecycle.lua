@@ -1,3 +1,4 @@
+---@diagnostic disable: invisible
 local Config = require("agentic.config")
 local Logger = require("agentic.utils.logger")
 local SessionEvents = require("agentic.session.session_events")
@@ -5,6 +6,48 @@ local SessionSelectors = require("agentic.session.session_selectors")
 local SlashCommands = require("agentic.acp.slash_commands")
 
 local SessionLifecycle = {}
+
+--- @param value any
+--- @return boolean
+local function is_callable(value)
+    return type(value) == "function"
+        or (
+            type(value) == "table"
+            and getmetatable(value)
+            and type(getmetatable(value).__call) == "function"
+        )
+end
+
+--- @param session agentic.SessionManager
+--- @param method_name string
+--- @return function|nil
+local function get_session_method(session, method_name)
+    local method = session[method_name]
+    if is_callable(method) then
+        return method
+    end
+
+    local SessionManager = require("agentic.session_manager")
+    local fallback = SessionManager[method_name]
+    if is_callable(fallback) then
+        return fallback
+    end
+
+    return nil
+end
+
+--- @param session agentic.SessionManager
+--- @param method_name string
+--- @param ... any
+--- @return any
+local function call_session_method(session, method_name, ...)
+    local method = get_session_method(session, method_name)
+    if method then
+        return method(session, ...)
+    end
+
+    return nil
+end
 
 --- @param session agentic.SessionManager
 --- @return agentic.acp.ClientHandlers
@@ -28,26 +71,35 @@ local function build_handlers(session)
         end,
 
         on_session_update = function(update)
-            if type(session._on_session_update) == "function" then
-                session:_on_session_update(update)
+            if get_session_method(session, "_on_session_update") then
+                call_session_method(session, "_on_session_update", update)
             end
         end,
 
         on_tool_call = function(tool_call)
-            if type(session._on_tool_call) == "function" then
-                session:_on_tool_call(tool_call)
+            if get_session_method(session, "_on_tool_call") then
+                call_session_method(session, "_on_tool_call", tool_call)
             end
         end,
 
         on_tool_call_update = function(tool_call_update)
-            if type(session._on_tool_call_update) == "function" then
-                session:_on_tool_call_update(tool_call_update)
+            if get_session_method(session, "_on_tool_call_update") then
+                call_session_method(
+                    session,
+                    "_on_tool_call_update",
+                    tool_call_update
+                )
             end
         end,
 
         on_request_permission = function(request, callback)
-            if type(session._handle_permission_request) == "function" then
-                session:_handle_permission_request(request, callback)
+            if get_session_method(session, "_handle_permission_request") then
+                call_session_method(
+                    session,
+                    "_handle_permission_request",
+                    request,
+                    callback
+                )
             end
         end,
     }
@@ -209,11 +261,11 @@ function SessionLifecycle.cancel(session)
     session.session_id = nil
     session._agent_phase = nil
     session._session_starting = false
-    if type(session._clear_inline_chat) == "function" then
-        session:_clear_inline_chat()
+    if get_session_method(session, "_clear_inline_chat") then
+        call_session_method(session, "_clear_inline_chat")
     end
-    if type(session._clear_chat_activity) == "function" then
-        session:_clear_chat_activity()
+    if get_session_method(session, "_clear_chat_activity") then
+        call_session_method(session, "_clear_chat_activity")
     elseif session.status_animation and session.status_animation.stop then
         session.status_animation:stop()
     end
@@ -223,13 +275,13 @@ function SessionLifecycle.cancel(session)
     session.session_state:replace_persisted_session_data()
     session._restored_turns_to_send = nil
     local was_visible = session.submission_queue:clear()
-    if type(session._sync_queue_panel) == "function" then
-        session:_sync_queue_panel(was_visible)
+    if get_session_method(session, "_sync_queue_panel") then
+        call_session_method(session, "_sync_queue_panel", was_visible)
     end
 end
 
 --- @param session agentic.SessionManager
---- @param opts {restore_mode?: boolean, on_created?: fun()}|nil
+--- @param opts {restore_mode: boolean|nil, on_created: fun()|nil}|nil
 function SessionLifecycle.start(session, opts)
     opts = opts or {}
     local restore_mode = opts.restore_mode or false
@@ -239,16 +291,16 @@ function SessionLifecycle.start(session, opts)
     end
 
     session._session_starting = true
-    if type(session._refresh_chat_activity) == "function" then
-        session:_refresh_chat_activity()
+    if get_session_method(session, "_refresh_chat_activity") then
+        call_session_method(session, "_refresh_chat_activity")
     end
 
     session.agent:create_session(
         build_handlers(session),
         function(response, err)
             session._session_starting = false
-            if type(session._refresh_chat_activity) == "function" then
-                session:_refresh_chat_activity()
+            if get_session_method(session, "_refresh_chat_activity") then
+                call_session_method(session, "_refresh_chat_activity")
             end
 
             if err or not response then
@@ -277,12 +329,18 @@ function SessionLifecycle.start(session, opts)
 
             if response.configOptions then
                 Logger.debug("Provider announce configOptions")
-                if type(session._handle_new_config_options) == "function" then
-                    session:_handle_new_config_options(response.configOptions)
+                if
+                    get_session_method(session, "_handle_new_config_options")
+                then
+                    call_session_method(
+                        session,
+                        "_handle_new_config_options",
+                        response.configOptions
+                    )
                 end
             else
-                if type(session._render_window_headers) == "function" then
-                    session:_render_window_headers()
+                if get_session_method(session, "_render_window_headers") then
+                    call_session_method(session, "_render_window_headers")
                 end
             end
 
@@ -376,9 +434,15 @@ function SessionLifecycle.switch_provider(session)
                             )
                         )
                         if
-                            type(session._render_window_headers) == "function"
+                            get_session_method(
+                                session,
+                                "_render_window_headers"
+                            )
                         then
-                            session:_render_window_headers()
+                            call_session_method(
+                                session,
+                                "_render_window_headers"
+                            )
                         end
                         session._restored_turns_to_send =
                             vim.deepcopy(persisted_session.turns or {})
@@ -399,11 +463,11 @@ function SessionLifecycle.switch_provider(session)
     session.session_id = nil
     session._agent_phase = nil
     session._session_starting = false
-    if type(session._clear_inline_chat) == "function" then
-        session:_clear_inline_chat()
+    if get_session_method(session, "_clear_inline_chat") then
+        call_session_method(session, "_clear_inline_chat")
     end
-    if type(session._clear_chat_activity) == "function" then
-        session:_clear_chat_activity()
+    if get_session_method(session, "_clear_chat_activity") then
+        call_session_method(session, "_clear_chat_activity")
     elseif session.status_animation and session.status_animation.stop then
         session.status_animation:stop()
     end

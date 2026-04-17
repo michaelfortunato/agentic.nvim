@@ -1,7 +1,6 @@
 local BufHelpers = require("agentic.utils.buf_helpers")
 local Chooser = require("agentic.ui.chooser")
 local Config = require("agentic.config")
-local List = require("agentic.utils.list")
 local Logger = require("agentic.utils.logger")
 
 --- @class agentic.acp.AgentConfigOptions
@@ -46,6 +45,27 @@ local function flatten_option_values(option)
     end
 
     return options
+end
+
+--- @param option agentic.acp.ConfigOption|nil
+--- @param current_value string|nil
+--- @return agentic.acp.ConfigOption.Option[] ordered_options
+local function get_ordered_option_values(option, current_value)
+    local ordered_options = vim.list_extend({}, flatten_option_values(option))
+
+    if not current_value or current_value == "" then
+        return ordered_options
+    end
+
+    for index, candidate in ipairs(ordered_options) do
+        if candidate.value == current_value then
+            table.remove(ordered_options, index)
+            table.insert(ordered_options, 1, candidate)
+            break
+        end
+    end
+
+    return ordered_options
 end
 
 --- @param option agentic.acp.ConfigOption|nil
@@ -508,8 +528,7 @@ function AgentConfigOptions:_show_selector(target, prompt, handle_change)
     --- @cast target agentic.acp.ConfigOption
     local current_value = target.currentValue
 
-    local ordered_options =
-        List.move_to_head(flatten_option_values(target), "value", current_value)
+    local ordered_options = get_ordered_option_values(target, current_value)
 
     Chooser.show(ordered_options, {
         prompt = prompt,

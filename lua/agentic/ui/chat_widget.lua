@@ -1,11 +1,17 @@
 local Config = require("agentic.config")
 local BufHelpers = require("agentic.utils.buf_helpers")
-local DiffPreview = require("agentic.ui.diff_preview")
 local ChatViewport = require("agentic.ui.chat_viewport")
-local KeymapHelp = require("agentic.ui.keymap_help")
+local DiffPreview = require("agentic.ui.diff_preview")
+local HeaderController = require("agentic.ui.chat_widget.header_controller")
+local InputController = require("agentic.ui.chat_widget.input_controller")
 local Logger = require("agentic.utils.logger")
+local WindowController = require("agentic.ui.chat_widget.window_controller")
 local WindowDecoration = require("agentic.ui.window_decoration")
-local WidgetLayout = require("agentic.ui.widget_layout")
+
+--- UI Sync Scopes
+--- - Tab-local: widget buffers, widget windows, header contexts, header overlays
+--- - Window-local: chat follow/unread state via ChatViewport
+--- - Buffer-local: per-buffer keymaps and rendered header/application state
 
 --- @alias agentic.ui.ChatWidget.PanelNames "chat"|"todos"|"code"|"files"|"queue"|"input"|"diagnostics"
 
@@ -43,11 +49,14 @@ local WidgetLayout = require("agentic.ui.widget_layout")
 --- @field on_submit_input fun(prompt: string) external callback to be called when user submits the input
 --- @field _chat_viewport agentic.ui.ChatViewport
 --- @field _message_writer? agentic.ui.MessageWriter
---- @field _headers agentic.ui.ChatWidget.Headers
+--- @field headers agentic.ui.ChatWidget.Headers
+--- @field _header_contexts table<agentic.ui.ChatWidget.PanelNames, string|nil>
+--- @field _header_overlays table<agentic.ui.ChatWidget.PanelNames, string|nil>
+--- @field _window_controller agentic.ui.ChatWidget.WindowController
+--- @field _input_controller agentic.ui.ChatWidget.InputController
+--- @field _header_controller agentic.ui.ChatWidget.HeaderController
 local ChatWidget = {}
 ChatWidget.__index = ChatWidget
-local KEYMAP_HELP_KEY = "?"
-local KEYMAP_HELP_SUFFIX = "?: keymaps"
 
 --- @param tab_page_id integer
 --- @param on_submit_input fun(prompt: string)
@@ -62,9 +71,13 @@ function ChatWidget:new(tab_page_id, on_submit_input, opts)
     self.on_submit_input = on_submit_input
     self.tab_page_id = tab_page_id
     self.instance_id = opts.instance_id
-    self._headers = WindowDecoration.get_default_headers()
+    self.headers = WindowDecoration.get_default_headers()
+    self._headers = self.headers
 
-    self:_initialize()
+    self._window_controller = WindowController:new(self)
+    self._input_controller = InputController:new(self)
+    self._header_controller = HeaderController:new(self)
+
     self._chat_viewport = ChatViewport:new({
         tab_page_id = tab_page_id,
         get_chat_winid = function()
@@ -74,14 +87,15 @@ function ChatWidget:new(tab_page_id, on_submit_input, opts)
             self:_set_header_overlay("chat", context)
         end,
     })
-    self:_bind_events_to_change_headers()
+
+    self:_initialize()
 
     return self
 end
 
+--- @return boolean
 function ChatWidget:is_open()
-    local win_id = self.win_nrs.chat
-    return (win_id and vim.api.nvim_win_is_valid(win_id)) or false
+    return self._window_controller:is_open()
 end
 
 --- Check if the cursor is currently in one of the widget's buffers
@@ -96,17 +110,7 @@ end
 
 --- @param opts agentic.ui.ChatWidget.ShowOpts|agentic.ui.ChatWidget.AddToContextOpts|nil
 function ChatWidget:show(opts)
-    opts = opts or {}
-
-    WidgetLayout.open({
-        tab_page_id = self.tab_page_id,
-        buf_nrs = self.buf_nrs,
-        win_nrs = self.win_nrs,
-        focus_prompt = opts.focus_prompt,
-        anchor_winid = opts.anchor_winid,
-    })
-
-    self:_restore_chat_window_view()
+    self._window_controller:show(opts)
 end
 
 --- @param layouts agentic.UserConfig.Windows.Position[]|nil
@@ -162,54 +166,12 @@ end
 --- Useful when a dynamic panel needs to appear in the middle of the layout stack.
 --- @param opts agentic.ui.ChatWidget.ShowOpts|nil
 function ChatWidget:refresh_layout(opts)
-    opts = opts or {}
-
-    local previous_mode = vim.fn.mode()
-    local previous_buf = vim.api.nvim_get_current_buf()
-
-    self:hide()
-    self:show(vim.tbl_extend("force", {
-        focus_prompt = false,
-    }, opts))
-
-    vim.schedule(function()
-        local winid = vim.fn.bufwinid(previous_buf)
-        if winid ~= -1 then
-            vim.api.nvim_set_current_win(winid)
-        end
-
-        if previous_mode == "i" then
-            vim.cmd("startinsert")
-        end
-    end)
+    self._window_controller:refresh_layout(opts)
 end
 
 --- Closes all windows but keeps buffers in memory
 function ChatWidget:hide()
-    vim.cmd("stopinsert")
-
-    -- Check if we're on the correct tabpage before trying to find/create fallback window
-    local current_tabpage = vim.api.nvim_get_current_tabpage()
-    local should_create_fallback = current_tabpage == self.tab_page_id
-
-    if should_create_fallback then
-        local fallback_winid = self:find_first_non_widget_window()
-
-        if not fallback_winid then
-            -- Fallback: create a new left window to avoid closing the last window error
-            local created_winid = self:open_left_window()
-            if not created_winid then
-                Logger.notify(
-                    "Failed to create fallback window; cannot hide widget safely, run `:tabclose` to close the tab instead.",
-                    vim.log.levels.ERROR
-                )
-                return
-            end
-        end
-    end
-
-    self:_store_chat_view()
-    WidgetLayout.close(self.win_nrs)
+    self._window_controller:hide()
 end
 
 --- Cleans up all buffers content without destroying them
@@ -235,9 +197,12 @@ end
 --- This instance is no longer usable after calling this method
 function ChatWidget:destroy()
     self:hide()
+    self._header_controller:destroy()
+    self._input_controller:destroy()
     self._chat_viewport:destroy()
     self._header_contexts = {}
     self._header_overlays = {}
+    self._message_writer = nil
 
     for name, bufnr in pairs(self.buf_nrs) do
         self.buf_nrs[name] = nil
@@ -254,30 +219,6 @@ function ChatWidget:destroy()
     end
 end
 
---- @param window_name agentic.ui.ChatWidget.PanelNames
---- @return string|nil
-function ChatWidget:_get_effective_header_context(window_name)
-    local overlay = self._header_overlays[window_name]
-    local base = self._header_contexts[window_name]
-
-    if overlay and overlay ~= "" then
-        if base and base ~= "" then
-            return string.format("%s · %s", overlay, base)
-        end
-
-        return overlay
-    end
-
-    return base
-end
-
---- @param window_name agentic.ui.ChatWidget.PanelNames
---- @param context string|nil
-function ChatWidget:_set_header_overlay(window_name, context)
-    self._header_overlays[window_name] = context
-    self:render_header(window_name)
-end
-
 --- @param message_writer agentic.ui.MessageWriter
 function ChatWidget:bind_message_writer(message_writer)
     self._message_writer = message_writer
@@ -291,131 +232,38 @@ end
 
 --- @param on_submit_input fun(prompt: string)|nil
 function ChatWidget:set_submit_input_handler(on_submit_input)
-    self.on_submit_input = on_submit_input or function() end
+    self._input_controller:set_submit_input_handler(on_submit_input)
 end
 
 function ChatWidget:_submit_input()
-    local lines = vim.api.nvim_buf_get_lines(self.buf_nrs.input, 0, -1, false)
-
-    local prompt = table.concat(lines, "\n"):match("^%s*(.-)%s*$")
-    local mode = vim.fn.mode()
-    local should_restore_insert = mode:sub(1, 1) == "i"
-        and not Config.settings.move_cursor_to_chat_on_submit
-
-    -- Check if prompt is empty or contains only whitespace
-    if not prompt or prompt == "" or not prompt:match("%S") then
-        return
-    end
-
-    if Config.settings.move_cursor_to_chat_on_submit then
-        vim.cmd("stopinsert")
-    end
-
-    vim.api.nvim_buf_set_lines(self.buf_nrs.input, 0, -1, false, {})
-
-    for _, panel_name in ipairs({ "code", "files", "diagnostics" }) do
-        BufHelpers.with_modifiable(self.buf_nrs[panel_name], function(bufnr)
-            vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, {})
-        end)
-    end
-
-    self.on_submit_input(prompt)
-
-    for _, panel_name in ipairs({ "code", "files", "diagnostics" }) do
-        self:close_optional_window(panel_name)
-    end
-
-    if Config.settings.move_cursor_to_chat_on_submit then
-        self:move_cursor_to(self.win_nrs.chat)
-    elseif should_restore_insert then
-        vim.schedule(function()
-            local winid = self.win_nrs.input
-            if not winid or not vim.api.nvim_win_is_valid(winid) then
-                return
-            end
-
-            if vim.api.nvim_get_current_win() ~= winid then
-                return
-            end
-
-            BufHelpers.start_insert_on_last_char()
-        end)
-    end
-end
-
---- @param winid integer|nil
-local function scroll_window_to_bottom(winid)
-    if not winid or not vim.api.nvim_win_is_valid(winid) then
-        return
-    end
-
-    local bufnr = vim.api.nvim_win_get_buf(winid)
-    local last_line = math.max(1, vim.api.nvim_buf_line_count(bufnr))
-    vim.api.nvim_win_set_cursor(winid, { last_line, 0 })
+    self._input_controller:submit_input()
 end
 
 --- @param winid integer|nil
 --- @param callback fun()|nil
 function ChatWidget:move_cursor_to(winid, callback)
-    vim.schedule(function()
-        if winid and vim.api.nvim_win_is_valid(winid) then
-            vim.api.nvim_set_current_win(winid)
-
-            -- make sure to scroll to the bottom
-            -- 1. user can see the new message
-            -- 2. auto-scroll will start again
-            if winid == self.win_nrs.chat then
-                self:scroll_chat_to_bottom()
-            else
-                scroll_window_to_bottom(winid)
-            end
-
-            if callback then
-                callback()
-            end
-        end
-    end)
+    self._input_controller:move_cursor_to(winid, callback)
 end
 
 function ChatWidget:focus_input()
-    vim.schedule(function()
-        self:scroll_chat_to_bottom()
-
-        local winid = self.win_nrs.input
-        if not winid or not vim.api.nvim_win_is_valid(winid) then
-            return
-        end
-
-        vim.api.nvim_set_current_win(winid)
-        BufHelpers.start_insert_on_last_char()
-    end)
+    self._input_controller:focus_input()
 end
 
 --- @param text string
 function ChatWidget:set_input_text(text)
-    local normalized = (text or ""):gsub("\r", "")
-    local lines = vim.split(normalized, "\n", { plain = true })
-
-    if #lines == 0 then
-        lines = { "" }
-    end
-
-    BufHelpers.with_modifiable(self.buf_nrs.input, function(bufnr)
-        vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
-    end)
+    self._input_controller:set_input_text(text)
 end
 
 --- @return string
 function ChatWidget:get_input_text()
-    local lines = vim.api.nvim_buf_get_lines(self.buf_nrs.input, 0, -1, false)
-    return table.concat(lines, "\n")
+    return self._input_controller:get_input_text()
 end
 
 function ChatWidget:_initialize()
     self.buf_nrs = self:_create_buf_nrs()
     self:_bind_keymaps()
+    self:_bind_events_to_change_headers()
 
-    -- I only want to trigger a full close of the chat widget when closing the chat or the input buffers, the others are auxiliary
     for _, bufnr in ipairs({
         self.buf_nrs.chat,
         self.buf_nrs.input,
@@ -452,99 +300,7 @@ function ChatWidget:scroll_chat_to_bottom()
 end
 
 function ChatWidget:_bind_keymaps()
-    BufHelpers.multi_keymap_set(
-        Config.keymaps.prompt.submit,
-        self.buf_nrs.input,
-        function()
-            self:_submit_input()
-        end,
-        { desc = "Agentic: Submit prompt" }
-    )
-
-    BufHelpers.multi_keymap_set(
-        Config.keymaps.prompt.paste_image,
-        self.buf_nrs.input,
-        function()
-            vim.schedule(function()
-                local Clipboard = require("agentic.ui.clipboard")
-                local res = Clipboard.paste_image()
-
-                if res ~= nil then
-                    -- call vim.paste directly to avoid coupling to the file list logic
-                    vim.paste({ res }, -1)
-                end
-            end)
-        end,
-        { desc = "Agentic: Paste image from clipboard" }
-    )
-
-    for _, bufnr in pairs(self.buf_nrs) do
-        BufHelpers.multi_keymap_set(
-            Config.keymaps.widget.close,
-            bufnr,
-            function()
-                self:hide()
-            end,
-            { desc = "Agentic: Close Chat widget" }
-        )
-
-        BufHelpers.multi_keymap_set(
-            Config.keymaps.widget.switch_provider,
-            bufnr,
-            function()
-                require("agentic").switch_provider()
-            end,
-            { desc = "Agentic: Switch provider" }
-        )
-
-        BufHelpers.multi_keymap_set(KEYMAP_HELP_KEY, bufnr, function()
-            KeymapHelp.show_for_buffer(bufnr)
-        end, { desc = "Agentic: Show available keymaps" })
-    end
-
-    BufHelpers.keymap_set(self.buf_nrs.chat, "n", "<CR>", function()
-        local winid = self.win_nrs.chat
-        if not winid or not vim.api.nvim_win_is_valid(winid) then
-            return
-        end
-
-        if not self._message_writer then
-            return
-        end
-
-        local cursor = vim.api.nvim_win_get_cursor(winid)
-        local toggled =
-            self._message_writer:toggle_tool_block_at_line(cursor[1] - 1)
-
-        if not toggled then
-            vim.cmd("normal! \\<CR>")
-        end
-    end, {
-        desc = "Agentic: Toggle chat card details",
-    })
-
-    -- Add keybindings to chat, todos, code, and files buffers to jump back to input and start insert mode
-    for panel_name, bufnr in pairs(self.buf_nrs) do
-        if panel_name ~= "input" then
-            for _, key in ipairs({
-                "a",
-                "A",
-                "o",
-                "O",
-                "i",
-                "I",
-                "c",
-                "C",
-                "x",
-                "X",
-            }) do
-                BufHelpers.keymap_set(bufnr, "n", key, function()
-                    self:focus_input()
-                end)
-            end
-        end
-    end
-
+    self._input_controller:bind_keymaps()
     DiffPreview.setup_diff_navigation_keymaps(self.buf_nrs)
 end
 
@@ -578,10 +334,6 @@ function ChatWidget:_create_buf_nrs()
         filetype = "AgenticInput",
         modifiable = true,
     })
-
-    -- Keep Treesitter/highlighting scoped to AgenticChat. These side buffers are
-    -- rewritten frequently and can contain partial markdown/code fences, which
-    -- is enough to trigger markdown injection/conceal bugs on recent Neovim.
 
     --- @type agentic.ui.ChatWidget.BufNrs
     local buf_nrs = {
@@ -617,258 +369,76 @@ function ChatWidget:_create_new_buf(opts)
     return bufnr
 end
 
---- @param mode string
---- @return string|nil
-local function build_input_suffix(mode)
-    local parts = { KEYMAP_HELP_SUFFIX }
-    local submit_key =
-        BufHelpers.find_keymap(Config.keymaps.prompt.submit, mode)
-
-    if submit_key ~= nil then
-        parts[#parts + 1] = string.format("%s: submit", submit_key)
-    end
-
-    return table.concat(parts, " · ")
-end
-
 function ChatWidget:_refresh_header_keymap_hints()
-    if not self._headers then
-        return
-    end
-
-    self._headers.chat.suffix = KEYMAP_HELP_SUFFIX
-    self._headers.input.suffix = build_input_suffix(vim.fn.mode())
+    self._header_controller:refresh_header_keymap_hints()
 end
 
---- Binds events to change the suffix header texts based on current mode keymaps
---- For the Chat and Input buffers only
 function ChatWidget:_bind_events_to_change_headers()
-    local function refresh_header_hints()
-        self:_refresh_header_keymap_hints()
-        self:render_header("chat")
-        self:render_header("input")
-    end
+    self._header_controller:bind_events_to_change_headers()
+end
 
-    refresh_header_hints()
+--- @param window_name agentic.ui.ChatWidget.PanelNames
+--- @return string|nil
+function ChatWidget:_get_effective_header_context(window_name)
+    return self._header_controller:get_effective_header_context(window_name)
+end
 
-    for _, bufnr in ipairs({ self.buf_nrs.chat, self.buf_nrs.input }) do
-        vim.api.nvim_create_autocmd("ModeChanged", {
-            buffer = bufnr,
-            callback = function()
-                vim.schedule(function()
-                    refresh_header_hints()
-                end)
-            end,
-        })
-    end
+--- @param window_name agentic.ui.ChatWidget.PanelNames
+--- @param context string|nil
+function ChatWidget:_set_header_overlay(window_name, context)
+    self._header_controller:set_header_overlay(window_name, context)
 end
 
 --- @param window_name agentic.ui.ChatWidget.PanelNames
 --- @param context string|nil
 function ChatWidget:render_header(window_name, context)
-    local bufnr = self.buf_nrs[window_name]
-    if not bufnr then
-        return
-    end
-
-    if context ~= nil then
-        self._header_contexts[window_name] = context
-    end
-
-    local header = self._headers and self._headers[window_name] or nil
-    if not header then
-        return
-    end
-
-    local rendered_header = vim.deepcopy(header)
-    rendered_header.context = self:_get_effective_header_context(window_name)
-
-    WindowDecoration.render_header(bufnr, window_name, rendered_header, {
-        name_suffix = self.instance_id and ("#" .. tostring(self.instance_id))
-            or nil,
-    })
+    self._header_controller:render_header(window_name, context)
 end
 
 --- @param panel_name agentic.ui.ChatWidget.PanelNames
 function ChatWidget:close_optional_window(panel_name)
-    WidgetLayout.close_optional_window(self.win_nrs, panel_name)
+    self._window_controller:close_optional_window(panel_name)
 end
 
 --- @param panel_name agentic.ui.ChatWidget.PanelNames
 --- @param max_height integer
 --- @return boolean resized
 function ChatWidget:resize_optional_window(panel_name, max_height)
-    return WidgetLayout.resize_dynamic_window(
-        self.buf_nrs,
-        self.win_nrs,
+    return self._window_controller:resize_optional_window(
         panel_name,
         max_height
     )
 end
 
---- Filetypes that should be excluded when finding fallback windows
-local EXCLUDED_FILETYPES = {
-    -- File explorers
-    ["neo-tree"] = true,
-    ["NvimTree"] = true,
-    ["oil"] = true,
-    -- Neovim special buffers
-    ["qf"] = true, -- Quickfix
-    ["help"] = true, -- Help buffers
-    ["man"] = true, -- Man pages
-    ["terminal"] = true, -- Terminal buffers
-    -- Plugin special windows
-    ["TelescopePrompt"] = true,
-    ["DiffviewFiles"] = true,
-    ["DiffviewFileHistory"] = true,
-    ["fugitive"] = true,
-    ["gitcommit"] = true,
-    ["dashboard"] = true,
-    ["alpha"] = true, -- Alpha dashboard
-    ["starter"] = true, -- Mini.starter
-    ["notify"] = true, -- nvim-notify
-    ["noice"] = true, -- Noice popup
-    ["aerial"] = true, -- Aerial outline
-    ["Outline"] = true, -- symbols-outline
-    ["trouble"] = true, -- Trouble diagnostics
-    ["spectre_panel"] = true, -- nvim-spectre
-    ["lazy"] = true, -- Lazy plugin manager
-    ["mason"] = true, -- Mason installer
-}
-
---- Finds the first window on the current tabpage that is NOT part of the chat widget
---- @return number|nil winid The first non-widget window ID, or nil if none found
+--- @return number|nil winid
 function ChatWidget:find_first_non_widget_window()
-    local all_windows = vim.api.nvim_tabpage_list_wins(self.tab_page_id)
-
-    -- Build a set of widget window IDs for fast lookup
-    local widget_win_ids = {}
-    for _, winid in pairs(self.win_nrs) do
-        if winid then
-            widget_win_ids[winid] = true
-        end
-    end
-
-    for _, winid in ipairs(all_windows) do
-        if not widget_win_ids[winid] then
-            local bufnr = vim.api.nvim_win_get_buf(winid)
-            local ft = vim.bo[bufnr].filetype
-            if not EXCLUDED_FILETYPES[ft] then
-                return winid
-            end
-        end
-    end
-
-    return nil
+    return self._window_controller:find_first_non_widget_window()
 end
 
---- Finds the first editor window in the current tabpage that is not part of any Agentic widget.
 --- @return number|nil winid
 function ChatWidget:find_first_editor_window()
-    local all_windows = vim.api.nvim_tabpage_list_wins(self.tab_page_id)
-    local widget_win_ids = {}
-    for _, winid in pairs(self.win_nrs) do
-        if winid then
-            widget_win_ids[winid] = true
-        end
-    end
-
-    for _, winid in ipairs(all_windows) do
-        if not widget_win_ids[winid] then
-            local bufnr = vim.api.nvim_win_get_buf(winid)
-            local ft = vim.bo[bufnr].filetype
-            if not EXCLUDED_FILETYPES[ft] and not ft:match("^Agentic") then
-                return winid
-            end
-        end
-    end
-
-    return nil
+    return self._window_controller:find_first_editor_window()
 end
 
---- Checks if a buffer belongs to this widget
 --- @param bufnr number
 --- @return boolean
 function ChatWidget:_is_widget_buffer(bufnr)
-    for _, widget_bufnr in pairs(self.buf_nrs) do
-        if widget_bufnr == bufnr then
-            return true
-        end
-    end
-    return false
+    return self:owns_buffer(bufnr)
 end
 
 --- @param bufnr integer
 --- @return boolean
 function ChatWidget:owns_buffer(bufnr)
-    return self:_is_widget_buffer(bufnr)
+    return self._window_controller:owns_buffer(bufnr)
 end
 
---- Opens a new window on the left side with full height
---- @param bufnr number|nil The buffer to display in the new window
---- @param enter boolean|nil Whether the new window should take focus
---- @return number|nil winid The newly created window ID or nil on failure
+--- @param bufnr number|nil
+--- @param enter boolean|nil
+--- @return number|nil winid
 function ChatWidget:open_left_window(bufnr, enter)
-    if enter == nil then
-        enter = true
-    end
-
-    if bufnr == nil then
-        -- Try alternate buffer first, but skip if it's a widget buffer or excluded filetype
-        local alt_bufnr = vim.fn.bufnr("#")
-        if
-            alt_bufnr ~= -1
-            and vim.api.nvim_buf_is_valid(alt_bufnr)
-            and not self:_is_widget_buffer(alt_bufnr)
-        then
-            local ft = vim.bo[alt_bufnr].filetype
-            if not EXCLUDED_FILETYPES[ft] then
-                bufnr = alt_bufnr
-            end
-        end
-    end
-
-    if bufnr == nil then
-        -- Fall back to first oldfile that exists in current directory
-        local oldfiles = vim.v.oldfiles
-        local cwd = vim.fn.getcwd()
-        if oldfiles and #oldfiles > 0 then
-            for _, filepath in ipairs(oldfiles) do
-                -- Check if file exists and is under current working directory
-                if
-                    vim.startswith(filepath, cwd)
-                    and vim.fn.filereadable(filepath) == 1
-                then
-                    local file_bufnr = vim.fn.bufnr(filepath)
-                    if file_bufnr == -1 then
-                        file_bufnr = vim.fn.bufadd(filepath)
-                    end
-                    bufnr = file_bufnr
-                    break
-                end
-            end
-        end
-    end
-
-    -- Last resort: create new scratch buffer
-    if bufnr == nil then
-        bufnr = vim.api.nvim_create_buf(false, true)
-    end
-
-    local ok, winid = pcall(vim.api.nvim_open_win, bufnr, enter, {
-        split = "left",
-        win = -1,
-    })
-
-    if not ok then
-        Logger.notify(
-            "Failed to open window: " .. tostring(winid),
-            vim.log.levels.WARN
-        )
-        return nil
-    end
-
-    return winid
+    return self._window_controller:open_left_window(bufnr, enter)
 end
+
+package.loaded["agentic.ui.ChatWidget"] = ChatWidget
 
 return ChatWidget
