@@ -443,7 +443,9 @@ function SessionRegistry.clear_inline_buffer(bufnr)
         end
     end
 
-    DiffPreview.clear_diff(bufnr)
+    DiffPreview.clear_diff(bufnr, {
+        reason = "manual_clear",
+    })
 end
 
 --- @param on_selected fun(provider_name: agentic.UserConfig.ProviderName|nil) Callback that will be called with the selected provider name, if any

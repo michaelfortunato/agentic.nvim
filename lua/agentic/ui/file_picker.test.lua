@@ -271,23 +271,14 @@ describe("FilePicker:request_completion_items", function()
     end)
 
     it("returns only matching completion items", function()
-        local files = {
-            {
-                word = "@src/main.lua",
-                _path_lc = "src/main.lua",
-                _basename_lc = "main.lua",
-            },
-            {
-                word = "@src/other.lua",
-                _path_lc = "src/other.lua",
-                _basename_lc = "other.lua",
-            },
-            {
-                word = "@tests/main_spec.lua",
-                _path_lc = "tests/main_spec.lua",
-                _basename_lc = "main_spec.lua",
-            },
-        }
+        local files = picker:_build_file_items(
+            table.concat({
+                "src/main.lua",
+                "src/other.lua",
+                "tests/main_spec.lua",
+            }, "\n"),
+            picker:_resolve_scan_root()
+        )
         picker:_store_files(picker:_resolve_scan_root(), files)
 
         local matches
@@ -302,16 +293,16 @@ describe("FilePicker:request_completion_items", function()
     end)
 
     it("caps completion results to a bounded set", function()
-        local files = {}
+        local file_paths = {}
 
         for i = 1, 260 do
-            local path = string.format("src/file-%03d.lua", i)
-            files[i] = {
-                word = "@" .. path,
-                _path_lc = path,
-                _basename_lc = path:match("([^/]+)$"),
-            }
+            file_paths[i] = string.format("src/file-%03d.lua", i)
         end
+
+        local files = picker:_build_file_items(
+            table.concat(file_paths, "\n"),
+            picker:_resolve_scan_root()
+        )
 
         picker:_store_files(picker:_resolve_scan_root(), files)
 
@@ -326,18 +317,13 @@ describe("FilePicker:request_completion_items", function()
     end)
 
     it("returns cached source items for blink to fuzzy match", function()
-        local files = {
-            {
-                word = "@src/main.lua",
-                _path_lc = "src/main.lua",
-                _basename_lc = "main.lua",
-            },
-            {
-                word = "@tests/main_spec.lua",
-                _path_lc = "tests/main_spec.lua",
-                _basename_lc = "main_spec.lua",
-            },
-        }
+        local files = picker:_build_file_items(
+            table.concat({
+                "src/main.lua",
+                "tests/main_spec.lua",
+            }, "\n"),
+            picker:_resolve_scan_root()
+        )
 
         picker:_store_files(picker:_resolve_scan_root(), files)
 
@@ -346,7 +332,11 @@ describe("FilePicker:request_completion_items", function()
             matches = items
         end)
 
-        assert.same(files, matches)
+        local words = vim.tbl_map(function(item)
+            return item.word
+        end, matches)
+
+        assert.same({ "@src/main.lua", "@tests/main_spec.lua" }, words)
     end)
 end)
 
@@ -378,6 +368,38 @@ describe("FilePicker mention helpers", function()
         assert.equal(1, #file_paths)
         assert.truthy(file_paths[1]:match("lua/agentic/ui/file_picker%.lua$"))
     end)
+
+    it(
+        "falls back from workspace root to tab cwd when resolving mentions",
+        function()
+            local temp_dir = vim.fs.normalize(vim.fn.tempname())
+            local root = temp_dir .. "/project"
+            local cwd = root .. "/packages/app"
+            local root_file = root .. "/README.md"
+            local cwd_file = cwd .. "/notes.md"
+
+            vim.fn.mkdir(cwd, "p")
+            vim.fn.writefile({ "# Agentic" }, root_file)
+            vim.fn.writefile({ "notes" }, cwd_file)
+
+            local cwd_picker = FilePicker:new(bufnr, {
+                resolve_root = function()
+                    return root
+                end,
+                resolve_cwd = function()
+                    return cwd
+                end,
+            }) --[[@as agentic.ui.FilePicker]]
+
+            local file_paths = cwd_picker:resolve_mentioned_file_paths(
+                "check @README.md and @notes.md"
+            )
+
+            assert.same({ root_file, cwd_file }, file_paths)
+
+            vim.fn.delete(temp_dir, "rf")
+        end
+    )
 
     it("manually shows the blink source for active @ mentions", function()
         local show_spy = spy.new(function() end)
@@ -441,6 +463,76 @@ describe("FilePicker mention helpers", function()
     end)
 end)
 
+describe("FilePicker root and cwd aliases", function()
+    --- @type integer
+    local bufnr
+    --- @type agentic.ui.FilePicker
+    local picker
+
+    before_each(function()
+        bufnr = vim.api.nvim_create_buf(false, true)
+    end)
+
+    after_each(function()
+        if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+            vim.api.nvim_buf_delete(bufnr, { force = true })
+        end
+    end)
+
+    it(
+        "keeps root-relative labels while matching cwd-relative aliases",
+        function()
+            local root = "/tmp/agentic-root"
+            local cwd = "/tmp/agentic-root/packages/app"
+
+            picker = FilePicker:new(bufnr, {
+                resolve_root = function()
+                    return root
+                end,
+                resolve_cwd = function()
+                    return cwd
+                end,
+            }) --[[@as agentic.ui.FilePicker]]
+
+            picker:_store_files(
+                root,
+                picker:_build_file_items("packages/app/src/main.lua\n", root)
+            )
+            picker:_store_files(
+                cwd,
+                picker:_build_file_items("src/main.lua\n", cwd)
+            )
+
+            local source_items
+            picker:request_source_items(function(items)
+                source_items = items
+            end)
+
+            assert.equal(1, #source_items)
+            assert.equal("@packages/app/src/main.lua", source_items[1].word)
+            assert.is_true(
+                source_items[1]._filter_text:find(
+                    "packages/app/src/main.lua",
+                    1,
+                    true
+                ) ~= nil
+            )
+            assert.is_true(
+                source_items[1]._filter_text:find("src/main.lua", 1, true)
+                    ~= nil
+            )
+
+            local matches
+            picker:request_completion_items("@src/main", function(items)
+                matches = items
+            end)
+
+            assert.equal(1, #matches)
+            assert.equal("@packages/app/src/main.lua", matches[1].word)
+        end
+    )
+end)
+
 describe("Blink file picker source", function()
     local source = BlinkSource.new({})
     local picker
@@ -454,18 +546,16 @@ describe("Blink file picker source", function()
             on_file_selected = on_select_spy --[[@as fun(file_path: string)]],
         }) --[[@as agentic.ui.FilePicker]]
         vim.bo[bufnr].filetype = "AgenticInput"
-        picker:_store_files(picker:_resolve_scan_root(), {
-            {
-                word = "@src/main.lua",
-                _path_lc = "src/main.lua",
-                _basename_lc = "main.lua",
-            },
-            {
-                word = "@src/other.lua",
-                _path_lc = "src/other.lua",
-                _basename_lc = "other.lua",
-            },
-        })
+        picker:_store_files(
+            picker:_resolve_scan_root(),
+            picker:_build_file_items(
+                table.concat({
+                    "src/main.lua",
+                    "src/other.lua",
+                }, "\n"),
+                picker:_resolve_scan_root()
+            )
+        )
     end)
 
     after_each(function()

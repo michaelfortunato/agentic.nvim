@@ -474,7 +474,9 @@ describe("agentic.SessionRegistry", function()
                 assert
                     .spy(second.inline_chat.clear_buffer --[[@as TestSpy]]).was
                     .called_with(second.inline_chat, 17)
-                assert.spy(diff_clear_stub).was.called_with(17)
+                assert.spy(diff_clear_stub).was.called_with(17, {
+                    reason = "manual_clear",
+                })
             end
         )
     end)

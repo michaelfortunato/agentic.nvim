@@ -18,9 +18,13 @@ local SlashCommands = {}
 --- Automatically adds `/new` command if not provided by agent
 --- @param bufnr integer
 --- @param available_commands agentic.acp.AvailableCommand[]
-function SlashCommands.setCommands(bufnr, available_commands)
+--- @param opts {local_commands?: agentic.acp.AvailableCommand[]|nil}|nil
+function SlashCommands.setCommands(bufnr, available_commands, opts)
+    opts = opts or {}
+
     --- @type agentic.acp.CompletionItem[]
     local commands = {}
+    local seen_names = {}
 
     local has_new_command = false
 
@@ -44,6 +48,28 @@ function SlashCommands.setCommands(bufnr, available_commands)
                 icase = 1,
             }
             table.insert(commands, completion_item)
+            seen_names[cmd.name] = true
+        end
+    end
+
+    for _, cmd in ipairs(opts.local_commands or {}) do
+        if
+            cmd.name
+            and cmd.description
+            and not cmd.name:match("%s")
+            and cmd.name ~= "clear"
+            and not seen_names[cmd.name]
+        then
+            --- @type agentic.acp.CompletionItem
+            local completion_item = {
+                word = cmd.name,
+                menu = cmd.description,
+                info = cmd.description,
+                kind = "/",
+                icase = 1,
+            }
+            table.insert(commands, completion_item)
+            seen_names[cmd.name] = true
         end
     end
 

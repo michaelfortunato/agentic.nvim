@@ -330,6 +330,47 @@ describe("agentic.ui.InlineChat", function()
         assert.equal(winid, vim.api.nvim_get_current_win())
     end)
 
+    it("grows the inline prompt height when the text wraps", function()
+        Config.inline.prompt_width = 24
+        Config.inline.prompt_height = 1
+
+        local inline = InlineChat:new({
+            tab_page_id = vim.api.nvim_get_current_tabpage(),
+            on_submit = function()
+                return true
+            end,
+        })
+
+        inline:open({
+            lines = { "local value = 1" },
+            start_line = 1,
+            end_line = 1,
+            file_path = "/tmp/inline_chat_test.lua",
+            file_type = "lua",
+        })
+
+        --- @diagnostic disable-next-line: invisible
+        local prompt = inline._prompt
+        assert.is_not_nil(prompt)
+        --- @cast prompt agentic.ui.InlineChat.PromptState
+        assert.equal(1, vim.api.nvim_win_get_height(prompt.prompt_winid))
+
+        vim.api.nvim_set_current_win(prompt.prompt_winid)
+        vim.api.nvim_buf_set_lines(
+            prompt.prompt_bufnr,
+            0,
+            -1,
+            false,
+            { "This inline prompt should wrap across more than one row." }
+        )
+
+        vim.cmd("doautocmd <nomodeline> TextChangedI")
+
+        wait_for(function()
+            return vim.api.nvim_win_get_height(prompt.prompt_winid) > 1
+        end)
+    end)
+
     it("normalizes stale columns before submitting the prompt", function()
         vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, { "short" })
 

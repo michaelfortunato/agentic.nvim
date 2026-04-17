@@ -77,6 +77,33 @@ describe("agentic.acp.SlashCommands", function()
             assert.equal(1, new_count)
         end)
 
+        it("merges local commands without duplicating ACP commands", function()
+            --- @type agentic.acp.AvailableCommand[]
+            local commands_mock = {
+                { name = "plan", description = "Create a plan" },
+                { name = "model", description = "ACP model command" },
+            }
+
+            --- @type agentic.acp.AvailableCommand[]
+            local local_commands = {
+                { name = "model", description = "Local duplicate" },
+                { name = "skills", description = "Local skills command" },
+            }
+
+            SlashCommands.setCommands(bufnr, commands_mock, {
+                local_commands = local_commands,
+            })
+
+            local commands = States.getSlashCommands()
+
+            assert.equal(4, #commands)
+            assert.equal("plan", commands[1].word)
+            assert.equal("model", commands[2].word)
+            assert.equal("ACP model command", commands[2].menu)
+            assert.equal("skills", commands[3].word)
+            assert.equal("Start a new session", commands[4].menu)
+        end)
+
         it("filters out commands with spaces in name", function()
             --- @type agentic.acp.AvailableCommand[]
             local commands_mock = {

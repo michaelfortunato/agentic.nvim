@@ -2,6 +2,7 @@ local Chooser = require("agentic.ui.chooser")
 local Config = require("agentic.config")
 local Logger = require("agentic.utils.logger")
 local PermissionOption = require("agentic.utils.permission_option")
+local ReviewState = require("agentic.ui.diff_preview.review_state")
 local SessionEvents = require("agentic.session.session_events")
 local SessionSelectors = require("agentic.session.session_selectors")
 local SessionState = require("agentic.session.session_state")
@@ -28,6 +29,7 @@ local GLOBAL_FLOW_STATE = {
 }
 
 --- @class agentic.ui.PermissionManager.PermissionRequest
+--- @field sessionId string|nil
 --- @field toolCallId string
 --- @field request agentic.acp.RequestPermission
 --- @field callback fun(option_id: string|nil)
@@ -37,11 +39,43 @@ local GLOBAL_FLOW_STATE = {
 --- @field queue agentic.ui.PermissionManager.PermissionRequest[]
 --- @field current_request? agentic.ui.PermissionManager.PermissionRequest Currently displayed request
 --- @field _chooser_tabpage? integer
---- @field _diff_review_handler? fun(current_request: agentic.ui.PermissionManager.PermissionRequest): boolean|nil
+--- @field _diff_review_handler? fun(current_request: agentic.ui.PermissionManager.PermissionRequest): agentic.ui.DiffPreview.ShowResult|nil
 --- @field _state_listener_id? integer
 --- @field _destroyed boolean
 local PermissionManager = {}
 PermissionManager.__index = PermissionManager
+
+--- @param request agentic.ui.PermissionManager.PermissionRequest|nil
+--- @return string|nil
+local function get_review_key_for_request(request)
+    if not request then
+        return nil
+    end
+
+    return ReviewState.create_review_key(request.sessionId, request.toolCallId)
+end
+
+--- @param request agentic.ui.PermissionManager.PermissionRequest|nil
+--- @param option_id string|nil
+local function resolve_review_from_chooser(request, option_id)
+    local review_key = get_review_key_for_request(request)
+    if
+        not review_key
+        or not ReviewState.should_resolve_from_chooser(review_key)
+    then
+        return false
+    end
+
+    local permission_state = PermissionOption.get_state_for_option_id(
+        request and request.request and request.request.options or nil,
+        option_id
+    )
+    local decision = permission_state == "approved" and "accept" or "reject"
+
+    return ReviewState.resolve_all_pending(review_key, decision, {
+        skip_permission_callback = true,
+    })
+end
 
 --- @param manager agentic.ui.PermissionManager
 --- @return boolean
@@ -171,16 +205,13 @@ function PermissionManager:_process_next()
     end
 
     if self._diff_review_handler then
-        local ok, handled = pcall(self._diff_review_handler, current)
-        if ok and handled == true then
+        local ok, activation = pcall(self._diff_review_handler, current)
+        if ok and activation and activation.interactive == true then
             return
         end
     end
 
-    local request = current.request
-    local sorted_options =
-        PermissionManager._sort_permission_options(request.options)
-    self:_show_chooser(current.toolCallId, sorted_options)
+    self:_show_current_request_chooser()
 end
 
 function PermissionManager:_request_global_turn()
@@ -275,6 +306,18 @@ function PermissionManager:_show_chooser(tool_call_id, options)
     end)
 end
 
+function PermissionManager:_show_current_request_chooser()
+    local current = self.current_request
+    if not current then
+        return
+    end
+
+    local request = current.request
+    local sorted_options =
+        PermissionManager._sort_permission_options(request.options)
+    self:_show_chooser(current.toolCallId, sorted_options)
+end
+
 function PermissionManager:_close_chooser()
     if self._chooser_tabpage == nil then
         return
@@ -312,6 +355,7 @@ function PermissionManager:_complete_request(option_id)
     end
 
     self:_close_chooser()
+    resolve_review_from_chooser(current, option_id)
     current.callback(option_id)
 
     self.session_state:dispatch(SessionEvents.complete_current_permission())
@@ -325,9 +369,17 @@ function PermissionManager:_complete_request(option_id)
     self:_release_global_turn()
 end
 
---- @param handler fun(current_request: agentic.ui.PermissionManager.PermissionRequest): boolean|nil
+--- @param handler fun(current_request: agentic.ui.PermissionManager.PermissionRequest): agentic.ui.DiffPreview.ShowResult|nil
 function PermissionManager:set_diff_review_handler(handler)
     self._diff_review_handler = handler
+end
+
+function PermissionManager:show_current_request_chooser()
+    if not self.current_request then
+        return
+    end
+
+    self:_show_current_request_chooser()
 end
 
 --- @param option_id string|nil
@@ -343,6 +395,7 @@ function PermissionManager:clear()
     self:_close_chooser()
 
     if current then
+        resolve_review_from_chooser(current, nil)
         pcall(current.callback, nil)
     end
 

@@ -2,6 +2,7 @@ local BufHelpers = require("agentic.utils.buf_helpers")
 local Chooser = require("agentic.ui.chooser")
 local Config = require("agentic.config")
 local Logger = require("agentic.utils.logger")
+local ProviderUtils = require("agentic.acp.provider_utils")
 
 --- @class agentic.acp.AgentConfigOptions
 --- @field mode? agentic.acp.ConfigOption
@@ -120,24 +121,6 @@ local function normalize_option_label(text)
     return vim.trim((text or ""):lower())
 end
 
---- @param provider_config agentic.acp.ACPProviderConfig|nil
---- @return boolean
-local function is_codex_provider(provider_config)
-    if not provider_config then
-        return false
-    end
-
-    local command = provider_config.command
-    local command_name = type(command) == "string" and vim.fs.basename(command)
-        or ""
-    if normalize_option_label(command_name) == "codex-acp" then
-        return true
-    end
-
-    local provider_name = normalize_option_label(provider_config.name)
-    return provider_name == "codex acp" or provider_name == "codex"
-end
-
 --- @param option agentic.acp.ConfigOption|nil
 --- @param provider_config agentic.acp.ACPProviderConfig|nil
 --- @return boolean
@@ -151,7 +134,7 @@ local function is_approval_preset_option(option, provider_config)
         return true
     end
 
-    return is_codex_provider(provider_config)
+    return ProviderUtils.is_codex_provider(provider_config)
         and category == "mode"
         and normalize_option_label(option.name) == "approval preset"
 end

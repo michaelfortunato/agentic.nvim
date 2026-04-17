@@ -337,7 +337,7 @@ local ConfigDefault = {
         code = { max_height = 15, win_opts = {} },
         files = { max_height = 10, win_opts = {} },
         diagnostics = { max_height = 10, win_opts = {} },
-        todos = { display = true, max_height = 10, win_opts = {} },
+        todos = { display = true, max_height = math.huge, win_opts = {} },
     },
 
     keymaps = {

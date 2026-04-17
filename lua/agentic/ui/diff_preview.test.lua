@@ -5,6 +5,7 @@ local Config = require("agentic.config")
 local FileSystem = require("agentic.utils.file_system")
 local HunkNavigation = require("agentic.ui.hunk_navigation")
 local Logger = require("agentic.utils.logger")
+local ReviewState = require("agentic.ui.diff_preview.review_state")
 
 describe("diff_preview", function()
     --- @param predicate fun(): boolean
@@ -408,6 +409,120 @@ describe("diff_preview", function()
                 vim.api.nvim_set_current_tabpage(first_tab)
                 DiffPreview.clear_diff(first_bufnr)
                 vim.api.nvim_buf_delete(first_bufnr, { force = true })
+                vim.cmd("tabonly")
+            end
+        )
+
+        it(
+            "keeps review attachments isolated by review key across tabpages for the same buffer",
+            function()
+                local file_path = vim.fn.tempname() .. ".lua"
+                local shared_bufnr = vim.api.nvim_create_buf(true, false)
+                local file_lines = {
+                    "local shared = 1",
+                    "print(shared)",
+                    "",
+                }
+
+                vim.api.nvim_win_set_buf(
+                    vim.api.nvim_get_current_win(),
+                    shared_bufnr
+                )
+                vim.api.nvim_buf_set_name(shared_bufnr, file_path)
+                vim.api.nvim_buf_set_lines(
+                    shared_bufnr,
+                    0,
+                    -1,
+                    false,
+                    file_lines
+                )
+
+                local first_tab = vim.api.nvim_get_current_tabpage()
+                local first_review_key = "sess-tab-a:tc-tab-a"
+                local second_review_key = "sess-tab-b:tc-tab-b"
+
+                DiffPreview.show_diff({
+                    file_path = file_path,
+                    diff = {
+                        old = vim.deepcopy(file_lines),
+                        new = {
+                            "local shared = 10",
+                            "print(shared)",
+                            "",
+                        },
+                    },
+                    review_key = first_review_key,
+                    tool_call_id = "tc-tab-a",
+                    review_actions = {
+                        on_accept = function() end,
+                        on_reject = function() end,
+                    },
+                    get_winid = get_winid_spy --[[@as function]],
+                })
+
+                vim.cmd("tabnew")
+                local second_tab = vim.api.nvim_get_current_tabpage()
+                vim.api.nvim_win_set_buf(
+                    vim.api.nvim_get_current_win(),
+                    shared_bufnr
+                )
+
+                DiffPreview.show_diff({
+                    file_path = file_path,
+                    diff = {
+                        old = vim.deepcopy(file_lines),
+                        new = {
+                            "local shared = 20",
+                            "print(shared)",
+                            "",
+                        },
+                    },
+                    review_key = second_review_key,
+                    tool_call_id = "tc-tab-b",
+                    review_actions = {
+                        on_accept = function() end,
+                        on_reject = function() end,
+                    },
+                    get_winid = get_winid_spy --[[@as function]],
+                })
+
+                local attached_first_key, attached_first_tab =
+                    ReviewState.get_attached_review_key(shared_bufnr, first_tab)
+                local attached_second_key, attached_second_tab =
+                    ReviewState.get_attached_review_key(
+                        shared_bufnr,
+                        second_tab
+                    )
+
+                assert.equal(first_review_key, attached_first_key)
+                assert.equal(first_tab, attached_first_tab)
+                assert.equal(second_review_key, attached_second_key)
+                assert.equal(second_tab, attached_second_tab)
+                assert.is_not_nil(
+                    ReviewState.get_review_session_by_key(
+                        first_review_key,
+                        first_tab
+                    )
+                )
+                assert.is_not_nil(
+                    ReviewState.get_review_session_by_key(
+                        second_review_key,
+                        second_tab
+                    )
+                )
+
+                DiffPreview.clear_diff(shared_bufnr, {
+                    reason = "manual_clear",
+                    review_key = second_review_key,
+                    tabpage = second_tab,
+                })
+                vim.api.nvim_set_current_tabpage(first_tab)
+                DiffPreview.clear_diff(shared_bufnr, {
+                    reason = "manual_clear",
+                    review_key = first_review_key,
+                    tabpage = first_tab,
+                })
+                vim.api.nvim_buf_delete(shared_bufnr, { force = true })
                 vim.cmd("tabonly")
             end
         )
@@ -906,6 +1021,107 @@ describe("diff_preview", function()
 
                 DiffPreview.clear_diff(file_bufnr)
                 vim.api.nvim_buf_delete(file_bufnr, { force = true })
+                os.remove(file_path)
+            end
+        )
+
+        it(
+            "preserves partial review progress across manual detach and reattach",
+            function()
+                local file_path = vim.fn.tempname() .. ".lua"
+                local file_bufnr = vim.api.nvim_create_buf(true, false)
+                local file_lines = {
+                    "local first = 1",
+                    "print(first)",
+                    "",
+                    "local second = 2",
+                    "print(second)",
+                    "",
+                }
+
+                read_stub:invokes(function()
+                    return vim.deepcopy(file_lines), nil
+                end)
+
+                vim.api.nvim_win_set_buf(
+                    vim.api.nvim_get_current_win(),
+                    file_bufnr
+                )
+                vim.api.nvim_buf_set_name(file_bufnr, file_path)
+                vim.api.nvim_buf_set_lines(file_bufnr, 0, -1, false, file_lines)
+
+                local show_opts = {
+                    file_path = file_path,
+                    diff = {
+                        old = vim.deepcopy(file_lines),
+                        new = {
+                            "local first = 10",
+                            "print(first)",
+                            "",
+                            "local second = 20",
+                            "print(second)",
+                            "",
+                        },
+                    },
+                    review_key = "sess-reattach:tc-reattach",
+                    tool_call_id = "tc-reattach",
+                    review_actions = {
+                        on_accept = function() end,
+                        on_reject = function() end,
+                    },
+                    get_winid = get_winid_spy --[[@as function]],
+                }
+
+                DiffPreview.show_diff(show_opts)
+
+                vim.api.nvim_win_set_cursor(
+                    vim.api.nvim_get_current_win(),
+                    { 5, 0 }
+                )
+                vim.fn.maparg("n", "n", false, true).callback()
+
+                DiffPreview.clear_diff(file_bufnr, {
+                    reason = "manual_clear",
+                    review_key = show_opts.review_key,
+                })
+
+                DiffPreview.show_diff(show_opts)
+
+                local diff_marks = vim.api.nvim_buf_get_extmarks(
+                    file_bufnr,
+                    HunkNavigation.NS_DIFF,
+                    0,
+                    -1,
+                    { details = true }
+                )
+                local remaining_footer_count = 0
+                for _, mark in ipairs(diff_marks) do
+                    local details = mark[4] or {}
+                    local virt_lines = details.virt_lines
+                    if virt_lines and #virt_lines > 0 then
+                        local footer_segments = virt_lines[#virt_lines]
+                        local footer_text = table.concat(
+                            vim.tbl_map(function(segment)
+                                return segment[1]
+                            end, footer_segments),
+                            ""
+                        )
+                        if footer_text:find("m accept", 1, true) then
+                            remaining_footer_count = remaining_footer_count + 1
+                        end
+                    end
+                end
+
+                assert.equal(1, remaining_footer_count)
+                assert.equal(2, vim.api.nvim_win_get_cursor(0)[1])
+
+                DiffPreview.clear_diff(file_bufnr, {
+                    reason = "rejected",
+                    review_key = show_opts.review_key,
+                })
+                if vim.api.nvim_buf_is_valid(file_bufnr) then
+                    vim.api.nvim_buf_delete(file_bufnr, { force = true })
+                end
                 os.remove(file_path)
             end
         )

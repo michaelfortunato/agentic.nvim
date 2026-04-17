@@ -147,13 +147,13 @@ function SessionEvents.set_review_target(tool_call_id)
 end
 
 --- @param tool_call_id string
---- @param is_rejection boolean|nil
+--- @param clear_reason agentic.ui.DiffPreview.ClearReason|nil
 --- @return table
-function SessionEvents.clear_review_target(tool_call_id, is_rejection)
+function SessionEvents.clear_review_target(tool_call_id, clear_reason)
     return {
         type = "review/clear_active_tool_call",
         tool_call_id = tool_call_id,
-        is_rejection = is_rejection == true,
+        clear_reason = clear_reason,
     }
 end
 

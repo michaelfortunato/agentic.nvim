@@ -391,7 +391,14 @@ end
 function Agentic.stop_generation()
     SessionRegistry.get_current_session(function(session)
         if session.is_generating then
-            session.agent:stop_generation(session.session_id)
+            local target_session_id = session.session_id
+            if session.get_active_generation_session_id then
+                target_session_id = session:get_active_generation_session_id()
+            end
+
+            if target_session_id then
+                session.agent:stop_generation(target_session_id)
+            end
             session.permission_manager:clear()
         end
     end)

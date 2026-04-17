@@ -107,13 +107,19 @@ end
 
 --- @param bufnr integer
 --- @param review_actions agentic.ui.DiffPreview.ReviewActions|nil
-function M.setup_review_keymaps(bufnr, review_actions)
+--- @param review_key string|nil
+function M.setup_review_keymaps(bufnr, review_actions, review_key)
     if not review_actions then
         return
     end
 
     local review_keymaps = get_diff_preview_keymaps()
     local state = ReviewState.get_review_state(bufnr)
+    if not state then
+        return
+    end
+
+    state.review_key = review_key
     state.saved_keymaps.accept =
         save_buffer_keymap(bufnr, review_keymaps.accept)
     state.saved_keymaps.reject =
@@ -150,12 +156,20 @@ function M.setup_review_keymaps(bufnr, review_actions)
     })
 
     BufHelpers.keymap_set(bufnr, "n", review_keymaps.accept_all, function()
+        if review_key and ReviewState.get_review_session(bufnr) then
+            ReviewState.resolve_all_pending(review_key, "accept")
+            return
+        end
         schedule_review_action(
             review_actions.on_accept_all or review_actions.on_accept
         )
     end, { desc = "Agentic Review: Accept diff", nowait = true })
 
     BufHelpers.keymap_set(bufnr, "n", review_keymaps.reject_all, function()
+        if review_key and ReviewState.get_review_session(bufnr) then
+            ReviewState.resolve_all_pending(review_key, "reject")
+            return
+        end
         schedule_review_action(
             review_actions.on_reject_all or review_actions.on_reject
         )

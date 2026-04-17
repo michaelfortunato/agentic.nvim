@@ -27,6 +27,9 @@ local function scroll_window_to_bottom(winid)
     local bufnr = vim.api.nvim_win_get_buf(winid)
     local last_line = math.max(1, vim.api.nvim_buf_line_count(bufnr))
     vim.api.nvim_win_set_cursor(winid, { last_line, 0 })
+    vim.api.nvim_win_call(winid, function()
+        vim.cmd("normal! zb")
+    end)
 end
 
 --- @param opts agentic.ui.ChatViewport.Opts

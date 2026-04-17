@@ -201,6 +201,7 @@ function SessionReducer.reduce(state, event)
     if event.type == "permissions/enqueue" then
         local tool_call_id = event.request.toolCall.toolCallId
         table.insert(state.permissions.queue, {
+            sessionId = event.request.sessionId,
             toolCallId = tool_call_id,
             request = event.request,
             callback = event.callback,

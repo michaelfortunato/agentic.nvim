@@ -231,4 +231,47 @@ describe("agentic", function()
             assert.spy(clear_inline_buffer_stub).was.called_with(test_bufnr)
         end
     )
+
+    it(
+        "stops the dedicated inline session when inline generation is active",
+        function()
+            local stop_generation_spy = spy.new(function() end)
+            local clear_permissions_spy = spy.new(function() end)
+            local session = {
+                is_generating = true,
+                session_id = "chat-session",
+                _inline_session_id = "inline-session",
+                agent = {
+                    stop_generation = stop_generation_spy,
+                },
+                get_active_generation_session_id = function(self)
+                    return self._inline_session_id
+                end,
+                inline_chat = {
+                    is_active = function()
+                        return true
+                    end,
+                },
+                permission_manager = {
+                    clear = clear_permissions_spy,
+                },
+            }
+
+            current_session_stub =
+                spy.stub(SessionRegistry, "get_current_session")
+            current_session_stub:invokes(function(callback)
+                if callback then
+                    callback(session)
+                end
+                return session
+            end)
+
+            Agentic.stop_generation()
+
+            assert
+                .spy(stop_generation_spy).was
+                .called_with(session.agent, "inline-session")
+            assert.spy(clear_permissions_spy).was.called(1)
+        end
+    )
 end)

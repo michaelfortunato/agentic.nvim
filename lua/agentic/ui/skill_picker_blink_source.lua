@@ -1,6 +1,6 @@
-local FilePicker = require("agentic.ui.file_picker")
+local SkillPicker = require("agentic.ui.skill_picker")
 
---- @class agentic.ui.FilePickerBlinkSource.Context
+--- @class agentic.ui.SkillPickerBlinkSource.Context
 --- @field bufnr integer
 --- @field line string
 --- @field cursor integer[]
@@ -16,26 +16,29 @@ local function empty_response()
     }
 end
 
---- @param item table
+--- @param item agentic.ui.SkillPicker.Item
 --- @param index integer
---- @param context agentic.ui.FilePickerBlinkSource.Context
+--- @param context agentic.ui.SkillPickerBlinkSource.Context
 --- @param mention_start_col integer
---- @return table completion_item
+--- @return table
 local function to_completion_item(item, index, context, mention_start_col)
-    local path = item.word:sub(2)
-
     --- @type table
     local completion_item = {
-        label = path,
+        label = item.name,
         data = {
-            path = path,
+            name = item.name,
         },
-        kind = vim.lsp.protocol.CompletionItemKind.File,
-        filterText = item._filter_text or path,
+        detail = item.source,
+        documentation = item.description ~= "" and {
+            kind = "markdown",
+            value = item.description,
+        } or nil,
+        kind = vim.lsp.protocol.CompletionItemKind.Module,
+        filterText = item.filter_text,
         sortText = string.format("%04d", index),
         insertTextFormat = vim.lsp.protocol.InsertTextFormat.PlainText,
         textEdit = {
-            newText = item.word,
+            newText = "$" .. item.name,
             range = {
                 start = {
                     line = context.cursor[1] - 1,
@@ -61,32 +64,26 @@ function Source:enabled()
 end
 
 function Source:get_trigger_characters()
-    return { "@" }
+    return { "$" }
 end
 
---- @param context agentic.ui.FilePickerBlinkSource.Context
+--- @param context agentic.ui.SkillPickerBlinkSource.Context
 --- @param callback fun(response: table)
 function Source:get_completions(context, callback)
-    local picker = FilePicker.get_instance(context.bufnr)
+    local picker = SkillPicker.get_instance(context.bufnr)
     if not picker then
         callback(empty_response())
         return function() end
     end
 
     local mention =
-        FilePicker.get_active_mention(context.line, context.cursor[2])
+        SkillPicker.get_active_skill_mention(context.line, context.cursor[2])
     if not mention then
         callback(empty_response())
         return function() end
     end
 
-    local cancelled = false
-
     picker:request_source_items(function(matches)
-        if cancelled then
-            return
-        end
-
         local items = {}
         for index, item in ipairs(matches) do
             items[index] =
@@ -100,27 +97,20 @@ function Source:get_completions(context, callback)
         })
     end)
 
-    return function()
-        cancelled = true
-    end
+    return function() end
 end
 
---- @param context agentic.ui.FilePickerBlinkSource.Context
---- @param item {data?: {path?: string}|nil}
+--- @param context agentic.ui.SkillPickerBlinkSource.Context
+--- @param _item table
 --- @param callback fun()
 --- @param default_implementation fun()
-function Source:execute(context, item, callback, default_implementation)
-    local picker = FilePicker.get_instance(context.bufnr)
+function Source:execute(context, _item, callback, default_implementation)
+    local picker = SkillPicker.get_instance(context.bufnr)
     if picker then
         picker:skip_next_auto_show()
     end
 
     default_implementation()
-
-    if picker and item.data and item.data.path then
-        picker:handle_file_selected(item.data.path)
-    end
-
     callback()
 end
 

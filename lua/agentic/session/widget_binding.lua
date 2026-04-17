@@ -1,6 +1,7 @@
 ---@diagnostic disable: invisible
 local Config = require("agentic.config")
 local DiagnosticsList = require("agentic.ui.diagnostics_list")
+local ProviderUtils = require("agentic.acp.provider_utils")
 local FileSystem = require("agentic.utils.file_system")
 local Logger = require("agentic.utils.logger")
 local SessionEvents = require("agentic.session.session_events")
@@ -13,6 +14,20 @@ local SlashCommands = require("agentic.acp.slash_commands")
 --- - Buffer-local: message writer extmarks and side-panel buffer contents
 
 local WidgetBinding = {}
+
+--- @param session agentic.SessionManager
+--- @return string
+local function get_widget_tab_cwd(session)
+    local widget_tab_page_id = session.widget and session.widget.tab_page_id
+        or session.tab_page_id
+    local tabnr = vim.api.nvim_tabpage_get_number(widget_tab_page_id)
+    local cwd = vim.fn.getcwd(-1, tabnr)
+    if cwd == nil or cwd == "" then
+        cwd = vim.fn.getcwd()
+    end
+
+    return FileSystem.to_absolute_path(cwd)
+end
 
 --- @param value any
 --- @return boolean
@@ -145,6 +160,7 @@ function WidgetBinding.destroy_widget_bindings(session)
     session.diagnostics_list = nil
     session.todo_list = nil
     session.file_picker = nil
+    session.skill_picker = nil
 end
 
 --- @param session agentic.SessionManager
@@ -342,8 +358,9 @@ function WidgetBinding.attach_widget(session, widget, snapshot)
     then
         session.config_options:set_current_mode(state.session.current_mode_id)
     end
-    SlashCommands.setCommands(
-        session.widget.buf_nrs.input,
+    call_session_method(
+        session,
+        "_sync_prompt_commands",
         state.session.available_commands or {}
     )
 
@@ -404,10 +421,14 @@ end
 --- @param file_picker_module agentic.ui.FilePicker|nil
 function WidgetBinding.setup_prompt_completion(session, file_picker_module)
     local FilePicker = file_picker_module or require("agentic.ui.file_picker")
+    local SkillPicker = require("agentic.ui.skill_picker")
 
     session.file_picker = FilePicker:new(session.widget.buf_nrs.input, {
         resolve_root = function()
             return call_session_method(session, "_get_workspace_root")
+        end,
+        resolve_cwd = function()
+            return call_session_method(session, "_get_current_cwd")
         end,
         on_file_selected = function(file_path)
             if session.file_list then
@@ -415,7 +436,42 @@ function WidgetBinding.setup_prompt_completion(session, file_picker_module)
             end
         end,
     })
+
+    if ProviderUtils.is_codex_provider(session.agent.provider_config) then
+        session.skill_picker = SkillPicker:new(session.widget.buf_nrs.input, {
+            resolve_workspace_root = function()
+                return call_session_method(session, "_get_workspace_root")
+            end,
+        })
+    else
+        session.skill_picker = nil
+    end
+
     SlashCommands.setup_completion(session.widget.buf_nrs.input)
+end
+
+--- @param session agentic.SessionManager
+--- @param available_commands agentic.acp.AvailableCommand[]|nil
+function WidgetBinding.sync_prompt_commands(session, available_commands)
+    if
+        not session.widget
+        or not session.widget.buf_nrs
+        or not session.widget.buf_nrs.input
+    then
+        return
+    end
+
+    local CodexLocalCommands = require("agentic.acp.codex_local_commands")
+
+    -- Keep Codex-only shortcuts out of ACP session state and merge them only
+    -- into the local completion list for this input buffer.
+    SlashCommands.setCommands(
+        session.widget.buf_nrs.input,
+        available_commands or {},
+        {
+            local_commands = CodexLocalCommands.get_available_commands(session),
+        }
+    )
 end
 
 --- @param session agentic.SessionManager
@@ -595,17 +651,9 @@ function WidgetBinding.get_workspace_root(session)
         end
     end
 
-    local widget_tab_page_id = session.widget and session.widget.tab_page_id
-        or session.tab_page_id
-    local tabnr = vim.api.nvim_tabpage_get_number(widget_tab_page_id)
-    local cwd = vim.fn.getcwd(-1, tabnr)
-    if cwd == nil or cwd == "" then
-        cwd = vim.fn.getcwd()
-    end
-
     local start_dir = file_path
             and vim.fs.dirname(FileSystem.to_absolute_path(file_path))
-        or FileSystem.to_absolute_path(cwd)
+        or get_widget_tab_cwd(session)
     local git_marker = vim.fs.find({ ".git" }, {
         upward = true,
         path = start_dir,
@@ -615,7 +663,13 @@ function WidgetBinding.get_workspace_root(session)
         return FileSystem.to_absolute_path(vim.fs.dirname(git_marker))
     end
 
-    return FileSystem.to_absolute_path(cwd)
+    return get_widget_tab_cwd(session)
+end
+
+--- @param session agentic.SessionManager
+--- @return string
+function WidgetBinding.get_current_cwd(session)
+    return get_widget_tab_cwd(session)
 end
 
 --- @param session agentic.SessionManager
@@ -627,6 +681,11 @@ function WidgetBinding.handle_new_config_options(session, new_config_options)
     session.config_options:set_options(
         new_config_options,
         session.agent and session.agent.provider_config or nil
+    )
+    call_session_method(
+        session,
+        "_sync_prompt_commands",
+        session.session_state:get_state().session.available_commands or {}
     )
     call_session_method(session, "_render_window_headers")
 

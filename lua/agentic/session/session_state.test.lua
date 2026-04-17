@@ -138,6 +138,7 @@ describe("agentic.session.SessionState", function()
             local callback = function() end
 
             store:dispatch(SessionEvents.enqueue_permission({
+                sessionId = "sess-1",
                 toolCall = { toolCallId = "tc-1" },
                 options = {},
             }, callback))
@@ -191,7 +192,7 @@ describe("agentic.session.SessionState", function()
         )
         assert.equal("tc-3", state.review.active_tool_call_id)
 
-        store:dispatch(SessionEvents.clear_review_target("tc-3", true))
+        store:dispatch(SessionEvents.clear_review_target("tc-3", "rejected"))
         assert.is_nil(store:get_state().review.active_tool_call_id)
     end)
 

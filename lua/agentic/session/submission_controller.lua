@@ -67,6 +67,22 @@ end
 
 local SubmissionController = {}
 
+--- @param session agentic.SessionManager
+--- @return string|nil
+local function get_active_generation_session_id(session)
+    local inline_chat = session.inline_chat
+    if
+        inline_chat
+        and inline_chat.is_active
+        and inline_chat:is_active()
+        and session["_inline_session_id"]
+    then
+        return session["_inline_session_id"]
+    end
+
+    return session.session_id
+end
+
 --- @param value any
 --- @return boolean
 local function is_callable(value)
@@ -125,12 +141,25 @@ end
 
 --- @param session agentic.SessionManager
 --- @param input_text string
---- @param opts {code_selection?: agentic.ui.CodeSelection|nil, file_list?: agentic.ui.FileList|nil, diagnostics_list?: agentic.ui.DiagnosticsList|nil, chat_winid?: integer|nil, selections?: agentic.Selection[]|nil, inline_instructions?: string|nil, surface?: "chat"|"inline"|nil}
+--- @param opts {code_selection?: agentic.ui.CodeSelection|nil, file_list?: agentic.ui.FileList|nil, diagnostics_list?: agentic.ui.DiagnosticsList|nil, chat_winid?: integer|nil, selections?: agentic.Selection[]|nil, inline_instructions?: string|nil, surface?: "chat"|"inline"|nil, include_system_info?: boolean|nil, use_session_context?: boolean|nil}
 --- @return agentic.SessionManager.QueuedSubmission
 function SubmissionController.prepare_submission(session, input_text, opts)
     opts = opts or {}
 
-    local should_set_title = session["_restored_turns_to_send"]
+    local use_session_context = opts.use_session_context ~= false
+    local restored_turns_to_send = use_session_context
+            and session["_restored_turns_to_send"]
+        or nil
+    local include_system_info = opts.include_system_info
+    if include_system_info == nil then
+        if use_session_context then
+            include_system_info = session["_is_first_message"]
+        else
+            include_system_info = true
+        end
+    end
+
+    local should_set_title = restored_turns_to_send
         or session.session_state:get_state().session.title == ""
     if should_set_title then
         session.session_state:dispatch(
@@ -142,8 +171,8 @@ function SubmissionController.prepare_submission(session, input_text, opts)
     local built_submission = PromptBuilder.build_submission({
         input_text = input_text,
         provider_name = session.agent.provider_config.name,
-        restored_turns_to_send = session["_restored_turns_to_send"],
-        include_system_info = session["_is_first_message"],
+        restored_turns_to_send = restored_turns_to_send,
+        include_system_info = include_system_info,
         code_selection = opts.code_selection,
         file_list = opts.file_list,
         diagnostics_list = opts.diagnostics_list,
@@ -153,11 +182,11 @@ function SubmissionController.prepare_submission(session, input_text, opts)
         surface = opts.surface,
     })
 
-    if built_submission.consumed_restored_turns then
+    if use_session_context and built_submission.consumed_restored_turns then
         session["_restored_turns_to_send"] = nil
     end
 
-    if built_submission.consumed_first_message then
+    if use_session_context and built_submission.consumed_first_message then
         session["_is_first_message"] = false
     end
 
@@ -260,7 +289,10 @@ function SubmissionController.send_queued_submission_now(session, submission_id)
         end
 
         call_session_method(session, "_sync_inline_queue_states")
-        session.agent:stop_generation(session.session_id)
+        local target_session_id = get_active_generation_session_id(session)
+        if target_session_id then
+            session.agent:stop_generation(target_session_id)
+        end
         return
     end
 
@@ -297,6 +329,17 @@ function SubmissionController.handle_input_submit(session, input_text)
         return
     end
 
+    if get_session_method(session, "_handle_local_slash_command") then
+        local handled = call_session_method(
+            session,
+            "_handle_local_slash_command",
+            input_text
+        )
+        if handled then
+            return
+        end
+    end
+
     if not session.session_id then
         call_session_method(session, "_with_active_session", function()
             call_session_method(session, "_handle_input_submit", input_text)
@@ -327,27 +370,112 @@ end
 --- @param session agentic.SessionManager
 --- @param submission agentic.SessionManager.QueuedSubmission
 function SubmissionController.dispatch_submission(session, submission)
-    if not session.session_id then
+    if submission.inline_request then
+        local inline_session_id = session["_inline_session_id"]
+        if not inline_session_id then
+            call_session_method(
+                session,
+                "_with_active_inline_session",
+                function()
+                    call_session_method(
+                        session,
+                        "_dispatch_submission",
+                        submission
+                    )
+                end
+            )
+            return
+        end
+
+        local target_session_id = inline_session_id
+
+        if session.inline_chat and session.inline_chat.begin_request then
+            session.inline_chat:begin_request({
+                submission_id = submission.id,
+                prompt = submission.inline_request.prompt,
+                selection = submission.inline_request.selection,
+                source_bufnr = submission.inline_request.source_bufnr,
+                source_winid = submission.inline_request.source_winid,
+                phase = "thinking",
+                status_text = "Preparing inline request",
+            })
+        end
+
+        session.session_state:dispatch(
+            SessionEvents.append_interaction_request(submission.request)
+        )
+
+        invoke_hook("on_prompt_submit", {
+            prompt = submission.input_text,
+            session_id = target_session_id,
+            tab_page_id = session.tab_page_id,
+        })
+
+        local session_id = target_session_id
+        local tab_page_id = session.tab_page_id
+        session.is_generating = true
+        session["_agent_phase"] = "thinking"
+        render_window_headers(session)
+        refresh_chat_activity(session)
+
+        session.agent:send_prompt(
+            target_session_id,
+            submission.prompt,
+            function(response, err)
+                local prompt_response = response
+                --- @cast prompt_response agentic.acp.PromptResponse|nil
+                vim.schedule(function()
+                    session.is_generating = false
+                    session["_agent_phase"] = nil
+
+                    session.session_state:dispatch(
+                        SessionEvents.set_interaction_turn_result(
+                            build_turn_result_message(prompt_response, err),
+                            session.agent.provider_config.name
+                        )
+                    )
+                    refresh_chat_activity(session)
+
+                    invoke_hook("on_response_complete", {
+                        session_id = session_id,
+                        tab_page_id = tab_page_id,
+                        success = err == nil,
+                        error = err,
+                    })
+
+                    if session.inline_chat then
+                        session.inline_chat:complete(prompt_response, err)
+                    end
+
+                    call_session_method(session, "_cancel_inline_session")
+
+                    if not err then
+                        session.session_state:save_persisted_session_data(
+                            function(save_err)
+                                if save_err then
+                                    Logger.debug(
+                                        "Chat history save error:",
+                                        save_err
+                                    )
+                                end
+                            end
+                        )
+                    end
+
+                    call_session_method(session, "_drain_queued_submissions")
+                end)
+            end
+        )
+        return
+    end
+
+    local target_session_id = session.session_id
+
+    if not target_session_id then
         call_session_method(session, "_with_active_session", function()
             call_session_method(session, "_dispatch_submission", submission)
         end)
         return
-    end
-
-    if
-        submission.inline_request
-        and session.inline_chat
-        and session.inline_chat.begin_request
-    then
-        session.inline_chat:begin_request({
-            submission_id = submission.id,
-            prompt = submission.inline_request.prompt,
-            selection = submission.inline_request.selection,
-            source_bufnr = submission.inline_request.source_bufnr,
-            source_winid = submission.inline_request.source_winid,
-            phase = "thinking",
-            status_text = "Preparing inline request",
-        })
     end
 
     session.session_state:dispatch(
@@ -356,11 +484,11 @@ function SubmissionController.dispatch_submission(session, submission)
 
     invoke_hook("on_prompt_submit", {
         prompt = submission.input_text,
-        session_id = session.session_id,
+        session_id = target_session_id,
         tab_page_id = session.tab_page_id,
     })
 
-    local session_id = session.session_id
+    local session_id = target_session_id
     local tab_page_id = session.tab_page_id
     session.is_generating = true
     session["_agent_phase"] = "thinking"
@@ -368,7 +496,7 @@ function SubmissionController.dispatch_submission(session, submission)
     refresh_chat_activity(session)
 
     session.agent:send_prompt(
-        session.session_id,
+        target_session_id,
         submission.prompt,
         function(response, err)
             local prompt_response = response
@@ -391,10 +519,6 @@ function SubmissionController.dispatch_submission(session, submission)
                     success = err == nil,
                     error = err,
                 })
-
-                if submission.inline_request and session.inline_chat then
-                    session.inline_chat:complete(prompt_response, err)
-                end
 
                 if not err then
                     session.session_state:save_persisted_session_data(
@@ -424,14 +548,10 @@ function SubmissionController.submit_inline_request(session, request)
             selections = { request.selection },
             inline_instructions = PromptBuilder.build_inline_instructions(),
             surface = "inline",
+            include_system_info = true,
+            use_session_context = false,
         })
     submission.inline_request = request
-
-    if not session.session_id then
-        call_session_method(session, "_enqueue_submission", submission)
-        call_session_method(session, "_ensure_session_started")
-        return true
-    end
 
     if session.is_generating then
         call_session_method(session, "_enqueue_submission", submission)

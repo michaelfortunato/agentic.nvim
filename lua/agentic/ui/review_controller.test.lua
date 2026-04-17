@@ -6,6 +6,7 @@ local Config = require("agentic.config")
 local DiffPreview = require("agentic.ui.diff_preview")
 local FileSystem = require("agentic.utils.file_system")
 local HunkNavigation = require("agentic.ui.hunk_navigation")
+local ReviewState = require("agentic.ui.diff_preview.review_state")
 local ReviewController = require("agentic.ui.review_controller")
 local SessionEvents = require("agentic.session.session_events")
 local SessionState = require("agentic.session.session_state")
@@ -45,11 +46,12 @@ describe("agentic.ui.ReviewController", function()
         session_state = SessionState:new()
         permission_manager = {
             complete_current_request = spy.new(function() end),
+            show_current_request_chooser = spy.new(function() end),
         }
 
         review_controller = ReviewController:new(session_state, {
             tab_page_id = vim.api.nvim_get_current_tabpage(),
-            find_first_non_widget_window = function()
+            find_first_editor_window = function()
                 return vim.api.nvim_get_current_win()
             end,
             open_left_window = function(_self, target_bufnr)
@@ -299,6 +301,157 @@ describe("agentic.ui.ReviewController", function()
 
             assert.is_not_nil(get_map("m").callback)
             assert.is_not_nil(get_map("n").callback)
+        end
+    )
+
+    it(
+        "falls back to the chooser when the inline review is manually cleared",
+        function()
+            local review_key =
+                ReviewState.create_review_key("sess-manual", "tc-review-manual")
+
+            session_state:dispatch(SessionEvents.append_interaction_request({
+                kind = "user",
+                text = "review this edit",
+                timestamp = 1,
+                content = {
+                    { type = "text", text = "review this edit" },
+                },
+            }))
+            session_state:dispatch(
+                SessionEvents.upsert_interaction_tool_call("Codex ACP", {
+                    tool_call_id = "tc-review-manual",
+                    kind = "edit",
+                    status = "pending",
+                    file_path = file_path,
+                    diff = {
+                        old = { "local x = 1", "print(x)", "" },
+                        new = { "local x = 2", "print(x)", "" },
+                    },
+                })
+            )
+            session_state:dispatch(
+                SessionEvents.set_review_target("tc-review-manual")
+            )
+            session_state:dispatch(SessionEvents.enqueue_permission({
+                sessionId = "sess-manual",
+                toolCall = {
+                    toolCallId = "tc-review-manual",
+                },
+                options = {
+                    {
+                        optionId = "allow-once",
+                        name = "Allow once",
+                        kind = "allow_once",
+                    },
+                    {
+                        optionId = "reject-once",
+                        name = "Reject once",
+                        kind = "reject_once",
+                    },
+                },
+            }, function() end))
+            session_state:dispatch(SessionEvents.show_next_permission())
+
+            DiffPreview.clear_diff(bufnr, {
+                reason = "manual_clear",
+                review_key = review_key,
+            })
+
+            wait_for(function()
+                return permission_manager.show_current_request_chooser.call_count
+                    == 1
+            end)
+
+            assert
+                .spy(permission_manager.show_current_request_chooser).was
+                .called(1)
+            assert.equal(
+                "tc-review-manual",
+                session_state:get_state().permissions.current_request.toolCallId
+            )
+        end
+    )
+
+    it(
+        "clears preserved review state when the tool review completes",
+        function()
+            session_state:dispatch(SessionEvents.append_interaction_request({
+                kind = "user",
+                text = "review this edit",
+                timestamp = 1,
+                content = {
+                    { type = "text", text = "review this edit" },
+                },
+            }))
+            session_state:dispatch(
+                SessionEvents.upsert_interaction_tool_call("Codex ACP", {
+                    tool_call_id = "tc-review-terminal",
+                    kind = "edit",
+                    status = "pending",
+                    file_path = file_path,
+                    diff = {
+                        old = { "local x = 1", "print(x)", "" },
+                        new = { "local x = 2", "print(x)", "" },
+                    },
+                })
+            )
+            session_state:dispatch(
+                SessionEvents.set_review_target("tc-review-terminal")
+            )
+            session_state:dispatch(SessionEvents.enqueue_permission({
+                sessionId = "sess-terminal",
+                toolCall = {
+                    toolCallId = "tc-review-terminal",
+                },
+                options = {
+                    {
+                        optionId = "allow-once",
+                        name = "Allow once",
+                        kind = "allow_once",
+                    },
+                    {
+                        optionId = "reject-once",
+                        name = "Reject once",
+                        kind = "reject_once",
+                    },
+                },
+            }, function() end))
+            session_state:dispatch(SessionEvents.show_next_permission())
+
+            local review_key = ReviewState.create_review_key(
+                "sess-terminal",
+                "tc-review-terminal"
+            )
+            assert.is_not_nil(review_key)
+            --- @cast review_key string
+
+            assert.is_not_nil(
+                ReviewState.get_review_session_by_key(
+                    review_key,
+                    vim.api.nvim_get_current_tabpage()
+                )
+            )
+            assert.is_not_nil(
+                ReviewState.get_buffer_review_attachment(bufnr, review_key)
+            )
+
+            session_state:dispatch(
+                SessionEvents.clear_review_target(
+                    "tc-review-terminal",
+                    "tool_completed"
+                )
+            )
+
+            assert.is_nil(
+                ReviewState.get_review_session_by_key(
+                    review_key,
+                    vim.api.nvim_get_current_tabpage()
+                )
+            )
+            assert.is_nil(
+                ReviewState.get_buffer_review_attachment(bufnr, review_key)
+            )
         end
     )
 end)

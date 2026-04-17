@@ -187,6 +187,24 @@ function SessionController.drain_pending_session_callbacks(session)
 end
 
 --- @param session agentic.SessionManager
+function SessionController.drain_pending_inline_session_callbacks(session)
+    if not session["_inline_session_id"] then
+        return
+    end
+
+    local callbacks = session["_pending_inline_session_callbacks"] or {}
+    if #callbacks == 0 then
+        return
+    end
+
+    session["_pending_inline_session_callbacks"] = {}
+
+    for _, callback in ipairs(callbacks) do
+        callback()
+    end
+end
+
+--- @param session agentic.SessionManager
 function SessionController.ensure_session_started(session)
     if session.session_id then
         call_session_method(session, "_drain_pending_session_callbacks")
@@ -211,6 +229,31 @@ function SessionController.ensure_session_started(session)
 end
 
 --- @param session agentic.SessionManager
+function SessionController.ensure_inline_session_started(session)
+    if session["_inline_session_id"] then
+        call_session_method(session, "_drain_pending_inline_session_callbacks")
+        return
+    end
+
+    if session["_inline_session_starting"] then
+        return
+    end
+
+    if not session.agent or session.agent.state ~= "ready" then
+        return
+    end
+
+    call_session_method(session, "_start_inline_session", {
+        on_created = function()
+            call_session_method(
+                session,
+                "_drain_pending_inline_session_callbacks"
+            )
+        end,
+    })
+end
+
+--- @param session agentic.SessionManager
 --- @param callback fun()
 function SessionController.with_active_session(session, callback)
     if session.session_id then
@@ -223,6 +266,21 @@ function SessionController.with_active_session(session, callback)
     pending_session_callbacks[#pending_session_callbacks + 1] = callback
     session["_pending_session_callbacks"] = pending_session_callbacks
     call_session_method(session, "_ensure_session_started")
+end
+
+--- @param session agentic.SessionManager
+--- @param callback fun()
+function SessionController.with_active_inline_session(session, callback)
+    if session["_inline_session_id"] then
+        callback()
+        return
+    end
+
+    local pending_session_callbacks = session["_pending_inline_session_callbacks"]
+        or {}
+    pending_session_callbacks[#pending_session_callbacks + 1] = callback
+    session["_pending_inline_session_callbacks"] = pending_session_callbacks
+    call_session_method(session, "_ensure_inline_session_started")
 end
 
 --- @param session agentic.SessionManager
@@ -277,10 +335,94 @@ function SessionController.get_active_tool_activity(session)
     return activity
 end
 
+--- @param opts {route?: "chat"|"inline"|nil}|nil
+--- @return "chat"|"inline"
+local function get_route(opts)
+    if opts and opts.route == "inline" then
+        return "inline"
+    end
+
+    return "chat"
+end
+
+--- @param session agentic.SessionManager
+--- @param config_id string
+--- @param value string
+local function apply_local_config_change(session, config_id, value)
+    local option = session.config_options:get_config_option(config_id)
+    if option then
+        option.currentValue = value
+    end
+    render_window_headers(session)
+    if session.inline_chat then
+        session.inline_chat:refresh()
+    end
+end
+
+--- @param session agentic.SessionManager
+--- @return string[]
+local function get_config_target_session_ids(session)
+    --- @type string[]
+    local target_session_ids = {}
+
+    if session.session_id then
+        target_session_ids[#target_session_ids + 1] = session.session_id
+    end
+
+    local inline_session_id = session["_inline_session_id"]
+    if
+        inline_session_id
+        and inline_session_id ~= ""
+        and inline_session_id ~= session.session_id
+    then
+        target_session_ids[#target_session_ids + 1] = inline_session_id
+    end
+
+    return target_session_ids
+end
+
+--- @param session agentic.SessionManager
+--- @param target_session_ids string[]
+--- @param config_id string
+--- @param value string
+--- @param callback fun(result: table|nil, err: agentic.acp.ACPError|nil)
+local function apply_config_option_to_targets(
+    session,
+    target_session_ids,
+    config_id,
+    value,
+    callback
+)
+    local function apply_target(index, last_result)
+        local target_session_id = target_session_ids[index]
+        if target_session_id == nil then
+            callback(last_result, nil)
+            return
+        end
+
+        session.agent:set_config_option(
+            target_session_id,
+            config_id,
+            value,
+            function(result, err)
+                if err then
+                    callback(nil, err)
+                    return
+                end
+
+                apply_target(index + 1, result or last_result)
+            end
+        )
+    end
+
+    apply_target(1, nil)
+end
+
 --- @param session agentic.SessionManager
 --- @param update agentic.acp.SessionUpdateMessage
-function SessionController.on_session_update(session, update)
-    local SlashCommands = require("agentic.acp.slash_commands")
+--- @param opts {route?: "chat"|"inline"|nil}|nil
+function SessionController.on_session_update(session, update, opts)
+    local route = get_route(opts)
 
     if session.inline_chat and session.inline_chat:is_active() then
         session.inline_chat:handle_session_update(update)
@@ -313,7 +455,7 @@ function SessionController.on_session_update(session, update)
             )
         end
     elseif update.sessionUpdate == "session_info_update" then
-        if update.title ~= nil then
+        if route == "chat" and update.title ~= nil then
             session.session_state:dispatch(
                 SessionEvents.set_session_title(update.title or "")
             )
@@ -326,32 +468,42 @@ function SessionController.on_session_update(session, update)
                 vim.deepcopy(update.entries or {})
             )
         )
-        if Config.windows.todos.display then
+        if route == "chat" and Config.windows.todos.display then
             session.todo_list:render(update.entries)
         end
     elseif update.sessionUpdate == "available_commands_update" then
-        session.session_state:dispatch(
-            SessionEvents.set_available_commands(update.availableCommands or {})
-        )
-        SlashCommands.setCommands(
-            session.widget.buf_nrs.input,
-            update.availableCommands
-        )
-    elseif update.sessionUpdate == "current_mode_update" then
-        session.session_state:dispatch(
-            SessionEvents.set_current_mode(update.currentModeId)
-        )
-        if
-            session.config_options and session.config_options.set_current_mode
-        then
-            session.config_options:set_current_mode(update.currentModeId)
+        if route == "chat" then
+            session.session_state:dispatch(
+                SessionEvents.set_available_commands(
+                    update.availableCommands or {}
+                )
+            )
+            call_session_method(
+                session,
+                "_sync_prompt_commands",
+                update.availableCommands or {}
+            )
         end
-        render_window_headers(session)
+    elseif update.sessionUpdate == "current_mode_update" then
+        if route == "chat" then
+            session.session_state:dispatch(
+                SessionEvents.set_current_mode(update.currentModeId)
+            )
+            if
+                session.config_options
+                and session.config_options.set_current_mode
+            then
+                session.config_options:set_current_mode(update.currentModeId)
+            end
+            render_window_headers(session)
+        end
     elseif update.sessionUpdate == "usage_update" then
         -- Usage updates are informational for now. Keep them recognized so
         -- providers can emit ACP usage telemetry without triggering warnings.
     elseif update.sessionUpdate == "config_option_update" then
-        handle_new_config_options(session, update.configOptions)
+        if route == "chat" then
+            handle_new_config_options(session, update.configOptions)
+        end
     else
         Logger.debug(
             "Unknown session update type: ",
@@ -363,7 +515,8 @@ function SessionController.on_session_update(session, update)
     end
 
     invoke_hook("on_session_update", {
-        session_id = session.session_id,
+        session_id = route == "inline" and session["_inline_session_id"]
+            or session.session_id,
         tab_page_id = session.tab_page_id,
         update = update,
     })
@@ -371,7 +524,8 @@ end
 
 --- @param session agentic.SessionManager
 --- @param tool_call agentic.ui.MessageWriter.ToolCallBlock
-function SessionController.on_tool_call(session, tool_call)
+--- @param _opts {route?: "chat"|"inline"|nil}|nil
+function SessionController.on_tool_call(session, tool_call, _opts)
     if session.inline_chat and session.inline_chat:is_active() then
         session.inline_chat:handle_tool_call(tool_call)
     end
@@ -387,7 +541,8 @@ end
 
 --- @param session agentic.SessionManager
 --- @param tool_call_update agentic.ui.MessageWriter.ToolCallBlock
-function SessionController.on_tool_call_update(session, tool_call_update)
+--- @param _opts {route?: "chat"|"inline"|nil}|nil
+function SessionController.on_tool_call_update(session, tool_call_update, _opts)
     if session.inline_chat and session.inline_chat:is_active() then
         session.inline_chat:handle_tool_call_update(tool_call_update)
     end
@@ -405,7 +560,8 @@ function SessionController.on_tool_call_update(session, tool_call_update)
     then
         events[#events + 1] = SessionEvents.clear_review_target(
             tool_call_update.tool_call_id,
-            tool_call_update.status == "failed"
+            tool_call_update.status == "failed" and "tool_failed"
+                or "tool_completed"
         )
     end
 
@@ -446,7 +602,13 @@ end
 --- @param session agentic.SessionManager
 --- @param request agentic.acp.RequestPermission
 --- @param callback fun(option_id: string|nil)
-function SessionController.handle_permission_request(session, request, callback)
+--- @param _opts {route?: "chat"|"inline"|nil}|nil
+function SessionController.handle_permission_request(
+    session,
+    request,
+    callback,
+    _opts
+)
     if session.inline_chat and session.inline_chat:is_active() then
         session.inline_chat:handle_permission_request()
     end
@@ -464,8 +626,10 @@ function SessionController.handle_permission_request(session, request, callback)
             ),
             SessionEvents.clear_review_target(
                 tool_call_id,
-                permission_state == "rejected"
-                    or permission_state == "dismissed"
+                permission_state == "approved" and "approved"
+                    or permission_state == "rejected" and "rejected"
+                    or permission_state == "dismissed" and "dismissed"
+                    or nil
             ),
         })
         if
@@ -502,12 +666,14 @@ function SessionController.handle_config_option_change(
     config_id,
     value
 )
-    if not session.session_id then
+    local target_session_ids = get_config_target_session_ids(session)
+    if #target_session_ids == 0 then
         return
     end
 
-    session.agent:set_config_option(
-        session.session_id,
+    apply_config_option_to_targets(
+        session,
+        target_session_ids,
         config_id,
         value,
         function(result, err)
@@ -527,15 +693,7 @@ function SessionController.handle_config_option_change(
                 Logger.debug("received result after setting config option")
                 handle_new_config_options(session, result.configOptions)
             else
-                local option =
-                    session.config_options:get_config_option(config_id)
-                if option then
-                    option.currentValue = value
-                end
-                render_window_headers(session)
-                if session.inline_chat then
-                    session.inline_chat:refresh()
-                end
+                apply_local_config_change(session, config_id, value)
             end
 
             local option_name = session.config_options:get_config_option_name(
@@ -567,6 +725,17 @@ end
 --- @param session agentic.SessionManager
 function SessionController.cancel_session(session)
     return SessionLifecycle.cancel(session)
+end
+
+--- @param session agentic.SessionManager
+--- @param opts {on_created: fun()|nil}|nil
+function SessionController.start_inline_session(session, opts)
+    return SessionLifecycle.start_inline(session, opts)
+end
+
+--- @param session agentic.SessionManager
+function SessionController.cancel_inline_session(session)
+    return SessionLifecycle.cancel_inline(session)
 end
 
 --- @param session agentic.SessionManager

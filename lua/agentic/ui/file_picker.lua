@@ -7,8 +7,10 @@ local Logger = require("agentic.utils.logger")
 --- @field _bufnr integer
 --- @field _root string
 --- @field _resolve_root? fun(): string|nil
+--- @field _resolve_cwd? fun(): string|nil
 --- @field _on_file_selected? fun(file_path: string)
 --- @field _skip_auto_show_once boolean
+--- @field _roots_key? string|nil
 local FilePicker = {}
 FilePicker.__index = FilePicker
 
@@ -57,6 +59,7 @@ local blink_filetype_registered = false
 
 --- @class agentic.ui.FilePicker.Opts
 --- @field resolve_root? fun(): string|nil
+--- @field resolve_cwd? fun(): string|nil
 --- @field on_file_selected? fun(file_path: string)
 
 --- @class agentic.ui.FilePicker.RootCache
@@ -135,6 +138,91 @@ local function to_root_relative_path(root, abs_path)
     return FileSystem.to_smart_path(abs_path)
 end
 
+--- @param files table[]
+local function sort_files(files)
+    table.sort(files, function(left, right)
+        local left_priority = left._root_priority or 1
+        local right_priority = right._root_priority or 1
+        if left_priority ~= right_priority then
+            return left_priority < right_priority
+        end
+
+        local left_gitignored = left._gitignored_priority or 0
+        local right_gitignored = right._gitignored_priority or 0
+        if left_gitignored ~= right_gitignored then
+            return left_gitignored < right_gitignored
+        end
+
+        return left.word < right.word
+    end)
+end
+
+--- @param item table
+--- @param relative_path string
+local function add_search_entry(item, relative_path)
+    if relative_path == "" then
+        return
+    end
+
+    local search_entries = item._search_entries or {}
+    local relative_path_lc = relative_path:lower()
+    for _, entry in ipairs(search_entries) do
+        if entry.path_lc == relative_path_lc then
+            return
+        end
+    end
+
+    local basename_lc = relative_path_lc:match("([^/]+)$") or relative_path_lc
+    search_entries[#search_entries + 1] = {
+        path_lc = relative_path_lc,
+        basename_lc = basename_lc,
+    }
+    item._search_entries = search_entries
+
+    local filter_parts = item._filter_parts or {}
+    filter_parts[#filter_parts + 1] = relative_path
+    item._filter_parts = filter_parts
+    item._filter_text = table.concat(filter_parts, " ")
+end
+
+--- @param root string
+--- @param abs_path string
+--- @return table|nil
+local function make_file_item(root, abs_path)
+    local relative_path = to_root_relative_path(root, abs_path)
+    if relative_path == "" then
+        return nil
+    end
+
+    local relative_path_lc = relative_path:lower()
+    local basename_lc = relative_path_lc:match("([^/]+)$") or relative_path_lc
+
+    --- @type table
+    local item = {
+        word = "@" .. relative_path,
+        menu = "File",
+        kind = "@",
+        icase = 1,
+        _abs_path = abs_path,
+        _path_lc = relative_path_lc,
+        _basename_lc = basename_lc,
+        _search_entries = {},
+        _filter_parts = {},
+        _filter_text = "",
+        _gitignored_priority = 0,
+    }
+
+    add_search_entry(item, relative_path)
+
+    return item
+end
+
+--- @param roots string[]
+--- @return string
+local function get_roots_key(roots)
+    return table.concat(roots, "\n")
+end
+
 --- @param bufnr number
 --- @param opts agentic.ui.FilePicker.Opts|nil
 --- @return agentic.ui.FilePicker|nil
@@ -151,8 +239,10 @@ function FilePicker:new(bufnr, opts)
         _bufnr = bufnr,
         _root = normalize_root(vim.fn.getcwd()),
         _resolve_root = opts.resolve_root,
+        _resolve_cwd = opts.resolve_cwd,
         _on_file_selected = opts.on_file_selected,
         _skip_auto_show_once = false,
+        _roots_key = nil,
     }, self)
     instance:_setup_blink_completion(bufnr)
     return instance
@@ -307,10 +397,50 @@ function FilePicker:_resolve_scan_root()
     return normalize_root(root)
 end
 
+--- @return string
+function FilePicker:_resolve_current_cwd()
+    local cwd = self._resolve_cwd and self._resolve_cwd() or vim.fn.getcwd()
+    if not cwd or cwd == "" then
+        cwd = vim.fn.getcwd()
+    end
+
+    return normalize_root(cwd)
+end
+
+--- @return string[]
+function FilePicker:_resolve_search_roots()
+    local roots = {}
+    local seen = {}
+
+    for _, root in ipairs({
+        self:_resolve_scan_root(),
+        self:_resolve_current_cwd(),
+    }) do
+        if root and root ~= "" and not seen[root] then
+            seen[root] = true
+            roots[#roots + 1] = root
+        end
+    end
+
+    return roots
+end
+
 --- @param path string
 --- @return string
 function FilePicker:resolve_path(path)
-    return to_absolute_path(self:_resolve_scan_root(), path)
+    local fallback = nil
+
+    for _, root in ipairs(self:_resolve_search_roots()) do
+        local abs_path = to_absolute_path(root, path)
+        fallback = fallback or abs_path
+
+        local stat = vim.uv.fs_stat(abs_path)
+        if stat then
+            return abs_path
+        end
+    end
+
+    return fallback or to_absolute_path(self:_resolve_scan_root(), path)
 end
 
 --- @param input_text string
@@ -361,7 +491,6 @@ function FilePicker:_build_file_items(output, root, ensure_exists)
             local abs_path = to_absolute_path(root, vim.trim(line))
             if not ensure_exists or vim.uv.fs_stat(abs_path) then
                 local relative_path = to_root_relative_path(root, abs_path)
-                local relative_path_lc = relative_path:lower()
 
                 if relative_path ~= "" then
                     if
@@ -369,17 +498,10 @@ function FilePicker:_build_file_items(output, root, ensure_exists)
                     then
                         if not seen[relative_path] then
                             seen[relative_path] = true
-                            table.insert(files, {
-                                word = "@" .. relative_path,
-                                menu = "File",
-                                kind = "@",
-                                icase = 1,
-                                _path_lc = relative_path_lc,
-                                _basename_lc = relative_path_lc:match(
-                                    "([^/]+)$"
-                                )
-                                    or relative_path_lc,
-                            })
+                            local item = make_file_item(root, abs_path)
+                            if item then
+                                table.insert(files, item)
+                            end
                         end
                     end
                 end
@@ -387,9 +509,7 @@ function FilePicker:_build_file_items(output, root, ensure_exists)
         end
     end
 
-    table.sort(files, function(a, b)
-        return a.word < b.word
-    end)
+    sort_files(files)
 
     return files
 end
@@ -433,21 +553,31 @@ function FilePicker:_filter_completion_items(query)
     }
 
     for _, item in ipairs(self._files) do
-        local path_lc = item._path_lc or item.word:sub(2):lower()
-        local basename_lc = item._basename_lc
-            or (path_lc:match("([^/]+)$") or path_lc)
-
         local bucket_index = nil
-        if basename_lc == normalized_query then
-            bucket_index = 1
-        elseif vim.startswith(basename_lc, normalized_query) then
-            bucket_index = 2
-        elseif has_component_prefix(path_lc, normalized_query) then
-            bucket_index = 3
-        elseif basename_lc:find(normalized_query, 1, true) then
-            bucket_index = 4
-        elseif path_lc:find(normalized_query, 1, true) then
-            bucket_index = 5
+        local search_entries = item._search_entries
+            or {
+                {
+                    path_lc = item._path_lc or item.word:sub(2):lower(),
+                    basename_lc = item._basename_lc,
+                },
+            }
+
+        for _, entry in ipairs(search_entries) do
+            local path_lc = entry.path_lc
+            local basename_lc = entry.basename_lc
+                or (path_lc:match("([^/]+)$") or path_lc)
+
+            if basename_lc == normalized_query then
+                bucket_index = bucket_index and math.min(bucket_index, 1) or 1
+            elseif vim.startswith(basename_lc, normalized_query) then
+                bucket_index = bucket_index and math.min(bucket_index, 2) or 2
+            elseif has_component_prefix(path_lc, normalized_query) then
+                bucket_index = bucket_index and math.min(bucket_index, 3) or 3
+            elseif basename_lc:find(normalized_query, 1, true) then
+                bucket_index = bucket_index and math.min(bucket_index, 4) or 4
+            elseif path_lc:find(normalized_query, 1, true) then
+                bucket_index = bucket_index and math.min(bucket_index, 5) or 5
+            end
         end
 
         if bucket_index then
@@ -484,6 +614,96 @@ function FilePicker:_store_files(root, files)
     self._files = files
 end
 
+--- @param roots string[]
+--- @return table[]
+function FilePicker:_merge_cached_files_for_roots(roots)
+    local merged = {}
+    local items_by_abs_path = {}
+
+    for root_index, root in ipairs(roots) do
+        local cache = self:_get_cached_files(root)
+        if cache then
+            for _, cached_item in ipairs(cache.files) do
+                local abs_path = cached_item._abs_path
+                if abs_path then
+                    local item = items_by_abs_path[abs_path]
+                    if not item then
+                        item = make_file_item(root, abs_path)
+                        if item then
+                            item._root_priority = root_index
+                            item._gitignored_priority = cached_item._gitignored_priority
+                                or 0
+                            items_by_abs_path[abs_path] = item
+                            merged[#merged + 1] = item
+                        end
+                    elseif root_index < (item._root_priority or math.huge) then
+                        local relative_path =
+                            to_root_relative_path(root, abs_path)
+                        item.word = "@" .. relative_path
+                        item._path_lc = relative_path:lower()
+                        item._basename_lc = item._path_lc:match("([^/]+)$")
+                            or item._path_lc
+                        item._root_priority = root_index
+                    end
+
+                    if item then
+                        item._gitignored_priority = math.min(
+                            item._gitignored_priority or 0,
+                            cached_item._gitignored_priority or 0
+                        )
+                        add_search_entry(
+                            item,
+                            to_root_relative_path(root, abs_path)
+                        )
+                    end
+                end
+            end
+        end
+    end
+
+    sort_files(merged)
+
+    return merged
+end
+
+--- @param roots string[]
+--- @return table[]
+function FilePicker:_refresh_files_for_roots(roots)
+    self._root = roots[1] or self:_resolve_scan_root()
+    self._files = self:_merge_cached_files_for_roots(roots)
+    return self._files
+end
+
+--- @param roots string[]
+--- @param callback fun(items: table[])
+--- @param transform fun(items: table[]): table[]
+function FilePicker:_request_items_for_roots(roots, callback, transform)
+    local request_key = get_roots_key(roots)
+    self._roots_key = request_key
+
+    callback(transform(self:_refresh_files_for_roots(roots)))
+
+    for _, root in ipairs(roots) do
+        local cache = self:_get_cached_files(root)
+        local needs_scan = cache == nil
+            or cache.scanning
+            or not self:_cache_is_fresh(root)
+
+        if needs_scan then
+            self:_scan_files_async(root, function()
+                if
+                    not vim.api.nvim_buf_is_valid(self._bufnr)
+                    or self._roots_key ~= request_key
+                then
+                    return
+                end
+
+                callback(transform(self:_refresh_files_for_roots(roots)))
+            end)
+        end
+    end
+end
+
 --- @param root string
 --- @return agentic.ui.FilePicker.RootCache|nil
 function FilePicker:_get_cached_files(root)
@@ -509,87 +729,18 @@ end
 --- @param query string
 --- @param callback fun(items: table[])
 function FilePicker:request_completion_items(query, callback)
-    local root = self:_resolve_scan_root()
-    local cache = self:_get_cached_files(root)
-    self._root = root
-
-    if cache then
-        self._files = cache.files
-    end
-
-    if cache then
-        callback(self:_filter_completion_items(query))
-    else
-        callback({})
-    end
-
-    if cache and (self:_cache_is_fresh(root) or cache.scanning) then
-        if cache.scanning then
-            self:_scan_files_async(root, function(files)
-                if
-                    not vim.api.nvim_buf_is_valid(self._bufnr)
-                    or self._root ~= root
-                then
-                    return
-                end
-
-                self._files = files
-                callback(self:_filter_completion_items(query))
-            end)
-        end
-
-        return
-    end
-
-    self:_scan_files_async(root, function(files)
-        if not vim.api.nvim_buf_is_valid(self._bufnr) or self._root ~= root then
-            return
-        end
-
-        self._files = files
-        callback(self:_filter_completion_items(query))
+    local roots = self:_resolve_search_roots()
+    self:_request_items_for_roots(roots, callback, function()
+        return self:_filter_completion_items(query)
     end)
 end
 
 --- Returns the raw cached source items for blink to fuzzy match itself.
 --- @param callback fun(items: table[])
 function FilePicker:request_source_items(callback)
-    local root = self:_resolve_scan_root()
-    local cache = self:_get_cached_files(root)
-    self._root = root
-
-    if cache then
-        self._files = cache.files
-        callback(cache.files)
-    else
-        callback({})
-    end
-
-    if cache and (self:_cache_is_fresh(root) or cache.scanning) then
-        if cache.scanning then
-            self:_scan_files_async(root, function(files)
-                if
-                    not vim.api.nvim_buf_is_valid(self._bufnr)
-                    or self._root ~= root
-                then
-                    return
-                end
-
-                self._files = files
-                callback(files)
-            end)
-        end
-
-        return
-    end
-
-    self:_scan_files_async(root, function(files)
-        if not vim.api.nvim_buf_is_valid(self._bufnr) or self._root ~= root then
-            return
-        end
-
-        self._files = files
-        callback(files)
+    local roots = self:_resolve_search_roots()
+    self:_request_items_for_roots(roots, callback, function(items)
+        return items
     end)
 end
 
@@ -817,6 +968,47 @@ function FilePicker:_should_exclude(path)
 end
 
 --- @param root string
+--- @param files table[]
+--- @return table<string, boolean>
+function FilePicker:_get_gitignored_relative_paths(root, files)
+    if #files == 0 or not is_executable(FilePicker.CMD_GIT[1]) then
+        return {}
+    end
+
+    local git_marker = vim.uv.fs_stat(root .. "/.git")
+    if not git_marker then
+        return {}
+    end
+
+    local relative_paths = {}
+    for _, item in ipairs(files) do
+        relative_paths[#relative_paths + 1] = item.word:sub(2)
+    end
+
+    local output = vim.fn.system({
+        "git",
+        "-C",
+        root,
+        "check-ignore",
+        "--stdin",
+    }, table.concat(relative_paths, "\n"))
+
+    if output == "" then
+        return {}
+    end
+
+    local ignored = {}
+    for line in output:gmatch("[^\n]+") do
+        local path = vim.trim(line)
+        if path ~= "" then
+            ignored[path] = true
+        end
+    end
+
+    return ignored
+end
+
+--- @param root string
 --- @return table[]
 function FilePicker:_scan_files_glob(root)
     Logger.debug("[FilePicker] All commands failed, using glob fallback")
@@ -837,27 +1029,29 @@ function FilePicker:_scan_files_glob(root)
 
     for _, path in ipairs(glob_files) do
         if vim.fn.isdirectory(path) == 0 then
-            local relative_path =
-                to_root_relative_path(root, vim.fs.normalize(path))
+            local normalized_path = vim.fs.normalize(path)
+            local relative_path = to_root_relative_path(root, normalized_path)
             if not self:_should_exclude(relative_path) then
                 if include_hidden or not has_hidden_segment(relative_path) then
                     if not seen[relative_path] then
                         seen[relative_path] = true
-                        table.insert(files, {
-                            word = "@" .. relative_path,
-                            menu = "File",
-                            kind = "@",
-                            icase = 1,
-                        })
+                        local item = make_file_item(root, normalized_path)
+                        if item then
+                            table.insert(files, item)
+                        end
                     end
                 end
             end
         end
     end
 
-    table.sort(files, function(a, b)
-        return a.word < b.word
-    end)
+    local gitignored_paths = self:_get_gitignored_relative_paths(root, files)
+    for _, item in ipairs(files) do
+        item._gitignored_priority = gitignored_paths[item.word:sub(2)] and 1
+            or 0
+    end
+
+    sort_files(files)
 
     return files
 end

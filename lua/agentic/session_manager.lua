@@ -17,6 +17,7 @@ local WidgetBinding = require("agentic.session.widget_binding")
 --- @class agentic.SessionManager
 --- @field instance_id? integer
 --- @field session_id? string
+--- @field _inline_session_id? string
 --- @field tab_page_id integer Current widget tab page
 --- @field _is_first_message boolean Whether this is the first message in the session, used to add system info only once
 --- @field is_generating boolean
@@ -34,14 +35,17 @@ local WidgetBinding = require("agentic.session.widget_binding")
 --- @field config_options agentic.acp.AgentConfigOptions
 --- @field todo_list agentic.ui.TodoList
 --- @field file_picker? agentic.ui.FilePicker
+--- @field skill_picker? agentic.ui.SkillPicker
 --- @field session_state agentic.session.SessionState
 --- @field submission_queue agentic.session.SubmissionQueue
 --- @field _restored_turns_to_send? agentic.session.InteractionTurn[] Restored turns to prepend on the next prompt submit
 --- @field _restoring boolean Flag to prevent auto-new_session during restore
 --- @field _agent_phase? agentic.Theme.SpinnerState
 --- @field _session_starting boolean
+--- @field _inline_session_starting boolean
 --- @field _session_state_subscription? integer
 --- @field _pending_session_callbacks fun()[]
+--- @field _pending_inline_session_callbacks fun()[]
 --- @field _restoring_widget_state? boolean
 --- @field _editor_winid? integer
 local SessionManager = {}
@@ -59,6 +63,7 @@ function SessionManager:new(opts)
     self = setmetatable({
         instance_id = opts.instance_id,
         session_id = nil,
+        _inline_session_id = nil,
         tab_page_id = widget_tab_page_id,
         _is_first_message = true,
         is_generating = false,
@@ -66,7 +71,9 @@ function SessionManager:new(opts)
         submission_queue = SubmissionQueue:new(),
         _agent_phase = nil,
         _session_starting = false,
+        _inline_session_starting = false,
         _pending_session_callbacks = {},
+        _pending_inline_session_callbacks = {},
     }, self)
 
     if not SessionController.initialize_agent(self) then
@@ -150,9 +157,31 @@ function SessionManager:_ensure_session_started()
     SessionController.ensure_session_started(self)
 end
 
+function SessionManager:_drain_pending_inline_session_callbacks()
+    SessionController.drain_pending_inline_session_callbacks(self)
+end
+
+function SessionManager:_ensure_inline_session_started()
+    SessionController.ensure_inline_session_started(self)
+end
+
 --- @param callback fun()
 function SessionManager:_with_active_session(callback)
     SessionController.with_active_session(self, callback)
+end
+
+--- @param callback fun()
+function SessionManager:_with_active_inline_session(callback)
+    SessionController.with_active_inline_session(self, callback)
+end
+
+--- @param opts {on_created: fun()|nil}|nil
+function SessionManager:_start_inline_session(opts)
+    SessionController.start_inline_session(self, opts)
+end
+
+function SessionManager:_cancel_inline_session()
+    SessionController.cancel_inline_session(self)
 end
 
 --- @param input_text string
@@ -190,26 +219,44 @@ function SessionManager:_get_active_tool_activity()
     return SessionController.get_active_tool_activity(self)
 end
 
+--- @return string|nil
+function SessionManager:get_active_generation_session_id()
+    if
+        self.inline_chat
+        and self.inline_chat.is_active
+        and self.inline_chat:is_active()
+        and self._inline_session_id
+    then
+        return self._inline_session_id
+    end
+
+    return self.session_id
+end
+
 --- @param update agentic.acp.SessionUpdateMessage
-function SessionManager:_on_session_update(update)
-    SessionController.on_session_update(self, update)
+--- @param opts {route?: "chat"|"inline"|nil}|nil
+function SessionManager:_on_session_update(update, opts)
+    SessionController.on_session_update(self, update, opts)
 end
 
 --- @param tool_call agentic.ui.MessageWriter.ToolCallBlock
-function SessionManager:_on_tool_call(tool_call)
-    SessionController.on_tool_call(self, tool_call)
+--- @param opts {route?: "chat"|"inline"|nil}|nil
+function SessionManager:_on_tool_call(tool_call, opts)
+    SessionController.on_tool_call(self, tool_call, opts)
 end
 
 --- Handle tool call update: update UI, history, diff preview, permissions, and reload buffers
 --- @param tool_call_update agentic.ui.MessageWriter.ToolCallBlock
-function SessionManager:_on_tool_call_update(tool_call_update)
-    SessionController.on_tool_call_update(self, tool_call_update)
+--- @param opts {route?: "chat"|"inline"|nil}|nil
+function SessionManager:_on_tool_call_update(tool_call_update, opts)
+    SessionController.on_tool_call_update(self, tool_call_update, opts)
 end
 
 --- @param request agentic.acp.RequestPermission
 --- @param callback fun(option_id: string|nil)
-function SessionManager:_handle_permission_request(request, callback)
-    SessionController.handle_permission_request(self, request, callback)
+--- @param opts {route?: "chat"|"inline"|nil}|nil
+function SessionManager:_handle_permission_request(request, callback, opts)
+    SessionController.handle_permission_request(self, request, callback, opts)
 end
 
 --- Send a generic config option update to the agent
@@ -224,7 +271,7 @@ function SessionManager:_render_window_headers()
 end
 
 --- @param input_text string
---- @param opts {code_selection?: agentic.ui.CodeSelection|nil, file_list?: agentic.ui.FileList|nil, diagnostics_list?: agentic.ui.DiagnosticsList|nil, chat_winid?: integer|nil, selections?: agentic.Selection[]|nil, inline_instructions?: string|nil, surface?: "chat"|"inline"|nil}
+--- @param opts {code_selection?: agentic.ui.CodeSelection|nil, file_list?: agentic.ui.FileList|nil, diagnostics_list?: agentic.ui.DiagnosticsList|nil, chat_winid?: integer|nil, selections?: agentic.Selection[]|nil, inline_instructions?: string|nil, surface?: "chat"|"inline"|nil, include_system_info?: boolean|nil, use_session_context?: boolean|nil}
 --- @return agentic.SessionManager.QueuedSubmission
 function SessionManager:_prepare_submission(input_text, opts)
     return SubmissionController.prepare_submission(self, input_text, opts)
@@ -400,13 +447,33 @@ function SessionManager:_get_workspace_root()
     return WidgetBinding.get_workspace_root(self)
 end
 
+--- @return string
+function SessionManager:_get_current_cwd()
+    return WidgetBinding.get_current_cwd(self)
+end
+
+--- @param available_commands agentic.acp.AvailableCommand[]|nil
+function SessionManager:_sync_prompt_commands(available_commands)
+    WidgetBinding.sync_prompt_commands(self, available_commands)
+end
+
 --- @param new_config_options agentic.acp.ConfigOption[]|nil
 function SessionManager:_handle_new_config_options(new_config_options)
     WidgetBinding.handle_new_config_options(self, new_config_options)
 end
 
+--- @param input_text string
+--- @return boolean handled
+function SessionManager:_handle_local_slash_command(input_text)
+    return require("agentic.acp.codex_local_commands").handle_input(
+        self,
+        input_text
+    )
+end
+
 function SessionManager:destroy()
     self.session_state:unsubscribe(self._session_state_subscription)
+    self:_cancel_inline_session()
     self:_cancel_session()
     self.inline_chat:destroy()
     self.review_controller:destroy()

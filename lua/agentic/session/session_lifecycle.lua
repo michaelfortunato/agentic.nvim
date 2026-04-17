@@ -3,8 +3,6 @@ local Config = require("agentic.config")
 local Logger = require("agentic.utils.logger")
 local SessionEvents = require("agentic.session.session_events")
 local SessionSelectors = require("agentic.session.session_selectors")
-local SlashCommands = require("agentic.acp.slash_commands")
-
 local SessionLifecycle = {}
 
 --- @param value any
@@ -50,8 +48,11 @@ local function call_session_method(session, method_name, ...)
 end
 
 --- @param session agentic.SessionManager
+--- @param opts {route?: "chat"|"inline"|nil}|nil
 --- @return agentic.acp.ClientHandlers
-local function build_handlers(session)
+local function build_handlers(session, opts)
+    local handler_opts = opts or {}
+
     return {
         on_error = function(err)
             Logger.debug("Agent error: ", err)
@@ -72,13 +73,23 @@ local function build_handlers(session)
 
         on_session_update = function(update)
             if get_session_method(session, "_on_session_update") then
-                call_session_method(session, "_on_session_update", update)
+                call_session_method(
+                    session,
+                    "_on_session_update",
+                    update,
+                    handler_opts
+                )
             end
         end,
 
         on_tool_call = function(tool_call)
             if get_session_method(session, "_on_tool_call") then
-                call_session_method(session, "_on_tool_call", tool_call)
+                call_session_method(
+                    session,
+                    "_on_tool_call",
+                    tool_call,
+                    handler_opts
+                )
             end
         end,
 
@@ -87,7 +98,8 @@ local function build_handlers(session)
                 call_session_method(
                     session,
                     "_on_tool_call_update",
-                    tool_call_update
+                    tool_call_update,
+                    handler_opts
                 )
             end
         end,
@@ -98,7 +110,8 @@ local function build_handlers(session)
                     session,
                     "_handle_permission_request",
                     request,
-                    callback
+                    callback,
+                    handler_opts
                 )
             end
         end,
@@ -134,20 +147,15 @@ local function config_option_supports_value(option, value)
     return false
 end
 
---- @param session agentic.SessionManager
+--- @param desired_options agentic.acp.ConfigOption[]|nil
 --- @param announced_options agentic.acp.ConfigOption[]|nil
 --- @return {id: string, value: string}[] changes
 --- @return boolean restores_mode
-local function get_restorable_config_changes(session, announced_options)
-    local persisted_session = session.session_state
-            and session.session_state.get_persisted_session_data
-            and session.session_state:get_persisted_session_data()
-        or nil
-    local persisted_options = persisted_session
-            and persisted_session.config_options
-        or {}
-
-    if #persisted_options == 0 or type(announced_options) ~= "table" then
+local function get_config_changes(desired_options, announced_options)
+    if
+        type(desired_options) ~= "table"
+        or type(announced_options) ~= "table"
+    then
         return {}, false
     end
 
@@ -159,9 +167,9 @@ local function get_restorable_config_changes(session, announced_options)
     local restores_mode = false
     local changes = {}
 
-    for _, persisted_option in ipairs(persisted_options) do
-        local announced_option = announced_by_id[persisted_option.id]
-        local desired_value = persisted_option.currentValue
+    for _, desired_option in ipairs(desired_options) do
+        local announced_option = announced_by_id[desired_option.id]
+        local desired_value = desired_option.currentValue
 
         if
             announced_option
@@ -181,6 +189,33 @@ local function get_restorable_config_changes(session, announced_options)
     end
 
     return changes, restores_mode
+end
+
+--- @param session agentic.SessionManager
+--- @param announced_options agentic.acp.ConfigOption[]|nil
+--- @return {id: string, value: string}[] changes
+--- @return boolean restores_mode
+local function get_restorable_config_changes(session, announced_options)
+    local persisted_session = session.session_state
+            and session.session_state.get_persisted_session_data
+            and session.session_state:get_persisted_session_data()
+        or nil
+    local persisted_options = persisted_session
+            and persisted_session.config_options
+        or {}
+
+    return get_config_changes(persisted_options, announced_options)
+end
+
+--- @param session agentic.SessionManager
+--- @param announced_options agentic.acp.ConfigOption[]|nil
+--- @return {id: string, value: string}[] changes
+local function get_inline_config_changes(session, announced_options)
+    local config_options = session.config_options
+    local desired_options = config_options and config_options._options or {}
+    local changes = get_config_changes(desired_options, announced_options)
+
+    return changes
 end
 
 --- @param session agentic.SessionManager
@@ -205,9 +240,20 @@ local function update_local_config_option_value(session, config_id, value)
 end
 
 --- @param session agentic.SessionManager
+--- @param target_session_id string|nil
 --- @param changes {id: string, value: string}[]
 --- @param callback fun()
-local function restore_config_changes(session, changes, callback)
+local function restore_config_changes(
+    session,
+    target_session_id,
+    changes,
+    callback
+)
+    if target_session_id == nil then
+        callback()
+        return
+    end
+
     local change = table.remove(changes, 1)
     if not change then
         callback()
@@ -215,7 +261,7 @@ local function restore_config_changes(session, changes, callback)
     end
 
     session.agent:set_config_option(
-        session.session_id,
+        target_session_id,
         change.id,
         change.value,
         function(result, err)
@@ -240,13 +286,33 @@ local function restore_config_changes(session, changes, callback)
                 )
             end
 
-            restore_config_changes(session, changes, callback)
+            restore_config_changes(
+                session,
+                target_session_id,
+                changes,
+                callback
+            )
         end
     )
 end
 
 --- @param session agentic.SessionManager
+function SessionLifecycle.cancel_inline(session)
+    if session._inline_session_id then
+        session.agent:cancel_session(session._inline_session_id)
+    end
+
+    session._inline_session_id = nil
+    session._inline_session_starting = false
+    session._pending_inline_session_callbacks = {}
+end
+
+--- @param session agentic.SessionManager
 function SessionLifecycle.cancel(session)
+    if get_session_method(session, "_cancel_inline_session") then
+        call_session_method(session, "_cancel_inline_session")
+    end
+
     if session.session_id then
         session.agent:cancel_session(session.session_id)
         session.widget:clear()
@@ -270,7 +336,14 @@ function SessionLifecycle.cancel(session)
         session.status_animation:stop()
     end
     session.permission_manager:clear()
-    SlashCommands.setCommands(session.widget.buf_nrs.input, {})
+    if get_session_method(session, "_sync_prompt_commands") then
+        call_session_method(session, "_sync_prompt_commands", {})
+    else
+        require("agentic.session.widget_binding").sync_prompt_commands(
+            session,
+            {}
+        )
+    end
 
     session.session_state:replace_persisted_session_data()
     session._restored_turns_to_send = nil
@@ -364,19 +437,24 @@ function SessionLifecycle.start(session, opts)
                     end
 
                     if #changes > 0 then
-                        restore_config_changes(session, changes, function()
-                            apply_initial_mode()
+                        restore_config_changes(
+                            session,
+                            session.session_id,
+                            changes,
+                            function()
+                                apply_initial_mode()
 
-                            if not restore_mode then
-                                session._is_first_message = true
-                            end
-
-                            vim.schedule(function()
-                                if on_created then
-                                    on_created()
+                                if not restore_mode then
+                                    session._is_first_message = true
                                 end
-                            end)
-                        end)
+
+                                vim.schedule(function()
+                                    if on_created then
+                                        on_created()
+                                    end
+                                end)
+                            end
+                        )
                         return
                     end
 
@@ -395,6 +473,55 @@ function SessionLifecycle.start(session, opts)
             end
 
             finish_session_setup()
+        end
+    )
+end
+
+--- @param session agentic.SessionManager
+--- @param opts {on_created: fun()|nil}|nil
+function SessionLifecycle.start_inline(session, opts)
+    opts = opts or {}
+    local on_created = opts.on_created
+    local pending_callbacks = session._pending_inline_session_callbacks or {}
+
+    SessionLifecycle.cancel_inline(session)
+    session._pending_inline_session_callbacks = pending_callbacks
+    session._inline_session_starting = true
+
+    session.agent:create_session(
+        build_handlers(session, { route = "inline" }),
+        function(response, err)
+            session._inline_session_starting = false
+
+            if err or not response then
+                session._inline_session_id = nil
+                return
+            end
+
+            session._inline_session_id = response.sessionId
+
+            local function finish_inline_setup()
+                vim.schedule(function()
+                    if on_created then
+                        on_created()
+                    end
+                end)
+            end
+
+            local changes =
+                get_inline_config_changes(session, response.configOptions)
+
+            if #changes > 0 then
+                restore_config_changes(
+                    session,
+                    session._inline_session_id,
+                    changes,
+                    finish_inline_setup
+                )
+                return
+            end
+
+            finish_inline_setup()
         end
     )
 end
@@ -456,6 +583,8 @@ function SessionLifecycle.switch_provider(session)
     if not new_agent then
         return
     end
+
+    SessionLifecycle.cancel_inline(session)
 
     if old_session_id then
         old_agent:cancel_session(old_session_id)

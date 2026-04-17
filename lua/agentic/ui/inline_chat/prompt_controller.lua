@@ -11,6 +11,53 @@ local M = {}
 
 local KEYMAP_HELP_KEY = "?"
 
+--- @return integer
+local function get_prompt_min_height()
+    return math.max(1, Config.inline.prompt_height)
+end
+
+--- @param prompt agentic.ui.InlineChat.PromptState
+--- @return integer
+local function get_prompt_max_height(prompt)
+    local min_height = get_prompt_min_height()
+
+    if
+        not prompt.source_winid
+        or not vim.api.nvim_win_is_valid(prompt.source_winid)
+    then
+        return min_height
+    end
+
+    return math.max(
+        min_height,
+        vim.api.nvim_win_get_height(prompt.source_winid) - 2
+    )
+end
+
+--- @param prompt agentic.ui.InlineChat.PromptState
+local function refresh_prompt_height(prompt)
+    if
+        not prompt.prompt_winid
+        or not vim.api.nvim_win_is_valid(prompt.prompt_winid)
+    then
+        return
+    end
+
+    local min_height = get_prompt_min_height()
+    local max_height = get_prompt_max_height(prompt)
+    local text_height = vim.api.nvim_win_text_height(prompt.prompt_winid, {
+        max_height = max_height,
+    })
+    local target_height =
+        math.max(min_height, math.min(max_height, text_height.all))
+
+    if vim.api.nvim_win_get_height(prompt.prompt_winid) == target_height then
+        return
+    end
+
+    vim.api.nvim_win_set_config(prompt.prompt_winid, { height = target_height })
+end
+
 --- @param bufnr integer|nil
 --- @param winid integer|nil
 --- @return integer resolved_bufnr
@@ -80,7 +127,7 @@ function M.open(self, selection, opts)
     local prompt_width = math.max(24, Config.inline.prompt_width)
     local win_width = vim.api.nvim_win_get_width(source_winid)
     local width = math.min(prompt_width, math.max(24, win_width - 6))
-    local height = math.max(1, Config.inline.prompt_height)
+    local height = get_prompt_min_height()
     local footer = M.build_prompt_footer()
 
     vim.bo[prompt_bufnr].buftype = "nofile"
@@ -130,6 +177,8 @@ function M.open(self, selection, opts)
     }
 
     M.bind_keymaps(self)
+    M.bind_autocmds(self)
+    refresh_prompt_height(self._prompt)
     vim.cmd("startinsert")
     return true
 end
@@ -208,6 +257,29 @@ function M.bind_keymaps(self)
         end,
         { desc = "Agentic: Inline approval selector" }
     )
+end
+
+--- @param self agentic.ui.InlineChat
+function M.bind_autocmds(self)
+    local prompt = self._prompt
+    if not prompt then
+        return
+    end
+
+    vim.api.nvim_create_autocmd({ "TextChangedI", "TextChanged" }, {
+        buffer = prompt.prompt_bufnr,
+        callback = function()
+            local current_prompt = self._prompt
+            if
+                not current_prompt
+                or current_prompt.prompt_bufnr ~= prompt.prompt_bufnr
+            then
+                return
+            end
+
+            refresh_prompt_height(current_prompt)
+        end,
+    })
 end
 
 --- @param self agentic.ui.InlineChat

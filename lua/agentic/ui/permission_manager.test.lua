@@ -2,6 +2,8 @@
 local assert = require("tests.helpers.assert")
 local spy = require("tests.helpers.spy")
 
+local FileSystem = require("agentic.utils.file_system")
+local ReviewState = require("agentic.ui.diff_preview.review_state")
 local SessionEvents = require("agentic.session.session_events")
 local SessionState = require("agentic.session.session_state")
 
@@ -139,7 +141,12 @@ describe("agentic.ui.PermissionManager", function()
     it("uses the diff review handler instead of opening the chooser", function()
         local callback = spy.new(function() end)
         local review_handler = spy.new(function()
-            return true
+            return {
+                interactive = true,
+                bufnr = bufnr,
+                review_key = "test-session:tc-review-1",
+                mode = "inline",
+            }
         end)
 
         add_tool_call("tc-review-1", "edit")
@@ -156,6 +163,32 @@ describe("agentic.ui.PermissionManager", function()
         assert.equal("allow-once", callback.calls[1][1])
         assert.is_nil(pm.current_request)
     end)
+
+    it(
+        "falls back to the chooser when review activation is not interactive",
+        function()
+            local callback = spy.new(function() end)
+            local review_handler = spy.new(function()
+                return {
+                    interactive = false,
+                    bufnr = nil,
+                    review_key = nil,
+                    mode = "none",
+                }
+            end)
+
+            add_tool_call("tc-review-fallback", "edit")
+            pm:set_diff_review_handler(review_handler --[[@as function]])
+            pm:add_request(
+                make_request("tc-review-fallback"),
+                callback --[[@as function]]
+            )
+
+            assert.spy(review_handler).was.called(1)
+            assert.spy(chooser_show_stub).was.called(1)
+            assert.equal("tc-review-fallback", pm.current_request.toolCallId)
+        end
+    )
 
     it("completes the request when a choice is selected", function()
         local callback = spy.new(function() end)
@@ -186,6 +219,121 @@ describe("agentic.ui.PermissionManager", function()
         assert.equal(0, #pm.queue)
         assert.spy(chooser_close_stub).was.called(1)
     end)
+
+    it(
+        "applies preserved accepted hunks before chooser rejection completes",
+        function()
+            local callback = spy.new(function() end)
+            local read_stub = spy.stub(FileSystem, "read_from_buffer_or_disk")
+            local file_path = vim.fn.tempname() .. ".lua"
+            local original_lines = {
+                "local first = 1",
+                "print(first)",
+                "",
+                "local second = 2",
+                "print(second)",
+                "",
+            }
+
+            vim.fn.writefile(original_lines, file_path)
+            read_stub:invokes(function()
+                return vim.deepcopy(original_lines), nil
+            end)
+            session_state:dispatch(SessionEvents.append_interaction_request({
+                kind = "user",
+                text = "approve this partial edit",
+                timestamp = 1,
+                content = {
+                    { type = "text", text = "approve this partial edit" },
+                },
+            }))
+            session_state:dispatch(
+                SessionEvents.upsert_interaction_tool_call("Codex ACP", {
+                    tool_call_id = "tc-review-partial",
+                    kind = "edit",
+                    status = "pending",
+                    file_path = file_path,
+                    diff = {
+                        old = vim.deepcopy(original_lines),
+                        new = {
+                            "local first = 10",
+                            "print(first)",
+                            "",
+                            "local second = 20",
+                            "print(second)",
+                            "",
+                        },
+                    },
+                })
+            )
+
+            local review_key = ReviewState.create_review_key(
+                "test-session",
+                "tc-review-partial"
+            )
+            assert.is_not_nil(review_key)
+            --- @cast review_key string
+            local review_session = ReviewState.create_review_session(
+                file_path,
+                {
+                    {
+                        start_line = 1,
+                        end_line = 1,
+                        old_lines = { "local first = 1" },
+                        new_lines = { "local first = 10" },
+                    },
+                    {
+                        start_line = 4,
+                        end_line = 4,
+                        old_lines = { "local second = 2" },
+                        new_lines = { "local second = 20" },
+                    },
+                },
+                {
+                    on_accept = function() end,
+                    on_reject = function() end,
+                },
+                false,
+                {
+                    review_key = review_key,
+                    tool_call_id = "tc-review-partial",
+                }
+            )
+
+            review_session.accepted_block_ids = { 1 }
+            review_session.pending_block_ids = { 2 }
+            review_session.needs_review = true
+            ReviewState.set_review_session(
+                review_key,
+                review_session,
+                vim.api.nvim_get_current_tabpage()
+            )
+
+            pm:add_request(
+                make_request("tc-review-partial"),
+                callback --[[@as function]]
+            )
+
+            shown_callback(shown_items[2])
+
+            assert.spy(callback).was.called(1)
+            assert.equal("reject-once", callback.calls[1][1])
+            assert.same({
+                "local first = 10",
+                "print(first)",
+                "",
+                "local second = 2",
+                "print(second)",
+            }, vim.fn.readfile(file_path))
+
+            ReviewState.remove_review_session(
+                review_key,
+                vim.api.nvim_get_current_tabpage()
+            )
+            read_stub:revert()
+            os.remove(file_path)
+        end
+    )
 
     it("maps escape to the default reject option", function()
         local callback = spy.new(function() end)

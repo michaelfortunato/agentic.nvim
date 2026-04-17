@@ -785,6 +785,23 @@ describe("agentic.ui.ChatWidget", function()
             end)
 
             it(
+                "lets the todo window keep growing as tasks are added",
+                function()
+                    local lines = {}
+                    for i = 1, 12 do
+                        lines[i] = "task " .. i
+                    end
+                    fill_buffer(widget, "todos", lines)
+
+                    widget:show()
+
+                    local height =
+                        vim.api.nvim_win_get_height(widget.win_nrs.todos)
+                    assert.equal(12 + padding, height)
+                end
+            )
+
+            it(
                 string.format("dynamic window uses %d line(s) padding", padding),
                 function()
                     fill_buffer(widget, "code", { "line1", "line2", "line3" })

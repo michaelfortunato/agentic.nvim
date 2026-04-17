@@ -297,28 +297,44 @@ describe("agentic.SessionManager", function()
         --- @type TestStub
         local file_picker_new_stub
         --- @type TestStub
+        local skill_picker_new_stub
+        --- @type TestStub
         local setup_completion_stub
         --- @type table
         local mock_picker
+        --- @type table
+        local mock_skill_picker
         --- @type agentic.SessionManager
         local session
 
         before_each(function()
             local FilePicker = require("agentic.ui.file_picker")
+            local SkillPicker = require("agentic.ui.skill_picker")
             local SlashCommands = require("agentic.acp.slash_commands")
 
             test_bufnr = vim.api.nvim_create_buf(false, true)
             mock_picker = { _bufnr = test_bufnr }
+            mock_skill_picker = { _bufnr = test_bufnr }
             file_picker_new_stub = spy.stub(FilePicker, "new")
             file_picker_new_stub:returns(mock_picker)
+            skill_picker_new_stub = spy.stub(SkillPicker, "new")
+            skill_picker_new_stub:returns(mock_skill_picker)
             setup_completion_stub = spy.stub(SlashCommands, "setup_completion")
 
             session = {
+                agent = {
+                    provider_config = {
+                        name = "Codex",
+                    },
+                },
                 widget = {
                     buf_nrs = { input = test_bufnr },
                 },
                 _get_workspace_root = function()
                     return "/tmp/agentic-workspace"
+                end,
+                _get_current_cwd = function()
+                    return "/tmp/agentic-workspace/packages/app"
                 end,
                 _setup_prompt_completion = SessionManager._setup_prompt_completion,
             } --[[@as agentic.SessionManager]]
@@ -326,18 +342,29 @@ describe("agentic.SessionManager", function()
 
         after_each(function()
             file_picker_new_stub:revert()
+            skill_picker_new_stub:revert()
             setup_completion_stub:revert()
             vim.api.nvim_buf_delete(test_bufnr, { force = true })
         end)
 
-        it("keeps a strong file picker reference on the session", function()
+        it("keeps prompt completion helpers on the session", function()
             session:_setup_prompt_completion()
 
             assert.equal(mock_picker, session.file_picker)
+            assert.equal(mock_skill_picker, session.skill_picker)
             assert.equal(test_bufnr, file_picker_new_stub.calls[1][2])
             assert.equal(
                 "/tmp/agentic-workspace",
                 file_picker_new_stub.calls[1][3].resolve_root()
+            )
+            assert.equal(
+                "/tmp/agentic-workspace/packages/app",
+                file_picker_new_stub.calls[1][3].resolve_cwd()
+            )
+            assert.equal(test_bufnr, skill_picker_new_stub.calls[1][2])
+            assert.equal(
+                "/tmp/agentic-workspace",
+                skill_picker_new_stub.calls[1][3].resolve_workspace_root()
             )
             assert.equal(test_bufnr, setup_completion_stub.calls[1][1])
         end)
@@ -885,6 +912,7 @@ describe("agentic.SessionManager", function()
                 } --[[@as agentic.SessionManager]]
 
                 session:_handle_permission_request({
+                    sessionId = "sess-perm-1",
                     toolCall = { toolCallId = "tc-perm-1" },
                     options = {
                         {
@@ -948,6 +976,7 @@ describe("agentic.SessionManager", function()
                 } --[[@as agentic.SessionManager]]
 
                 session:_handle_permission_request({
+                    sessionId = "sess-perm-kind-1",
                     toolCall = { toolCallId = "tc-perm-kind-1" },
                     options = {
                         {
@@ -1005,6 +1034,7 @@ describe("agentic.SessionManager", function()
                 } --[[@as agentic.SessionManager]]
 
                 session:_handle_permission_request({
+                    sessionId = "sess-perm-kind-2",
                     toolCall = { toolCallId = "tc-perm-kind-2" },
                     options = {
                         {
@@ -1070,6 +1100,7 @@ describe("agentic.SessionManager", function()
             } --[[@as agentic.SessionManager]]
 
             session:_handle_permission_request({
+                sessionId = "sess-perm-resume-1",
                 toolCall = { toolCallId = "tc-perm-resume-1" },
                 options = {
                     {
@@ -1709,6 +1740,13 @@ describe("agentic.SessionManager", function()
             assert.spy(dispatch_spy).was.called(1)
 
             local submission = dispatch_spy.calls[1][2]
+            local prompt_text = {}
+            for _, item in ipairs(submission.prompt) do
+                if item.type == "text" and item.text then
+                    prompt_text[#prompt_text + 1] = item.text
+                end
+            end
+            local combined_prompt = table.concat(prompt_text, "\n")
             assert.equal("Refactor the selection", submission.input_text)
             assert.is_not_nil(submission.inline_request)
             assert.equal("Refactor the selection", submission.prompt[1].text)
@@ -1716,13 +1754,9 @@ describe("agentic.SessionManager", function()
                 PromptBuilder.build_inline_instructions(),
                 submission.prompt[2].text
             )
-            assert.truthy(submission.prompt[4].text:match("<selected_code>"))
-            assert.truthy(
-                submission.prompt[4].text:match("<col_start>7</col_start>")
-            )
-            assert.truthy(
-                submission.prompt[4].text:match("<col_end>12</col_end>")
-            )
+            assert.truthy(combined_prompt:match("<selected_code>"))
+            assert.truthy(combined_prompt:match("<col_start>7</col_start>"))
+            assert.truthy(combined_prompt:match("<col_end>12</col_end>"))
         end)
 
         it("queues inline requests while the agent is busy", function()
@@ -1773,41 +1807,23 @@ describe("agentic.SessionManager", function()
         end)
 
         it(
-            "waits for the first ACP session before sending inline requests",
+            "dispatches inline requests without depending on the chat session",
             function()
-                local queue_request_spy = spy.new(function() end)
                 local dispatch_spy = spy.new(function() end)
-                local new_session_spy = spy.new(function(_self, opts)
-                    _self._captured_on_created = opts.on_created
-                end)
 
                 local session = {
                     session_id = nil,
                     is_generating = false,
-                    _session_starting = false,
-                    _pending_session_callbacks = {},
                     _restored_turns_to_send = nil,
                     _is_first_message = false,
-                    submission_queue = SubmissionQueue:new(),
                     agent = {
                         state = "ready",
                         provider_config = { name = "Codex" },
                     },
                     session_state = SessionState:new(),
-                    inline_chat = {
-                        queue_request = queue_request_spy,
-                        sync_queued_requests = function() end,
-                    },
-                    new_session = new_session_spy,
                     _render_window_headers = function() end,
                     _prepare_submission = SessionManager._prepare_submission,
                     _dispatch_submission = dispatch_spy,
-                    _enqueue_submission = SessionManager._enqueue_submission,
-                    _drain_queued_submissions = SessionManager._drain_queued_submissions,
-                    _drain_pending_session_callbacks = SessionManager._drain_pending_session_callbacks,
-                    _ensure_session_started = SessionManager._ensure_session_started,
-                    _sync_queue_panel = function() end,
-                    _sync_inline_queue_states = SessionManager._sync_inline_queue_states,
                     _submit_inline_request = SessionManager._submit_inline_request,
                 } --[[@as agentic.SessionManager]]
 
@@ -1825,16 +1841,11 @@ describe("agentic.SessionManager", function()
                 })
 
                 assert.is_true(accepted)
-                assert.spy(new_session_spy).was.called(1)
-                assert.is_true(new_session_spy.calls[1][2].restore_mode)
-                assert.equal(1, session.submission_queue:count())
-                assert.spy(queue_request_spy).was.called(1)
-                assert.spy(dispatch_spy).was.called(0)
-
-                session.session_id = "sess-inline-queued"
-                session._captured_on_created()
-
                 assert.spy(dispatch_spy).was.called(1)
+
+                local submission = dispatch_spy.calls[1][2]
+                assert.is_not_nil(submission.inline_request)
+                assert.equal("inline", submission.request.surface)
             end
         )
     end)
@@ -1943,6 +1954,60 @@ describe("agentic.SessionManager", function()
                 assert.equal("hello", dispatch_spy.calls[1][2].input_text)
             end
         )
+
+        it(
+            "handles local Codex slash commands without starting a session",
+            function()
+                local new_session_spy = spy.new(function() end)
+                local local_command_spy = spy.new(function()
+                    return true
+                end)
+
+                local session = {
+                    session_id = nil,
+                    is_generating = false,
+                    _session_starting = false,
+                    _pending_session_callbacks = {},
+                    _restored_turns_to_send = nil,
+                    _is_first_message = false,
+                    agent = {
+                        state = "ready",
+                        provider_config = { name = "Codex" },
+                    },
+                    session_state = SessionState:new(),
+                    submission_queue = SubmissionQueue:new(),
+                    todo_list = {
+                        close_if_all_completed = function() end,
+                    },
+                    code_selection = {
+                        is_empty = function()
+                            return true
+                        end,
+                    },
+                    file_list = {
+                        is_empty = function()
+                            return true
+                        end,
+                    },
+                    diagnostics_list = {
+                        is_empty = function()
+                            return true
+                        end,
+                    },
+                    widget = {
+                        win_nrs = {},
+                    },
+                    new_session = new_session_spy,
+                    _handle_local_slash_command = local_command_spy,
+                    _handle_input_submit = SessionManager._handle_input_submit,
+                } --[[@as agentic.SessionManager]]
+
+                session:_handle_input_submit("/skills")
+
+                assert.spy(local_command_spy).was.called(1)
+                assert.spy(new_session_spy).was.called(0)
+            end
+        )
     end)
 
     describe("_dispatch_submission", function()
@@ -1982,6 +2047,125 @@ describe("agentic.SessionManager", function()
                 0,
                 #session.session_state:get_state().interaction.turns
             )
+        end)
+
+        it("creates a fresh ACP session for each inline submission", function()
+            local schedule_stub = spy.stub(vim, "schedule")
+            schedule_stub:invokes(function(callback)
+                callback()
+            end)
+
+            local created_session_ids = {}
+            local send_prompt_spy = spy.new(
+                function(_agent, _session_id, _prompt, callback)
+                    callback({ stopReason = "end_turn" }, nil)
+                end
+            )
+            local cancel_session_spy = spy.new(function() end)
+            local begin_request_spy = spy.new(function() end)
+            local complete_spy = spy.new(function() end)
+            local save_stub
+            local session_state = SessionState:new()
+
+            save_stub = spy.stub(session_state, "save_persisted_session_data")
+            save_stub:invokes(function(_self, callback)
+                if callback then
+                    callback(nil)
+                end
+            end)
+
+            local session = {
+                session_id = nil,
+                _inline_session_id = nil,
+                is_generating = false,
+                _inline_session_starting = false,
+                _pending_inline_session_callbacks = {},
+                tab_page_id = 3,
+                session_state = session_state,
+                config_options = { _options = {} },
+                agent = {
+                    state = "ready",
+                    provider_config = { name = "Codex" },
+                    create_session = spy.new(
+                        function(_agent, _handlers, callback)
+                            local session_id = "inline-"
+                                .. tostring(#created_session_ids + 1)
+                            created_session_ids[#created_session_ids + 1] =
+                                session_id
+                            callback({ sessionId = session_id }, nil)
+                        end
+                    ),
+                    send_prompt = send_prompt_spy,
+                    cancel_session = cancel_session_spy,
+                },
+                inline_chat = {
+                    begin_request = begin_request_spy,
+                    complete = complete_spy,
+                },
+                _render_window_headers = function() end,
+                _refresh_chat_activity = function() end,
+                _dispatch_submission = SessionManager._dispatch_submission,
+                _drain_pending_inline_session_callbacks = SessionManager._drain_pending_inline_session_callbacks,
+                _ensure_inline_session_started = SessionManager._ensure_inline_session_started,
+                _with_active_inline_session = SessionManager._with_active_inline_session,
+                _start_inline_session = SessionManager._start_inline_session,
+                _cancel_inline_session = SessionManager._cancel_inline_session,
+                _drain_queued_submissions = function() end,
+            } --[[@as agentic.SessionManager]]
+
+            --- @param prompt string
+            --- @return agentic.SessionManager.QueuedSubmission
+            local function make_inline_submission(prompt)
+                --- @type agentic.SessionManager.QueuedSubmission
+                local submission = {
+                    id = 1,
+                    input_text = prompt,
+                    prompt = { { type = "text", text = prompt } },
+                    request = {
+                        kind = "user",
+                        surface = "inline",
+                        text = prompt,
+                        timestamp = os.time(),
+                        content = { { type = "text", text = prompt } },
+                    },
+                    inline_request = {
+                        prompt = prompt,
+                        selection = {
+                            lines = { "local value = 1" },
+                            start_line = 1,
+                            end_line = 1,
+                            file_path = "/tmp/example.lua",
+                            file_type = "lua",
+                        },
+                        source_bufnr = 10,
+                        source_winid = 11,
+                    },
+                }
+
+                return submission
+            end
+
+            session:_dispatch_submission(
+                make_inline_submission("Inline request one")
+            )
+            session:_dispatch_submission(
+                make_inline_submission("Inline request two")
+            )
+
+            assert.same({ "inline-1", "inline-2" }, created_session_ids)
+            assert.equal(2, send_prompt_spy.call_count)
+            assert.equal("inline-1", send_prompt_spy.calls[1][2])
+            assert.equal("inline-2", send_prompt_spy.calls[2][2])
+            assert.spy(cancel_session_spy).was.called(2)
+            assert.equal("inline-1", cancel_session_spy.calls[1][2])
+            assert.equal("inline-2", cancel_session_spy.calls[2][2])
+            assert.spy(begin_request_spy).was.called(2)
+            assert.spy(complete_spy).was.called(2)
+            assert.is_nil(session._inline_session_id)
+            assert.is_nil(session.session_id)
+
+            save_stub:revert()
+            schedule_stub:revert()
         end)
     end)
 end)

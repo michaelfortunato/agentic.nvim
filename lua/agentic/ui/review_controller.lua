@@ -2,6 +2,7 @@ local Config = require("agentic.config")
 local DiffPreview = require("agentic.ui.diff_preview")
 local Logger = require("agentic.utils.logger")
 local PermissionOption = require("agentic.utils.permission_option")
+local ReviewState = require("agentic.ui.diff_preview.review_state")
 local SessionSelectors = require("agentic.session.session_selectors")
 
 --- @param permission_manager agentic.ui.PermissionManager
@@ -59,6 +60,70 @@ local function get_review_file_path(tracker)
     end
 
     return nil
+end
+
+--- @param current_permission agentic.ui.PermissionManager.PermissionRequest|nil
+--- @param tool_call_id string|nil
+--- @return string|nil
+local function get_review_key(current_permission, tool_call_id)
+    if
+        not current_permission
+        or current_permission.toolCallId ~= tool_call_id
+        or current_permission.sessionId == nil
+    then
+        return nil
+    end
+
+    return ReviewState.create_review_key(
+        current_permission.sessionId,
+        current_permission.toolCallId
+    )
+end
+
+--- @param permission_manager agentic.ui.PermissionManager
+--- @param current_permission agentic.ui.PermissionManager.PermissionRequest
+--- @return agentic.ui.DiffPreview.ReviewActions|nil
+local function build_review_actions(permission_manager, current_permission)
+    local permission_request = current_permission.request
+    local options = permission_request and permission_request.options or nil
+    local accept_once_option_id =
+        PermissionOption.find_option_id(options, { "allow_once" })
+    local accept_always_option_id =
+        PermissionOption.find_option_id(options, { "allow_always" })
+    local reject_once_option_id =
+        PermissionOption.find_option_id(options, { "reject_once" })
+    local reject_always_option_id =
+        PermissionOption.find_option_id(options, { "reject_always" })
+    local accept_option_id = accept_once_option_id or accept_always_option_id
+    local reject_option_id = reject_once_option_id or reject_always_option_id
+    local accept_all_option_id = accept_always_option_id
+        or accept_once_option_id
+    local reject_all_option_id = reject_always_option_id
+        or reject_once_option_id
+
+    if not accept_option_id or not reject_option_id then
+        return nil
+    end
+
+    local accept_action_id = accept_option_id
+    local reject_action_id = reject_option_id
+    local accept_all_action_id = accept_all_option_id or accept_option_id
+    local reject_all_action_id = reject_all_option_id or reject_option_id
+
+    return {
+        on_accept = function()
+            complete_current_request(permission_manager, accept_action_id)
+        end,
+        on_reject = function()
+            complete_current_request(permission_manager, reject_action_id)
+        end,
+        on_accept_all = function()
+            complete_current_request(permission_manager, accept_all_action_id)
+        end,
+        on_reject_all = function()
+            complete_current_request(permission_manager, reject_all_action_id)
+        end,
+    }
 end
 
 --- @param session_state agentic.session.SessionState
@@ -132,23 +197,34 @@ function ReviewController:_handle_state_event(state, event)
         self:_clear_review_for_tool(
             state,
             event.tool_call_id,
-            event.is_rejection
+            event.clear_reason
         )
     end
 end
 
 --- @param state agentic.session.State
+--- @return agentic.ui.DiffPreview.ShowResult
 function ReviewController:_show_active_review(state)
     if
         not Config.diff_preview.enabled
         or vim.api.nvim_get_current_tabpage() ~= self.widget.tab_page_id
     then
-        return
+        return {
+            interactive = false,
+            bufnr = nil,
+            review_key = nil,
+            mode = "none",
+        }
     end
 
     local tracker = SessionSelectors.get_active_review_tool_call(state)
     if not self._is_reviewable(tracker) then
-        return
+        return {
+            interactive = false,
+            bufnr = nil,
+            review_key = nil,
+            mode = "none",
+        }
     end
     --- @cast tracker agentic.session.InteractionToolCallNode
 
@@ -158,76 +234,33 @@ function ReviewController:_show_active_review(state)
     local tracker_file_path = get_review_file_path(tracker)
     local tracker_tool_call_id = tracker.tool_call_id
     if not review_diff or not tracker_file_path or not tracker_tool_call_id then
-        return
+        return {
+            interactive = false,
+            bufnr = nil,
+            review_key = nil,
+            mode = "none",
+        }
     end
 
+    local review_key = get_review_key(current_permission, tracker_tool_call_id)
     local review_actions = nil
-    if
-        current_permission
-        and current_permission.toolCallId == tracker_tool_call_id
-        and self.permission_manager
-    then
-        --- @cast current_permission agentic.ui.PermissionManager.PermissionRequest
-        local permission_manager = self.permission_manager --[[@as agentic.ui.PermissionManager]]
-        local permission_request = current_permission.request
-        local options = permission_request and permission_request.options or nil
-        local accept_once_option_id =
-            PermissionOption.find_option_id(options, { "allow_once" })
-        local accept_always_option_id =
-            PermissionOption.find_option_id(options, { "allow_always" })
-        local reject_once_option_id =
-            PermissionOption.find_option_id(options, { "reject_once" })
-        local reject_always_option_id =
-            PermissionOption.find_option_id(options, { "reject_always" })
-        local accept_option_id = accept_once_option_id
-            or accept_always_option_id
-        local reject_option_id = reject_once_option_id
-            or reject_always_option_id
-        local accept_all_option_id = accept_always_option_id
-            or accept_once_option_id
-        local reject_all_option_id = reject_always_option_id
-            or reject_once_option_id
-
-        if accept_option_id and reject_option_id then
-            local accept_action_id = accept_option_id
-            local reject_action_id = reject_option_id
-            local accept_all_action_id = accept_all_option_id
-                or accept_option_id
-            local reject_all_action_id = reject_all_option_id
-                or reject_option_id
-            review_actions = {
-                on_accept = function()
-                    complete_current_request(
-                        permission_manager,
-                        accept_action_id
-                    )
-                end,
-                on_reject = function()
-                    complete_current_request(
-                        permission_manager,
-                        reject_action_id
-                    )
-                end,
-                on_accept_all = function()
-                    complete_current_request(
-                        permission_manager,
-                        accept_all_action_id
-                    )
-                end,
-                on_reject_all = function()
-                    complete_current_request(
-                        permission_manager,
-                        reject_all_action_id
-                    )
-                end,
-            }
-        end
+    if review_key and self.permission_manager then
+        review_actions = build_review_actions(
+            self.permission_manager --[[@as agentic.ui.PermissionManager]],
+            current_permission --[[@as agentic.ui.PermissionManager.PermissionRequest]]
+        )
     end
 
-    DiffPreview.show_diff({
+    return DiffPreview.show_diff({
         file_path = tracker_file_path,
         diff = review_diff,
         review_actions = review_actions,
+        review_key = review_key,
+        tool_call_id = tracker_tool_call_id,
+        force_inline = review_actions ~= nil,
+        on_detach = function(detach)
+            self:_handle_preview_detach(detach)
+        end,
         get_winid = function(bufnr)
             local winid = self.widget:find_first_editor_window()
             if not winid then
@@ -248,14 +281,58 @@ function ReviewController:_show_active_review(state)
     })
 end
 
+--- @param detach agentic.ui.DiffPreview.DetachPayload
+function ReviewController:_handle_preview_detach(detach)
+    if not self.permission_manager or not detach.review_key then
+        return
+    end
+
+    local state = self.session_state:get_state()
+    local current_permission = SessionSelectors.get_current_permission(state)
+    --- @cast current_permission agentic.ui.PermissionManager.PermissionRequest|nil
+    if
+        not current_permission
+        or SessionSelectors.get_active_review_tool_call_id(state)
+            ~= current_permission.toolCallId
+    then
+        return
+    end
+
+    local expected_review_key =
+        get_review_key(current_permission, current_permission.toolCallId)
+    if expected_review_key ~= detach.review_key then
+        return
+    end
+
+    if detach.reason == "manual_clear" then
+        self.permission_manager:show_current_request_chooser()
+        return
+    end
+
+    if vim.api.nvim_get_current_tabpage() ~= self.widget.tab_page_id then
+        self.permission_manager:show_current_request_chooser()
+        return
+    end
+
+    local result = self:_show_active_review(state)
+    if not result.interactive then
+        self.permission_manager:show_current_request_chooser()
+    end
+end
+
 --- @param current_request agentic.ui.PermissionManager.PermissionRequest
---- @return boolean
+--- @return agentic.ui.DiffPreview.ShowResult
 function ReviewController:activate_diff_review(current_request)
     local state = self.session_state:get_state()
     local tracker =
         SessionSelectors.get_tool_call(state, current_request.toolCallId)
     if not self._is_reviewable(tracker) then
-        return false
+        return {
+            interactive = false,
+            bufnr = nil,
+            review_key = nil,
+            mode = "none",
+        }
     end
     --- @cast tracker agentic.session.InteractionToolCallNode
 
@@ -263,20 +340,24 @@ function ReviewController:activate_diff_review(current_request)
         not Config.diff_preview.enabled
         or vim.api.nvim_get_current_tabpage() ~= self.widget.tab_page_id
     then
-        return false
+        return {
+            interactive = false,
+            bufnr = nil,
+            review_key = nil,
+            mode = "none",
+        }
     end
 
-    self:_show_active_review(state)
-    return true
+    return self:_show_active_review(state)
 end
 
 --- @param state agentic.session.State
 --- @param tool_call_id string|nil
---- @param is_rejection boolean|nil
+--- @param clear_reason agentic.ui.DiffPreview.ClearReason|nil
 function ReviewController:_clear_review_for_tool(
     state,
     tool_call_id,
-    is_rejection
+    clear_reason
 )
     if not tool_call_id then
         return
@@ -293,7 +374,15 @@ function ReviewController:_clear_review_for_tool(
         return
     end
 
-    DiffPreview.clear_diff(tracker_file_path, is_rejection)
+    local current_permission = SessionSelectors.get_current_permission(state)
+    --- @cast current_permission agentic.ui.PermissionManager.PermissionRequest|nil
+    local review_key = get_review_key(current_permission, tool_call_id)
+        or ReviewState.find_review_key_by_tool_call_id(tool_call_id)
+
+    DiffPreview.clear_diff(tracker_file_path, {
+        reason = clear_reason,
+        review_key = review_key,
+    })
 end
 
 function ReviewController:destroy()
