@@ -1,0 +1,27 @@
+lua/agentic/ui/diff_preview/review_state.lua
+  905c5feb7aa5ebf0 806-809,813-821,823-827,831,885,887
+lua/agentic/ui/diff_preview.lua
+  905c5feb7aa5ebf0 212,217-218,609,616
+lua/agentic/ui/diff_preview/keymap_bridge.lua
+  905c5feb7aa5ebf0 135,146
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "e83f413afb0d490d76313950d4f7ecd27b67f2c8",
+  "prompts": {
+    "905c5feb7aa5ebf0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019dba8f-9c1a-7191-8010-60fe900ba5dc",
+        "model": "gpt-5.4"
+      },
+      "human_author": "Michael Fortunato",
+      "messages": [],
+      "total_additions": 28,
+      "total_deletions": 72,
+      "accepted_lines": 28,
+      "overriden_lines": 0
+    }
+  }
+}
