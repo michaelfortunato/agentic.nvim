@@ -1333,7 +1333,7 @@ describe("diff_preview", function()
         )
 
         it(
-            "moves to the next pending hunk when the cursor is not adjacent to a review line",
+            "resolves the nearest pending hunk when the cursor is between review lines",
             function()
                 local file_path = vim.fn.tempname() .. ".lua"
                 local file_bufnr = vim.api.nvim_create_buf(true, false)
@@ -1399,7 +1399,34 @@ describe("diff_preview", function()
 
                 assert.spy(accept_spy).was.called(0)
                 assert.spy(reject_spy).was.called(0)
-                assert.equal(7, vim.api.nvim_win_get_cursor(0)[1])
+
+                local diff_marks = vim.api.nvim_buf_get_extmarks(
+                    file_bufnr,
+                    HunkNavigation.NS_DIFF,
+                    0,
+                    -1,
+                    { details = true }
+                )
+                local remaining_footer_count = 0
+                for _, mark in ipairs(diff_marks) do
+                    local details = mark[4] or {}
+                    local virt_lines = details.virt_lines
+                    if virt_lines and #virt_lines > 0 then
+                        local footer_segments = virt_lines[#virt_lines]
+                        local footer_text = table.concat(
+                            vim.tbl_map(function(segment)
+                                return segment[1]
+                            end, footer_segments),
+                            ""
+                        )
+                        if footer_text:find("m accept", 1, true) then
+                            remaining_footer_count = remaining_footer_count + 1
+                        end
+                    end
+                end
+
+                assert.equal(1, remaining_footer_count)
+                assert.equal(2, vim.api.nvim_win_get_cursor(0)[1])
 
                 DiffPreview.clear_diff(file_bufnr)
                 vim.api.nvim_buf_delete(file_bufnr, { force = true })
@@ -1408,7 +1435,7 @@ describe("diff_preview", function()
         )
 
         it(
-            "teleports m and n from widget buffers into the active review hunk",
+            "resolves review hunks from widget buffers using the active diff cursor",
             function()
                 local file_path = vim.fn.tempname() .. ".lua"
                 local file_bufnr = vim.api.nvim_create_buf(true, false)
@@ -1497,16 +1524,17 @@ describe("diff_preview", function()
                 assert.spy(accept_spy).was.called(0)
                 assert.spy(reject_spy).was.called(0)
                 assert.equal(diff_winid, vim.api.nvim_get_current_win())
-                assert.equal(7, vim.api.nvim_win_get_cursor(diff_winid)[1])
+                assert.equal(2, vim.api.nvim_win_get_cursor(diff_winid)[1])
 
                 vim.api.nvim_win_set_cursor(diff_winid, { 5, 0 })
                 vim.api.nvim_set_current_win(widget_winid)
                 reject_map.callback()
 
+                wait_for(function()
+                    return reject_spy.call_count == 1
+                end)
                 assert.spy(accept_spy).was.called(0)
-                assert.spy(reject_spy).was.called(0)
-                assert.equal(diff_winid, vim.api.nvim_get_current_win())
-                assert.equal(7, vim.api.nvim_win_get_cursor(diff_winid)[1])
+                assert.spy(reject_spy).was.called(1)
 
                 DiffPreview.clear_diff(file_bufnr)
                 local restored_map = vim.api.nvim_buf_call(

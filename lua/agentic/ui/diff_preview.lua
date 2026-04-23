@@ -209,18 +209,16 @@ function M.restore_review_keymaps(bufnr)
 end
 
 --- @param decision "accept"|"reject"
---- @param fallback_key string
---- @return string
-local function handle_widget_review_hunk(decision, fallback_key)
+local function handle_widget_review_hunk(decision)
     local diff_bufnr = ReviewState.get_active_diff_buffer()
     local review_session = diff_bufnr
         and ReviewState.get_review_session(diff_bufnr)
     if not diff_bufnr or not review_session then
-        return fallback_key
+        Logger.notify("No active diff preview", vim.log.levels.INFO)
+        return
     end
 
     ReviewState.resolve_pending_hunk(diff_bufnr, decision)
-    return ""
 end
 
 --- @param opts agentic.ui.DiffPreview.ShowOpts
@@ -608,18 +606,16 @@ function M.setup_diff_navigation_keymaps(buf_nrs)
         })
 
         BufHelpers.keymap_set(bufnr, "n", diff_keymaps.accept, function()
-            return handle_widget_review_hunk("accept", diff_keymaps.accept)
+            handle_widget_review_hunk("accept")
         end, {
             desc = "Accept next review hunk - Agentic DiffPreview",
-            expr = true,
             nowait = true,
         })
 
         BufHelpers.keymap_set(bufnr, "n", diff_keymaps.reject, function()
-            return handle_widget_review_hunk("reject", diff_keymaps.reject)
+            handle_widget_review_hunk("reject")
         end, {
             desc = "Reject next review hunk - Agentic DiffPreview",
-            expr = true,
             nowait = true,
         })
     end

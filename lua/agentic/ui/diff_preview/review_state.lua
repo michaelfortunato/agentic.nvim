@@ -679,25 +679,6 @@ function M.create_review_session(
     return session
 end
 
---- @param block agentic.ui.ToolCallDiff.DiffBlock
---- @param line_count integer
---- @return integer|nil above_line
---- @return integer|nil below_line
-local function get_block_review_lines(block, line_count)
-    local above_line = block.start_line > 1 and block.start_line - 1 or nil
-    local below_line = nil
-
-    if #block.old_lines == 0 then
-        if block.start_line <= line_count then
-            below_line = block.start_line
-        end
-    elseif block.end_line < line_count then
-        below_line = block.end_line + 1
-    end
-
-    return above_line, below_line
-end
-
 --- @param lines string[]
 --- @param diff_blocks agentic.ui.ToolCallDiff.DiffBlock[]
 --- @return string[]
@@ -820,45 +801,34 @@ end
 
 --- @param session agentic.ui.DiffPreview.ReviewSession
 --- @param cursor_line integer
---- @param line_count integer
 --- @return integer|nil block_id
 --- @return integer|nil position
-local function find_pending_block_for_cursor(session, cursor_line, line_count)
-    local below_block_id = nil
-    local below_position = nil
-    local above_block_id = nil
-    local above_position = nil
+local function find_nearest_pending_block(session, cursor_line)
+    local nearest_block_id = nil
+    local nearest_position = nil
+    local nearest_distance = nil
 
     for position, block_id in ipairs(session.pending_block_ids) do
         local block = session.diff_blocks[block_id]
-        local above_line, below_line = get_block_review_lines(block, line_count)
-        if below_line == cursor_line then
-            below_block_id = block_id
-            below_position = position
-        elseif above_line == cursor_line and not above_block_id then
-            above_block_id = block_id
-            above_position = position
+        if block then
+            local hunk_start = block.start_line
+            local hunk_end = math.max(block.start_line, block.end_line)
+            local distance = 0
+            if cursor_line < hunk_start then
+                distance = hunk_start - cursor_line
+            elseif cursor_line > hunk_end then
+                distance = cursor_line - hunk_end
+            end
+
+            if nearest_distance == nil or distance < nearest_distance then
+                nearest_block_id = block_id
+                nearest_position = position
+                nearest_distance = distance
+            end
         end
     end
 
-    return below_block_id or above_block_id, below_position or above_position
-end
-
-local function focus_next_pending_block(bufnr, session, winid, cursor_line)
-    for _, pending_block_id in ipairs(session.pending_block_ids) do
-        local pending_block = session.diff_blocks[pending_block_id]
-        if pending_block.start_line > cursor_line then
-            InlineRenderer.focus_diff_target(
-                bufnr,
-                winid,
-                pending_block.start_line,
-                InlineRenderer.get_block_anchor_line(pending_block)
-            )
-            return true
-        end
-    end
-
-    return false
+    return nearest_block_id, nearest_position
 end
 
 --- @param review_key string
@@ -911,16 +881,10 @@ function M.resolve_pending_hunk(bufnr, decision)
     end
 
     local cursor_line = vim.api.nvim_win_get_cursor(winid)[1]
-    local line_count = vim.api.nvim_buf_line_count(bufnr)
     local block_id, position =
-        find_pending_block_for_cursor(review_session, cursor_line, line_count)
+        find_nearest_pending_block(review_session, cursor_line)
     if not block_id or not position then
-        return focus_next_pending_block(
-            bufnr,
-            review_session,
-            winid,
-            cursor_line
-        )
+        return false
     end
 
     if decision == "accept" then

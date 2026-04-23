@@ -132,27 +132,23 @@ function M.setup_review_keymaps(bufnr, review_actions, review_key)
     BufHelpers.keymap_set(bufnr, "n", review_keymaps.accept, function()
         if ReviewState.get_review_session(bufnr) then
             ReviewState.resolve_pending_hunk(bufnr, "accept")
-            return ""
+            return
         end
         schedule_review_action(review_actions.on_accept)
-        return ""
     end, {
         desc = "Agentic Review: Accept diff",
         nowait = true,
-        expr = true,
     })
 
     BufHelpers.keymap_set(bufnr, "n", review_keymaps.reject, function()
         if ReviewState.get_review_session(bufnr) then
             ReviewState.resolve_pending_hunk(bufnr, "reject")
-            return ""
+            return
         end
         schedule_review_action(review_actions.on_reject)
-        return ""
     end, {
         desc = "Agentic Review: Reject diff",
         nowait = true,
-        expr = true,
     })
 
     BufHelpers.keymap_set(bufnr, "n", review_keymaps.accept_all, function()
