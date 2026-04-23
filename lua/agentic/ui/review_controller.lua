@@ -285,15 +285,6 @@ function ReviewController:_show_active_review(state, opts)
                 return self.widget:open_left_window(bufnr, false)
             end
 
-            local ok, err = pcall(vim.api.nvim_win_set_buf, winid, bufnr)
-            if not ok then
-                Logger.notify(
-                    "Failed to set buffer in window: " .. tostring(err),
-                    vim.log.levels.WARN
-                )
-                return nil
-            end
-
             return winid
         end,
     })

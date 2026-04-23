@@ -168,6 +168,7 @@
 --- @field prompt_height integer
 --- @field show_thoughts boolean
 --- @field max_thought_lines integer
+--- @field overlay_width integer
 --- @field result_ttl_ms integer
 --- @field progress boolean
 
@@ -453,6 +454,7 @@ local ConfigDefault = {
         prompt_height = 1,
         show_thoughts = true,
         max_thought_lines = 6,
+        overlay_width = 80,
         result_ttl_ms = 2500,
         progress = true,
     },

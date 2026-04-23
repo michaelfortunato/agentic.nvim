@@ -78,6 +78,42 @@ describe("agentic.session.SessionState", function()
         assert.equal("hello world", turns[1].response.nodes[1].text)
     end)
 
+    it("routes response chunks to an explicit turn id", function()
+        local store = SessionState:new()
+
+        store:dispatch(SessionEvents.append_interaction_request({
+            turn_id = "turn-1",
+            kind = "user",
+            text = "first",
+            timestamp = 1,
+            content = {
+                { type = "text", text = "first" },
+            },
+        }))
+        store:dispatch(SessionEvents.append_interaction_request({
+            turn_id = "turn-2",
+            kind = "user",
+            text = "second",
+            timestamp = 2,
+            content = {
+                { type = "text", text = "second" },
+            },
+        }))
+
+        store:dispatch(
+            SessionEvents.append_interaction_response(
+                "message",
+                "codex-acp",
+                { type = "text", text = "reply to first" },
+                { turn_id = "turn-1" }
+            )
+        )
+
+        local turns = store:get_persisted_session_data().turns
+        assert.equal("reply to first", turns[1].response.nodes[1].text)
+        assert.equal(0, #turns[2].response.nodes)
+    end)
+
     it(
         "loads persisted session data while preserving runtime session metadata when requested",
         function()

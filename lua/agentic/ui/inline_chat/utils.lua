@@ -269,22 +269,79 @@ end
 
 --- @param text string
 --- @param max_width integer
---- @return string
-function M.truncate_text(text, max_width)
+--- @return string prefix
+--- @return string rest
+local function split_display_prefix(text, max_width)
+    local char_count = vim.fn.strchars(text)
+    local width = 0
+    local prefix_chars = 0
+
+    for index = 0, char_count - 1 do
+        local char = vim.fn.strcharpart(text, index, 1)
+        local char_width = vim.fn.strdisplaywidth(char)
+        if prefix_chars > 0 and width + char_width > max_width then
+            break
+        end
+
+        width = width + char_width
+        prefix_chars = prefix_chars + 1
+        if width >= max_width then
+            break
+        end
+    end
+
+    if prefix_chars == 0 then
+        prefix_chars = 1
+    end
+
+    return vim.fn.strcharpart(text, 0, prefix_chars),
+        vim.fn.strcharpart(text, prefix_chars)
+end
+
+--- @param text string|nil
+--- @param max_width integer
+--- @return string[] lines
+function M.wrap_text(text, max_width)
     text = M.sanitize_text(text):gsub("%s+", " ")
-    if text == "" or max_width <= 0 then
-        return text
+    max_width = math.max(1, max_width)
+
+    if text == "" then
+        return {}
     end
 
-    if vim.fn.strdisplaywidth(text) <= max_width then
-        return text
+    local wrapped = {}
+    local current = ""
+
+    for _, word in
+        ipairs(vim.split(text, " ", { plain = true, trimempty = true }))
+    do
+        while vim.fn.strdisplaywidth(word) > max_width do
+            if current ~= "" then
+                wrapped[#wrapped + 1] = current
+                current = ""
+            end
+
+            local chunk, rest = split_display_prefix(word, max_width)
+            wrapped[#wrapped + 1] = chunk
+            word = rest
+        end
+
+        if word ~= "" then
+            local candidate = current == "" and word or (current .. " " .. word)
+            if vim.fn.strdisplaywidth(candidate) <= max_width then
+                current = candidate
+            else
+                wrapped[#wrapped + 1] = current
+                current = word
+            end
+        end
     end
 
-    if max_width <= 3 then
-        return vim.fn.strcharpart(text, 0, max_width)
+    if current ~= "" then
+        wrapped[#wrapped + 1] = current
     end
 
-    return vim.fn.strcharpart(text, 0, max_width - 3) .. "..."
+    return wrapped
 end
 
 --- @param selection agentic.Selection

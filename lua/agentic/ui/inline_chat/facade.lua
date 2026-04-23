@@ -15,11 +15,14 @@ local Utils = require("agentic.ui.inline_chat.utils")
 --- @class agentic.ui.InlineChat.PromptState
 --- @field prompt_bufnr integer
 --- @field prompt_winid integer
+--- @field conversation_id? string
+--- @field close_cancels_conversation boolean
 --- @field selection agentic.Selection
 --- @field source_bufnr integer
 --- @field source_winid integer
 
 --- @class agentic.ui.InlineChat.ActiveRequest
+--- @field conversation_id string
 --- @field submission_id? integer
 --- @field source_bufnr integer
 --- @field source_winid integer
@@ -33,10 +36,13 @@ local Utils = require("agentic.ui.inline_chat.utils")
 --- @field thought_text string
 --- @field message_text string
 --- @field tool_label? string
+--- @field tool_detail? string
+--- @field tool_failed boolean
 --- @field overlay_hidden boolean
 --- @field progress_id? integer
 
 --- @class agentic.ui.InlineChat.RequestInput
+--- @field conversation_id? string|nil
 --- @field submission_id? integer|nil
 --- @field prompt string
 --- @field selection agentic.Selection
@@ -46,6 +52,7 @@ local Utils = require("agentic.ui.inline_chat.utils")
 --- @field status_text? string
 
 --- @class agentic.ui.InlineChat.ThreadTurn
+--- @field conversation_id? string
 --- @field selection agentic.Selection
 --- @field prompt string
 --- @field config_context? string
@@ -54,6 +61,8 @@ local Utils = require("agentic.ui.inline_chat.utils")
 --- @field thought_text string
 --- @field message_text string
 --- @field tool_label? string
+--- @field tool_detail? string
+--- @field tool_failed boolean
 --- @field overlay_hidden boolean
 --- @field created_at integer
 --- @field updated_at integer
@@ -76,7 +85,8 @@ local Utils = require("agentic.ui.inline_chat.utils")
 
 --- @class agentic.ui.InlineChat.NewOpts
 --- @field tab_page_id integer
---- @field on_submit fun(request: {prompt: string, selection: agentic.Selection, source_bufnr: integer, source_winid: integer}): boolean
+--- @field on_submit fun(request: {conversation_id?: string|nil, prompt: string, selection: agentic.Selection, source_bufnr: integer, source_winid: integer}): boolean
+--- @field on_conversation_exit? fun(conversation_id: string): nil
 --- @field on_change_mode? fun(): nil
 --- @field on_change_model? fun(): nil
 --- @field on_change_thought_level? fun(): nil
@@ -85,7 +95,8 @@ local Utils = require("agentic.ui.inline_chat.utils")
 
 --- @class agentic.ui.InlineChat
 --- @field tab_page_id integer
---- @field _on_submit fun(request: {prompt: string, selection: agentic.Selection, source_bufnr: integer, source_winid: integer}): boolean
+--- @field _on_submit fun(request: {conversation_id?: string|nil, prompt: string, selection: agentic.Selection, source_bufnr: integer, source_winid: integer}): boolean
+--- @field _on_conversation_exit fun(conversation_id: string): nil
 --- @field _on_change_mode fun(): nil
 --- @field _on_change_model fun(): nil
 --- @field _on_change_thought_level fun(): nil
@@ -93,6 +104,7 @@ local Utils = require("agentic.ui.inline_chat.utils")
 --- @field _get_config_context fun(): string|nil
 --- @field _prompt? agentic.ui.InlineChat.PromptState
 --- @field _active_request? agentic.ui.InlineChat.ActiveRequest
+--- @field _active_requests table<string, agentic.ui.InlineChat.ActiveRequest>
 --- @field _queued_requests table<integer, agentic.ui.InlineChat.ActiveRequest>
 --- @field _thread_runtimes table<string, agentic.ui.InlineChat.ThreadRuntime>
 local InlineChat = {}
@@ -108,6 +120,7 @@ function InlineChat:new(opts)
     local instance = setmetatable({
         tab_page_id = opts.tab_page_id,
         _on_submit = opts.on_submit,
+        _on_conversation_exit = opts.on_conversation_exit or function() end,
         _on_change_mode = opts.on_change_mode or function() end,
         _on_change_model = opts.on_change_model or function() end,
         _on_change_thought_level = opts.on_change_thought_level
@@ -119,6 +132,7 @@ function InlineChat:new(opts)
         end,
         _prompt = nil,
         _active_request = nil,
+        _active_requests = {},
         _queued_requests = {},
         _thread_runtimes = {},
     }, self)
@@ -128,8 +142,13 @@ end
 
 --- @return boolean
 function InlineChat:is_active()
-    return self._active_request ~= nil
-        and not Utils.is_terminal_phase(self._active_request.phase)
+    for _, request in pairs(self._active_requests or {}) do
+        if not Utils.is_terminal_phase(request.phase) then
+            return true
+        end
+    end
+
+    return false
 end
 
 --- @return boolean
@@ -138,7 +157,7 @@ function InlineChat:is_prompt_open()
 end
 
 --- @param selection agentic.Selection
---- @param opts {source_bufnr?: integer|nil, source_winid?: integer|nil}|nil
+--- @param opts {conversation_id?: string|nil, close_cancels_conversation?: boolean|nil, source_bufnr?: integer|nil, source_winid?: integer|nil}|nil
 --- @return boolean opened
 function InlineChat:open(selection, opts)
     return PromptController.open(self, selection, opts)
@@ -182,37 +201,43 @@ function InlineChat:refresh()
 end
 
 --- @param update agentic.acp.SessionUpdateMessage
-function InlineChat:handle_session_update(update)
-    RuntimeStore.handle_session_update(self, update)
+--- @param opts {conversation_id?: string|nil}|nil
+function InlineChat:handle_session_update(update, opts)
+    RuntimeStore.handle_session_update(self, update, opts)
 end
 
 --- @param tool_call table
-function InlineChat:handle_tool_call(tool_call)
-    RuntimeStore.handle_tool_call(self, tool_call)
+--- @param opts {conversation_id?: string|nil}|nil
+function InlineChat:handle_tool_call(tool_call, opts)
+    RuntimeStore.handle_tool_call(self, tool_call, opts)
 end
 
 --- @param tool_call table
-function InlineChat:handle_tool_call_update(tool_call)
-    RuntimeStore.handle_tool_call_update(self, tool_call)
+--- @param opts {conversation_id?: string|nil}|nil
+function InlineChat:handle_tool_call_update(tool_call, opts)
+    RuntimeStore.handle_tool_call_update(self, tool_call, opts)
 end
 
-function InlineChat:handle_permission_request()
-    RuntimeStore.handle_permission_request(self)
+--- @param opts {conversation_id?: string|nil}|nil
+function InlineChat:handle_permission_request(opts)
+    RuntimeStore.handle_permission_request(self, opts)
 end
 
---- @param opts {option_id?: string|nil, options?: agentic.acp.PermissionOption[]|nil}
+--- @param opts {conversation_id?: string|nil, option_id?: string|nil, options?: agentic.acp.PermissionOption[]|nil}
 function InlineChat:handle_permission_resolution(opts)
     RuntimeStore.handle_permission_resolution(self, opts)
 end
 
-function InlineChat:handle_applied_edit()
-    RuntimeStore.handle_applied_edit(self)
+--- @param opts {conversation_id?: string|nil}|nil
+function InlineChat:handle_applied_edit(opts)
+    RuntimeStore.handle_applied_edit(self, opts)
 end
 
 --- @param response agentic.acp.PromptResponse|nil
 --- @param err table|nil
-function InlineChat:complete(response, err)
-    RuntimeStore.complete(self, response, err)
+--- @param opts {conversation_id?: string|nil}|nil
+function InlineChat:complete(response, err, opts)
+    RuntimeStore.complete(self, response, err, opts)
 end
 
 function InlineChat:clear()

@@ -347,6 +347,134 @@ describe("diff_preview", function()
         )
 
         it(
+            "reuses the active review window without notifying controlled buffer detaches",
+            function()
+                local first_path = vim.fn.tempname() .. ".lua"
+                local second_path = vim.fn.tempname() .. ".lua"
+                local file_lines = {
+                    "local x = 1",
+                    "print(x)",
+                    "",
+                }
+                local first_bufnr = vim.api.nvim_create_buf(true, false)
+                local second_bufnr = vim.api.nvim_create_buf(true, false)
+                local tabpage = vim.api.nvim_get_current_tabpage()
+                local review_winid = vim.api.nvim_get_current_win()
+                local first_review_key = "sess-window:first-tool"
+                local second_review_key = "sess-window:second-tool"
+                local first_detach_spy = spy_module.new(function() end)
+                local second_detach_spy = spy_module.new(function() end)
+
+                vim.api.nvim_win_set_buf(review_winid, first_bufnr)
+                vim.api.nvim_buf_set_name(first_bufnr, first_path)
+                vim.api.nvim_buf_set_lines(
+                    first_bufnr,
+                    0,
+                    -1,
+                    false,
+                    file_lines
+                )
+                vim.api.nvim_buf_set_name(second_bufnr, second_path)
+                vim.api.nvim_buf_set_lines(
+                    second_bufnr,
+                    0,
+                    -1,
+                    false,
+                    file_lines
+                )
+
+                DiffPreview.show_diff({
+                    file_path = first_path,
+                    diff = {
+                        old = vim.deepcopy(file_lines),
+                        new = { "local x = 2", "print(x)", "" },
+                    },
+                    review_key = first_review_key,
+                    tool_call_id = "first-tool",
+                    review_actions = {
+                        on_accept = function() end,
+                        on_reject = function() end,
+                    },
+                    on_detach = first_detach_spy --[[@as function]],
+                    get_winid = get_winid_spy --[[@as function]],
+                })
+
+                assert.equal(
+                    review_winid,
+                    ReviewState.get_active_review_window(tabpage)
+                )
+
+                DiffPreview.show_diff({
+                    file_path = second_path,
+                    diff = {
+                        old = vim.deepcopy(file_lines),
+                        new = { "local x = 3", "print(x)", "" },
+                    },
+                    review_key = second_review_key,
+                    tool_call_id = "second-tool",
+                    review_actions = {
+                        on_accept = function() end,
+                        on_reject = function() end,
+                    },
+                    on_detach = second_detach_spy --[[@as function]],
+                    get_winid = get_winid_spy --[[@as function]],
+                })
+
+                local flushed_scheduled_callbacks = false
+                vim.schedule(function()
+                    flushed_scheduled_callbacks = true
+                end)
+                wait_for(function()
+                    return flushed_scheduled_callbacks
+                end)
+
+                assert.equal(
+                    second_bufnr,
+                    vim.api.nvim_win_get_buf(review_winid)
+                )
+                assert.equal(
+                    second_bufnr,
+                    DiffPreview.get_active_diff_buffer(tabpage)
+                )
+                assert.equal(
+                    review_winid,
+                    ReviewState.get_active_review_window(tabpage)
+                )
+                assert.spy(first_detach_spy).was.called(0)
+                assert.spy(second_detach_spy).was.called(0)
+
+                local first_session = ReviewState.get_review_session_by_key(
+                    first_review_key,
+                    tabpage
+                )
+                assert.is_not_nil(first_session)
+                --- @cast first_session agentic.ui.DiffPreview.ReviewSession
+                assert.is_true(first_session.needs_review)
+
+                DiffPreview.clear_diff(second_bufnr, {
+                    reason = "rejected",
+                    review_key = second_review_key,
+                    tabpage = tabpage,
+                })
+                if vim.api.nvim_buf_is_valid(first_bufnr) then
+                    DiffPreview.clear_diff(first_bufnr, {
+                        reason = "rejected",
+                        review_key = first_review_key,
+                        tabpage = tabpage,
+                    })
+                end
+                if vim.api.nvim_buf_is_valid(second_bufnr) then
+                    vim.api.nvim_buf_delete(second_bufnr, { force = true })
+                end
+                if vim.api.nvim_buf_is_valid(first_bufnr) then
+                    vim.api.nvim_buf_delete(first_bufnr, { force = true })
+                end
+                os.remove(first_path)
+                os.remove(second_path)
+            end
+        )
+
+        it(
             "tracks active diff preview state independently per tabpage",
             function()
                 local first_path = vim.fn.tempname() .. ".lua"

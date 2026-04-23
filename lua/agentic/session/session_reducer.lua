@@ -142,7 +142,8 @@ function SessionReducer.reduce(state, event)
             state.interaction.turns,
             event.kind,
             event.provider_name,
-            event.content
+            event.content,
+            event.turn_id
         )
         return state
     end
@@ -151,7 +152,8 @@ function SessionReducer.reduce(state, event)
         InteractionModel.upsert_tool_call(
             state.interaction.turns,
             event.provider_name,
-            event.tool_call
+            event.tool_call,
+            event.turn_id
         )
         return state
     end
@@ -169,7 +171,8 @@ function SessionReducer.reduce(state, event)
         InteractionModel.upsert_plan(
             state.interaction.turns,
             event.provider_name,
-            event.entries
+            event.entries,
+            event.turn_id
         )
         return state
     end
@@ -178,7 +181,8 @@ function SessionReducer.reduce(state, event)
         InteractionModel.set_turn_result(
             state.interaction.turns,
             event.result,
-            event.provider_name
+            event.provider_name,
+            event.turn_id
         )
         return state
     end

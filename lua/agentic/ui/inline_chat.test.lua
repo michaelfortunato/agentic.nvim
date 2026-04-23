@@ -176,6 +176,76 @@ describe("agentic.ui.InlineChat", function()
         }, second_segment[2])
     end)
 
+    it("renders independent inline conversations in the same buffer", function()
+        local inline = InlineChat:new({
+            tab_page_id = vim.api.nvim_get_current_tabpage(),
+            on_submit = function()
+                return true
+            end,
+        })
+
+        inline:begin_request({
+            conversation_id = "conversation-a",
+            prompt = "Change the local",
+            selection = {
+                lines = { "local value = 1" },
+                start_line = 1,
+                end_line = 1,
+                file_path = "/tmp/inline_chat_test.lua",
+                file_type = "lua",
+            },
+            source_bufnr = bufnr,
+            source_winid = winid,
+            phase = "thinking",
+            status_text = "Preparing first request",
+        })
+
+        inline:begin_request({
+            conversation_id = "conversation-b",
+            prompt = "Change the return",
+            selection = {
+                lines = { "return value" },
+                start_line = 2,
+                end_line = 2,
+                file_path = "/tmp/inline_chat_test.lua",
+                file_type = "lua",
+            },
+            source_bufnr = bufnr,
+            source_winid = winid,
+            phase = "thinking",
+            status_text = "Preparing second request",
+        })
+
+        inline:handle_session_update({
+            sessionUpdate = "agent_message_chunk",
+            content = {
+                type = "text",
+                text = "First response",
+            },
+        }, { conversation_id = "conversation-a" })
+        inline:handle_session_update({
+            sessionUpdate = "agent_message_chunk",
+            content = {
+                type = "text",
+                text = "Second response",
+            },
+        }, { conversation_id = "conversation-b" })
+
+        local overlays = get_rendered_overlays()
+        assert.equal(2, #overlays)
+        local first_overlay = table.concat(overlays[1].lines, "\n")
+        local second_overlay = table.concat(overlays[2].lines, "\n")
+
+        assert.truthy(
+            first_overlay:match("First response")
+                or second_overlay:match("First response")
+        )
+        assert.truthy(
+            first_overlay:match("Second response")
+                or second_overlay:match("Second response")
+        )
+    end)
+
     it("shows only the latest response line while generating", function()
         local inline = InlineChat:new({
             tab_page_id = vim.api.nvim_get_current_tabpage(),
@@ -208,6 +278,51 @@ describe("agentic.ui.InlineChat", function()
         local lines = get_rendered_lines()
         assert.truthy(vim.tbl_contains(lines, "  Response: Latest answer line"))
         assert.is_false(vim.tbl_contains(lines, "  Response: First draft line"))
+    end)
+
+    it("wraps inline detail text at the configured overlay width", function()
+        Config.inline.overlay_width = 34
+
+        local inline = InlineChat:new({
+            tab_page_id = vim.api.nvim_get_current_tabpage(),
+            on_submit = function()
+                return true
+            end,
+        })
+
+        inline:begin_request({
+            prompt = "Change this",
+            selection = {
+                lines = { "local value = 1" },
+                start_line = 1,
+                end_line = 1,
+                file_path = "/tmp/inline_chat_test.lua",
+                file_type = "lua",
+            },
+            source_bufnr = bufnr,
+            source_winid = winid,
+        })
+
+        inline:handle_session_update({
+            sessionUpdate = "agent_message_chunk",
+            content = {
+                type = "text",
+                text = "alpha beta gamma delta epsilon zeta eta",
+            },
+        })
+
+        local lines = get_rendered_lines()
+        assert.truthy(
+            vim.tbl_contains(lines, "  Response: alpha beta gamma delta")
+        )
+        assert.truthy(vim.tbl_contains(lines, "            epsilon zeta eta"))
+
+        for index = 2, #lines do
+            assert.is_true(
+                vim.fn.strdisplaywidth(lines[index])
+                    <= Config.inline.overlay_width
+            )
+        end
     end)
 
     it("restores focus to the source window after submitting", function()
@@ -280,6 +395,37 @@ describe("agentic.ui.InlineChat", function()
         assert.equal(winid, vim.api.nvim_get_current_win())
         assert.is_false(inline:is_prompt_open())
     end)
+
+    it(
+        "ends a rejected inline conversation when its follow-up prompt closes",
+        function()
+            local exit_spy = spy.new(function() end)
+            local inline = InlineChat:new({
+                tab_page_id = vim.api.nvim_get_current_tabpage(),
+                on_submit = function()
+                    return true
+                end,
+                on_conversation_exit = exit_spy --[[@as function]],
+            })
+
+            inline:open({
+                lines = { "local value = 1" },
+                start_line = 1,
+                end_line = 1,
+                file_path = "/tmp/inline_chat_test.lua",
+                file_type = "lua",
+            }, {
+                conversation_id = "conversation-1",
+                close_cancels_conversation = true,
+            })
+
+            --- @diagnostic disable-next-line: invisible
+            inline:_close_prompt(true)
+
+            assert.spy(exit_spy).was.called(1)
+            assert.equal("conversation-1", exit_spy.calls[1][1])
+        end
+    )
 
     it("returns to normal mode after submitting with <CR>", function()
         local on_submit_spy = spy.new(function()
@@ -756,6 +902,92 @@ describe("agentic.ui.InlineChat", function()
         assert.equal(1, #thread_extmarks)
         assert.is_not_nil(get_thread_store()[tostring(thread_extmarks[1][1])])
     end)
+
+    it(
+        "shows failed tool updates as recoverable notices until completion",
+        function()
+            Config.inline.result_ttl_ms = 30
+
+            local inline = InlineChat:new({
+                tab_page_id = vim.api.nvim_get_current_tabpage(),
+                on_submit = function()
+                    return true
+                end,
+            })
+
+            inline:begin_request({
+                prompt = "Change this",
+                selection = {
+                    lines = { "local value = 1" },
+                    start_line = 1,
+                    end_line = 1,
+                    file_path = "/tmp/inline_chat_test.lua",
+                    file_type = "lua",
+                },
+                source_bufnr = bufnr,
+                source_winid = winid,
+            })
+
+            inline:handle_tool_call({
+                kind = "tool",
+                argument = "skill-neovim-research",
+            })
+
+            inline:handle_tool_call_update({
+                status = "failed",
+                body = {
+                    "skill-neovim-research started without a Neovim runtime",
+                    "stack trace omitted from the inline overlay",
+                    "skill-neovim-research exited with status 1",
+                },
+            })
+
+            assert.is_true(inline:is_active())
+            local failed_lines = get_rendered_lines()
+            assert.truthy(
+                vim.tbl_contains(
+                    failed_lines,
+                    "  [Agentic Inline] inline_chat_test.lua:1-1 Tool issue: tool skill-neovim-research"
+                )
+            )
+            assert.truthy(
+                vim.tbl_contains(
+                    failed_lines,
+                    "  Detail: skill-neovim-research"
+                        .. " started without a Neovim runtime ..."
+                )
+            )
+            assert.truthy(
+                vim.tbl_contains(
+                    failed_lines,
+                    "          skill-neovim-research exited with status 1"
+                )
+            )
+
+            inline:handle_session_update({
+                sessionUpdate = "agent_message_chunk",
+                content = {
+                    type = "text",
+                    text = "Continuing after the failed tool",
+                },
+            })
+
+            assert.is_true(inline:is_active())
+            assert.truthy(
+                vim.tbl_contains(
+                    get_rendered_lines(),
+                    "  Response: Continuing after the failed tool"
+                )
+            )
+
+            inline:complete({ stopReason = "end_turn" }, nil)
+
+            wait_for(function()
+                return #get_overlay_extmarks() == 0
+            end)
+            assert.equal(0, #get_overlay_extmarks())
+        end
+    )
 
     it(
         "hides the ghost preview after an applied edit and keeps progress live",

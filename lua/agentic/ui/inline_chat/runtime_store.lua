@@ -5,6 +5,89 @@ local Utils = require("agentic.ui.inline_chat.utils")
 
 local M = {}
 
+local TOOL_DETAIL_EXCERPT_CHARS = 160
+local TOOL_DETAIL_EDGE_CHARS = 72
+local FALLBACK_CONVERSATION_ID = "__inline_conversation"
+
+--- @param request_or_opts table|nil
+--- @return string
+local function get_conversation_id(request_or_opts)
+    local conversation_id = request_or_opts and request_or_opts.conversation_id
+        or nil
+    if type(conversation_id) == "string" and conversation_id ~= "" then
+        return conversation_id
+    end
+
+    return FALLBACK_CONVERSATION_ID
+end
+
+--- @param self agentic.ui.InlineChat
+--- @return table<string, agentic.ui.InlineChat.ActiveRequest>
+local function ensure_active_requests(self)
+    if type(self._active_requests) ~= "table" then
+        self._active_requests = {}
+    end
+
+    if self._active_request and self._active_request.conversation_id then
+        self._active_requests[self._active_request.conversation_id] =
+            self._active_request
+    end
+
+    return self._active_requests
+end
+
+--- @param self agentic.ui.InlineChat
+--- @param opts {conversation_id?: string|nil}|nil
+--- @return agentic.ui.InlineChat.ActiveRequest|nil
+local function get_active_request(self, opts)
+    local active_requests = ensure_active_requests(self)
+    if opts and opts.conversation_id then
+        return active_requests[opts.conversation_id]
+    end
+
+    if
+        self._active_request
+        and not Utils.is_terminal_phase(self._active_request.phase)
+    then
+        return self._active_request
+    end
+
+    local only_request = nil
+    for _, request in pairs(active_requests) do
+        if not Utils.is_terminal_phase(request.phase) then
+            if only_request ~= nil then
+                return nil
+            end
+            only_request = request
+        end
+    end
+
+    return only_request
+end
+
+--- @param self agentic.ui.InlineChat
+--- @param request agentic.ui.InlineChat.ActiveRequest
+local function set_active_request(self, request)
+    local active_requests = ensure_active_requests(self)
+    active_requests[request.conversation_id] = request
+    self._active_request = request
+end
+
+--- @param self agentic.ui.InlineChat
+--- @param request agentic.ui.InlineChat.ActiveRequest
+local function remove_active_request(self, request)
+    local active_requests = ensure_active_requests(self)
+    active_requests[request.conversation_id] = nil
+
+    if self._active_request == request then
+        self._active_request = nil
+        for _, active_request in pairs(active_requests) do
+            self._active_request = active_request
+            break
+        end
+    end
+end
+
 --- @param self agentic.ui.InlineChat
 --- @param bufnr integer
 --- @return agentic.ui.InlineChat.ThreadStore
@@ -43,6 +126,7 @@ local function create_thread_turn(_self, request, selection)
 
     --- @type agentic.ui.InlineChat.ThreadTurn
     local turn = {
+        conversation_id = request.conversation_id,
         selection = Utils.build_selection_snapshot(selection),
         prompt = request.prompt,
         config_context = request.config_context,
@@ -51,12 +135,53 @@ local function create_thread_turn(_self, request, selection)
         thought_text = request.thought_text,
         message_text = request.message_text,
         tool_label = request.tool_label,
+        tool_detail = request.tool_detail,
+        tool_failed = request.tool_failed,
         overlay_hidden = request.overlay_hidden,
         created_at = timestamp,
         updated_at = timestamp,
     }
 
     return turn
+end
+
+--- @param tool_call table
+--- @return string|nil detail
+local function get_tool_detail(tool_call)
+    if type(tool_call.body) ~= "table" then
+        return nil
+    end
+
+    local lines = {}
+    for _, line in ipairs(tool_call.body) do
+        local sanitized = Utils.sanitize_text(line)
+        if sanitized ~= "" then
+            lines[#lines + 1] = sanitized
+        end
+    end
+
+    if #lines == 0 then
+        return nil
+    end
+
+    local function excerpt_line(line)
+        local char_count = vim.fn.strchars(line)
+        if char_count <= TOOL_DETAIL_EXCERPT_CHARS then
+            return line
+        end
+
+        return vim.fn.strcharpart(line, 0, TOOL_DETAIL_EDGE_CHARS)
+            .. " ... "
+            .. vim.fn.strcharpart(line, char_count - TOOL_DETAIL_EDGE_CHARS)
+    end
+
+    local first_line = excerpt_line(lines[1])
+    local last_line = excerpt_line(lines[#lines])
+    if first_line == last_line then
+        return first_line
+    end
+
+    return first_line .. " ... " .. last_line
 end
 
 --- @param _self agentic.ui.InlineChat
@@ -259,19 +384,19 @@ local function clear_thread_runtime(self, runtime_id)
     stop_thread_close_timer(self, runtime)
     clear_thread_overlay(self, runtime_id)
 
-    local active_request = self._active_request
-    if
-        active_request
-        and Utils.is_terminal_phase(active_request.phase)
-        and get_request_runtime_key(
-                self,
-                active_request.source_bufnr,
-                active_request.range_extmark_id
-            )
-            == runtime_id
-    then
-        dismiss_progress(self, active_request)
-        self._active_request = nil
+    for _, active_request in pairs(ensure_active_requests(self)) do
+        if
+            Utils.is_terminal_phase(active_request.phase)
+            and get_request_runtime_key(
+                    self,
+                    active_request.source_bufnr,
+                    active_request.range_extmark_id
+                )
+                == runtime_id
+        then
+            dismiss_progress(self, active_request)
+            remove_active_request(self, active_request)
+        end
     end
 
     for submission_id, queued_request in pairs(self._queued_requests) do
@@ -320,6 +445,7 @@ function M._build_request_state(self, request)
 
     --- @type agentic.ui.InlineChat.ActiveRequest
     local request_state = {
+        conversation_id = get_conversation_id(request),
         submission_id = request.submission_id,
         source_bufnr = request.source_bufnr,
         source_winid = request.source_winid,
@@ -333,6 +459,8 @@ function M._build_request_state(self, request)
         thought_text = "",
         message_text = "",
         tool_label = nil,
+        tool_detail = nil,
+        tool_failed = false,
         overlay_hidden = false,
         progress_id = nil,
     }
@@ -386,7 +514,8 @@ end
 --- @param self agentic.ui.InlineChat
 --- @return boolean
 function M.has_pending_or_active_requests(self)
-    return self._active_request ~= nil or next(self._queued_requests) ~= nil
+    return next(ensure_active_requests(self)) ~= nil
+        or next(self._queued_requests) ~= nil
 end
 
 --- @param self agentic.ui.InlineChat
@@ -399,14 +528,15 @@ function M._shift_thread_turn_indices(
     range_extmark_id,
     removed_turn_index
 )
-    local active_request = self._active_request
-    if
-        active_request
-        and active_request.source_bufnr == bufnr
-        and active_request.range_extmark_id == range_extmark_id
-        and active_request.thread_turn_index > removed_turn_index
-    then
-        active_request.thread_turn_index = active_request.thread_turn_index - 1
+    for _, active_request in pairs(ensure_active_requests(self)) do
+        if
+            active_request.source_bufnr == bufnr
+            and active_request.range_extmark_id == range_extmark_id
+            and active_request.thread_turn_index > removed_turn_index
+        then
+            active_request.thread_turn_index = active_request.thread_turn_index
+                - 1
+        end
     end
 
     for _, queued_request in pairs(self._queued_requests) do
@@ -523,6 +653,7 @@ function M._sync_thread_history(self, bufnr, request)
         turn = create_or_update_turn(self, request, selection)
         thread.turns[request.thread_turn_index] = turn
     else
+        turn.conversation_id = request.conversation_id
         turn.selection = Utils.build_selection_snapshot(selection)
         turn.prompt = request.prompt
         turn.config_context = request.config_context
@@ -531,6 +662,8 @@ function M._sync_thread_history(self, bufnr, request)
         turn.thought_text = request.thought_text
         turn.message_text = request.message_text
         turn.tool_label = request.tool_label
+        turn.tool_detail = request.tool_detail
+        turn.tool_failed = request.tool_failed
         turn.overlay_hidden = request.overlay_hidden
         turn.updated_at = timestamp
     end
@@ -546,6 +679,7 @@ function M.queue_request(self, request)
 
     if queued_request == nil then
         queued_request, runtime_id = M._build_request_state(self, {
+            conversation_id = request.conversation_id,
             submission_id = request.submission_id,
             prompt = request.prompt,
             selection = request.selection,
@@ -558,11 +692,14 @@ function M.queue_request(self, request)
     else
         queued_request.source_bufnr = request.source_bufnr
         queued_request.source_winid = request.source_winid
+        queued_request.conversation_id = get_conversation_id(request)
         queued_request.selection =
             Utils.normalize_selection(request.source_bufnr, request.selection)
         queued_request.prompt = request.prompt
         queued_request.config_context = self._get_config_context()
         queued_request.overlay_hidden = false
+        queued_request.tool_detail = nil
+        queued_request.tool_failed = false
     end
 
     queued_request.phase = "busy"
@@ -615,6 +752,8 @@ function M.sync_queued_requests(self, queue_items, opts)
                 opts.waiting_for_session == true
             )
             queued_request.config_context = self._get_config_context()
+            queued_request.tool_detail = nil
+            queued_request.tool_failed = false
             M._sync_thread_history(
                 self,
                 queued_request.source_bufnr,
@@ -707,9 +846,11 @@ end
 --- @param self agentic.ui.InlineChat
 --- @param request agentic.ui.InlineChat.RequestInput
 function M.begin_request(self, request)
-    local previous_request = self._active_request
+    local conversation_id = get_conversation_id(request)
+    local previous_request = ensure_active_requests(self)[conversation_id]
     if previous_request and Utils.is_terminal_phase(previous_request.phase) then
         OverlayRenderer.dismiss_progress(self, previous_request)
+        remove_active_request(self, previous_request)
     end
 
     local queued_request = request.submission_id ~= nil
@@ -719,6 +860,7 @@ function M.begin_request(self, request)
 
     if queued_request ~= nil then
         self._queued_requests[request.submission_id] = nil
+        queued_request.conversation_id = conversation_id
         queued_request.source_bufnr = request.source_bufnr
         queued_request.source_winid = request.source_winid
         queued_request.selection =
@@ -729,6 +871,8 @@ function M.begin_request(self, request)
         queued_request.status_text = request.status_text
             or "Starting inline request"
         queued_request.tool_label = nil
+        queued_request.tool_detail = nil
+        queued_request.tool_failed = false
         queued_request.overlay_hidden = false
         runtime_id = get_request_runtime_key(
             self,
@@ -743,9 +887,11 @@ function M.begin_request(self, request)
             queued_request.range_extmark_id
         )
         stop_thread_close_timer(self, runtime)
-        self._active_request = queued_request
+        set_active_request(self, queued_request)
     else
-        self._active_request, runtime_id = M._build_request_state(self, {
+        local request_state
+        request_state, runtime_id = M._build_request_state(self, {
+            conversation_id = conversation_id,
             submission_id = request.submission_id,
             prompt = request.prompt,
             selection = request.selection,
@@ -754,20 +900,26 @@ function M.begin_request(self, request)
             phase = request.phase,
             status_text = request.status_text,
         })
+        set_active_request(self, request_state)
     end
 
-    M._sync_thread_history(self, request.source_bufnr, self._active_request)
+    local active_request = ensure_active_requests(self)[conversation_id]
+    if active_request == nil then
+        return
+    end
+
+    M._sync_thread_history(self, request.source_bufnr, active_request)
     OverlayRenderer.render_thread(self, runtime_id)
-    OverlayRenderer.update_progress(self, self._active_request)
+    OverlayRenderer.update_progress(self, active_request)
 end
 
 --- @param self agentic.ui.InlineChat
 function M.refresh(self)
-    if self._active_request then
+    for _, active_request in pairs(ensure_active_requests(self)) do
         M._sync_thread_history(
             self,
-            self._active_request.source_bufnr,
-            self._active_request
+            active_request.source_bufnr,
+            active_request
         )
     end
 
@@ -786,8 +938,9 @@ end
 
 --- @param self agentic.ui.InlineChat
 --- @param update agentic.acp.SessionUpdateMessage
-function M.handle_session_update(self, update)
-    local request = self._active_request
+--- @param opts {conversation_id?: string|nil}|nil
+function M.handle_session_update(self, update, opts)
+    local request = get_active_request(self, opts)
     if not request or Utils.is_terminal_phase(request.phase) then
         return
     end
@@ -802,6 +955,8 @@ function M.handle_session_update(self, update)
         end
         request.phase = "thinking"
         request.status_text = "Thinking"
+        request.tool_detail = nil
+        request.tool_failed = false
     elseif update.sessionUpdate == "agent_message_chunk" then
         local text = update.content
                 and update.content.type == "text"
@@ -812,6 +967,8 @@ function M.handle_session_update(self, update)
         end
         request.phase = "generating"
         request.status_text = "Generating response"
+        request.tool_detail = nil
+        request.tool_failed = false
     else
         return
     end
@@ -830,14 +987,26 @@ end
 
 --- @param self agentic.ui.InlineChat
 --- @param tool_call table
-function M.handle_tool_call(self, tool_call)
-    local request = self._active_request
+--- @param opts {conversation_id?: string|nil}|nil
+function M.handle_tool_call(self, tool_call, opts)
+    local request = get_active_request(self, opts)
     if not request or Utils.is_terminal_phase(request.phase) then
         return
     end
 
     request.phase = "tool"
-    request.tool_label = Utils.build_tool_label(tool_call)
+    local next_tool_label = Utils.build_tool_label(tool_call)
+    if
+        next_tool_label == "tool"
+        and request.tool_label
+        and request.tool_label ~= ""
+    then
+        next_tool_label = request.tool_label
+    end
+
+    request.tool_label = next_tool_label
+    request.tool_detail = nil
+    request.tool_failed = false
     request.status_text = "Running " .. request.tool_label
     M._sync_thread_history(self, request.source_bufnr, request)
     OverlayRenderer.render_thread(
@@ -853,22 +1022,38 @@ end
 
 --- @param self agentic.ui.InlineChat
 --- @param tool_call table
-function M.handle_tool_call_update(self, tool_call)
-    local request = self._active_request
+--- @param opts {conversation_id?: string|nil}|nil
+function M.handle_tool_call_update(self, tool_call, opts)
+    local request = get_active_request(self, opts)
     if not request or Utils.is_terminal_phase(request.phase) then
         return
     end
 
-    request.tool_label = Utils.build_tool_label(tool_call)
+    local next_tool_label = Utils.build_tool_label(tool_call)
+    if
+        next_tool_label == "tool"
+        and request.tool_label
+        and request.tool_label ~= ""
+    then
+        next_tool_label = request.tool_label
+    end
+
+    request.tool_label = next_tool_label
+    request.tool_detail = get_tool_detail(tool_call)
 
     if tool_call.status == "failed" then
-        request.phase = "failed"
-        request.status_text = "Tool failed: " .. request.tool_label
+        request.phase = "generating"
+        request.tool_failed = true
+        request.status_text = "Tool issue: " .. request.tool_label
     elseif tool_call.status == "completed" then
         request.phase = "generating"
+        request.tool_detail = nil
+        request.tool_failed = false
         request.status_text = "Completed " .. request.tool_label
     else
         request.phase = "tool"
+        request.tool_detail = nil
+        request.tool_failed = false
         request.status_text = "Running " .. request.tool_label
     end
 
@@ -885,14 +1070,17 @@ function M.handle_tool_call_update(self, tool_call)
 end
 
 --- @param self agentic.ui.InlineChat
-function M.handle_permission_request(self)
-    local request = self._active_request
+--- @param opts {conversation_id?: string|nil}|nil
+function M.handle_permission_request(self, opts)
+    local request = get_active_request(self, opts)
     if not request or Utils.is_terminal_phase(request.phase) then
         return
     end
 
     request.phase = "waiting"
     request.status_text = "Waiting for approval"
+    request.tool_detail = nil
+    request.tool_failed = false
     M._sync_thread_history(self, request.source_bufnr, request)
     OverlayRenderer.render_thread(
         self,
@@ -929,11 +1117,11 @@ local function hide_request_overlay(self, request)
 end
 
 --- @param self agentic.ui.InlineChat
---- @param opts {option_id?: string|nil, options?: agentic.acp.PermissionOption[]|nil}|nil
+--- @param opts {conversation_id?: string|nil, option_id?: string|nil, options?: agentic.acp.PermissionOption[]|nil}|nil
 function M.handle_permission_resolution(self, opts)
     opts = opts or {}
 
-    local request = self._active_request
+    local request = get_active_request(self, opts)
     if not request then
         return
     end
@@ -956,6 +1144,8 @@ function M.handle_permission_resolution(self, opts)
 
     vim.schedule(function()
         self:open(selection, {
+            conversation_id = request.conversation_id,
+            close_cancels_conversation = true,
             source_bufnr = request.source_bufnr,
             source_winid = request.source_winid,
         })
@@ -963,15 +1153,17 @@ function M.handle_permission_resolution(self, opts)
 end
 
 --- @param self agentic.ui.InlineChat
-function M.handle_applied_edit(self)
-    hide_request_overlay(self, self._active_request)
+--- @param opts {conversation_id?: string|nil}|nil
+function M.handle_applied_edit(self, opts)
+    hide_request_overlay(self, get_active_request(self, opts))
 end
 
 --- @param self agentic.ui.InlineChat
 --- @param response agentic.acp.PromptResponse|nil
 --- @param err table|nil
-function M.complete(self, response, err)
-    local request = self._active_request
+--- @param opts {conversation_id?: string|nil}|nil
+function M.complete(self, response, err, opts)
+    local request = get_active_request(self, opts)
     if not request or Utils.is_terminal_phase(request.phase) then
         return
     end
@@ -988,6 +1180,9 @@ function M.complete(self, response, err)
         request.phase = "completed"
         request.status_text = "Inline request complete"
     end
+
+    request.tool_detail = nil
+    request.tool_failed = false
 
     M._sync_thread_history(self, request.source_bufnr, request)
     OverlayRenderer.render_thread(
@@ -1014,8 +1209,11 @@ function M.clear_buffer(self, bufnr)
         self:_close_prompt(true)
     end
 
-    if self._active_request and self._active_request.source_bufnr == bufnr then
-        self._active_request.overlay_hidden = true
+    for _, active_request in pairs(ensure_active_requests(self)) do
+        if active_request.source_bufnr == bufnr then
+            active_request.overlay_hidden = true
+            remove_active_request(self, active_request)
+        end
     end
 
     for _, queued_request in pairs(self._queued_requests) do
@@ -1059,7 +1257,9 @@ end
 function M.clear(self)
     self:_close_prompt(true)
 
-    OverlayRenderer.dismiss_progress(self, self._active_request)
+    for _, active_request in pairs(ensure_active_requests(self)) do
+        OverlayRenderer.dismiss_progress(self, active_request)
+    end
 
     local runtime_ids = vim.tbl_keys(self._thread_runtimes)
     for _, runtime_id in ipairs(runtime_ids) do
@@ -1067,6 +1267,7 @@ function M.clear(self)
     end
 
     self._active_request = nil
+    self._active_requests = {}
     self._queued_requests = {}
 end
 

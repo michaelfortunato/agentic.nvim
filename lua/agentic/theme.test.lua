@@ -160,6 +160,10 @@ describe("agentic.Theme", function()
                 0,
                 { name = Theme.HL_GROUPS.FOLD_HINT, link = false }
             )
+            local inline_fade = vim.api.nvim_get_hl(
+                0,
+                { name = Theme.HL_GROUPS.INLINE_FADE, link = false }
+            )
             assert.equal(0x111111, request_meta.fg)
             assert.is_true(request_meta.italic)
             assert.equal(0x111111, response_meta.fg)
@@ -171,6 +175,8 @@ describe("agentic.Theme", function()
             assert.is_true(resource_link.underline)
             assert.equal(0x111111, fold_hint.fg)
             assert.is_true(fold_hint.italic)
+            assert.equal(0x111111, inline_fade.fg)
+            assert.is_true(inline_fade.italic)
             assert.equal(1, vim.fn.hlexists(Theme.HL_GROUPS.INLINE_FADE))
         end
     )

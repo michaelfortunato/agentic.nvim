@@ -13,6 +13,7 @@ M.NS_REVIEW = InlineRenderer.NS_REVIEW
 local BUFFER_REVIEW_KEY = "_agentic_pending_reviews"
 local TAB_REVIEW_SESSIONS_KEY = "_agentic_review_sessions"
 local TAB_ACTIVE_REVIEW_KEY = "_agentic_active_review_key"
+local TAB_ACTIVE_REVIEW_WINID_KEY = "_agentic_active_review_winid"
 
 local TERMINAL_CLEAR_REASONS = {
     approved = true,
@@ -111,6 +112,14 @@ end
 --- @return boolean
 local function is_valid_tabpage(tabpage)
     return type(tabpage) == "number" and vim.api.nvim_tabpage_is_valid(tabpage)
+end
+
+--- @param winid integer|nil
+--- @return boolean
+local function is_valid_winid(winid)
+    return type(winid) == "number"
+        and winid > 0
+        and vim.api.nvim_win_is_valid(winid)
 end
 
 --- @param bufnr integer
@@ -289,6 +298,69 @@ function M.set_active_review_key(tabpage, review_key)
     end
 
     vim.t[target_tabpage][TAB_ACTIVE_REVIEW_KEY] = review_key
+end
+
+--- @param tabpage integer|nil
+--- @param winid integer|nil
+--- @return boolean
+function M.is_active_review_window(tabpage, winid)
+    local target_tabpage = tabpage or vim.api.nvim_get_current_tabpage()
+    if not is_valid_tabpage(target_tabpage) then
+        return false
+    end
+
+    return vim.t[target_tabpage][TAB_ACTIVE_REVIEW_WINID_KEY] == winid
+end
+
+--- @param tabpage integer|nil
+--- @return integer|nil
+function M.get_active_review_window(tabpage)
+    local target_tabpage = tabpage or vim.api.nvim_get_current_tabpage()
+    if not is_valid_tabpage(target_tabpage) then
+        return nil
+    end
+
+    local winid = vim.t[target_tabpage][TAB_ACTIVE_REVIEW_WINID_KEY]
+    if not is_valid_winid(winid) then
+        vim.t[target_tabpage][TAB_ACTIVE_REVIEW_WINID_KEY] = nil
+        return nil
+    end
+
+    local ok, win_tabpage = pcall(vim.api.nvim_win_get_tabpage, winid)
+    if not ok or win_tabpage ~= target_tabpage then
+        vim.t[target_tabpage][TAB_ACTIVE_REVIEW_WINID_KEY] = nil
+        return nil
+    end
+
+    return winid
+end
+
+--- @param tabpage integer|nil
+--- @param winid integer|nil
+function M.set_active_review_window(tabpage, winid)
+    local target_tabpage = tabpage or vim.api.nvim_get_current_tabpage()
+    if not is_valid_tabpage(target_tabpage) then
+        return
+    end
+
+    local previous_winid = vim.t[target_tabpage][TAB_ACTIVE_REVIEW_WINID_KEY]
+    if is_valid_winid(previous_winid) then
+        vim.w[previous_winid]._agentic_review_owner_tabpage = nil
+    end
+
+    if not is_valid_winid(winid) then
+        vim.t[target_tabpage][TAB_ACTIVE_REVIEW_WINID_KEY] = nil
+        return
+    end
+
+    local ok, win_tabpage = pcall(vim.api.nvim_win_get_tabpage, winid)
+    if not ok or win_tabpage ~= target_tabpage then
+        vim.t[target_tabpage][TAB_ACTIVE_REVIEW_WINID_KEY] = nil
+        return
+    end
+
+    vim.t[target_tabpage][TAB_ACTIVE_REVIEW_WINID_KEY] = winid
+    vim.w[winid]._agentic_review_owner_tabpage = target_tabpage
 end
 
 --- @param bufnr integer
@@ -538,6 +610,7 @@ function M.detach_review_from_buffer(bufnr, review_key, tabpage)
         if M.get_active_review_key(target_tabpage) == target_review_key then
             M.set_active_review_key(target_tabpage, nil)
         end
+        M.set_active_review_window(target_tabpage, nil)
     end
 end
 
@@ -938,6 +1011,7 @@ function M.mark_review_detached(review_key, reason, bufnr, tabpage)
     then
         M.set_active_review_key(target_tabpage, nil)
         M.set_active_diff_buffer(target_tabpage, nil)
+        M.set_active_review_window(target_tabpage, nil)
     end
 
     if M.is_terminal_clear_reason(reason) then

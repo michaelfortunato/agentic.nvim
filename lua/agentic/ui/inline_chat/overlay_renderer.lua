@@ -119,22 +119,34 @@ end
 --- @param runtime agentic.ui.InlineChat.ThreadRuntime
 --- @return integer
 function M.get_max_width(_self, runtime)
+    local configured_width =
+        math.max(24, math.floor(tonumber(Config.inline.overlay_width) or 80))
+
     if
         runtime.source_winid and vim.api.nvim_win_is_valid(runtime.source_winid)
     then
         return math.max(
             24,
-            vim.api.nvim_win_get_width(runtime.source_winid) - 4
+            math.min(
+                vim.api.nvim_win_get_width(runtime.source_winid) - 4,
+                configured_width
+            )
         )
     end
 
     local fallback_winid = vim.fn.bufwinid(runtime.source_bufnr)
     if fallback_winid ~= -1 and vim.api.nvim_win_is_valid(fallback_winid) then
         runtime.source_winid = fallback_winid
-        return math.max(24, vim.api.nvim_win_get_width(fallback_winid) - 4)
+        return math.max(
+            24,
+            math.min(
+                vim.api.nvim_win_get_width(fallback_winid) - 4,
+                configured_width
+            )
+        )
     end
 
-    return 72
+    return configured_width
 end
 
 --- @param hl string|string[]|nil
@@ -156,17 +168,54 @@ end
 --- @param label_hl string|string[]|nil
 --- @param text_hl string|string[]|nil
 --- @param max_width integer
---- @return table
-function M.build_compact_line(_self, label, text, label_hl, text_hl, max_width)
+--- @return table[] lines
+function M.build_compact_lines(_self, label, text, label_hl, text_hl, max_width)
     local label_text = label .. ": "
-    local available_width =
-        math.max(12, max_width - vim.fn.strdisplaywidth(label_text) - 4)
+    local prefix_text = "  " .. label_text
+    local prefix_width = vim.fn.strdisplaywidth(prefix_text)
+    local available_width = math.max(12, max_width - prefix_width)
+    local wrapped = Utils.wrap_text(text, available_width)
 
-    return {
-        faded_segment("  ", Theme.HL_GROUPS.REVIEW_BANNER),
-        faded_segment(label_text, label_hl),
-        faded_segment(Utils.truncate_text(text, available_width), text_hl),
-    }
+    if #wrapped == 0 then
+        wrapped = { "" }
+    end
+
+    --- @type table[]
+    local lines = {}
+
+    for index, line in ipairs(wrapped) do
+        if index == 1 then
+            lines[#lines + 1] = {
+                faded_segment("  ", Theme.HL_GROUPS.REVIEW_BANNER),
+                faded_segment(label_text, label_hl),
+                faded_segment(line, text_hl),
+            }
+        else
+            lines[#lines + 1] = {
+                faded_segment(
+                    string.rep(" ", prefix_width),
+                    Theme.HL_GROUPS.REVIEW_BANNER
+                ),
+                faded_segment(line, text_hl),
+            }
+        end
+    end
+
+    return lines
+end
+
+--- @param lines table[]
+--- @param detail_lines table[]
+local function append_virtual_lines(lines, detail_lines)
+    for _, line in ipairs(detail_lines) do
+        lines[#lines + 1] = line
+    end
+end
+
+--- @param entry agentic.ui.InlineChat.ActiveRequest|agentic.ui.InlineChat.ThreadTurn
+--- @return boolean notice
+local function is_tool_notice(entry)
+    return entry.tool_failed == true
 end
 
 --- @param self agentic.ui.InlineChat
@@ -176,12 +225,13 @@ end
 --- @return table[]
 function M.build_virtual_lines(self, entry, selection, max_width)
     local config_context = entry.config_context
-    local status_hl =
-        Theme.get_spinner_hl_group(Utils.phase_to_spinner_state(entry.phase))
+    local status_hl = is_tool_notice(entry) and Theme.HL_GROUPS.ACTIVITY_TEXT
+        or Theme.get_spinner_hl_group(Utils.phase_to_spinner_state(entry.phase))
     local latest_thought = Config.inline.show_thoughts
             and Utils.latest_line(entry.thought_text)
         or nil
     local latest_response = Utils.latest_line(entry.message_text)
+    local latest_tool_detail = Utils.latest_line(entry.tool_detail)
 
     --- @type table[]
     local lines = {
@@ -199,10 +249,10 @@ function M.build_virtual_lines(self, entry, selection, max_width)
         },
     }
 
-    local detail_line = nil
+    local detail_lines = nil
 
     if entry.phase == "thinking" and latest_thought then
-        detail_line = M.build_compact_line(
+        detail_lines = M.build_compact_lines(
             self,
             "Thinking",
             latest_thought,
@@ -210,15 +260,11 @@ function M.build_virtual_lines(self, entry, selection, max_width)
             Theme.HL_GROUPS.THOUGHT_TEXT,
             max_width
         )
-    elseif
-        (entry.phase == "tool" or entry.phase == "waiting")
-        and entry.tool_label
-        and entry.tool_label ~= ""
-    then
-        detail_line = M.build_compact_line(
+    elseif is_tool_notice(entry) and latest_tool_detail then
+        detail_lines = M.build_compact_lines(
             self,
-            "Tool",
-            entry.tool_label,
+            "Detail",
+            latest_tool_detail,
             Theme.HL_GROUPS.REVIEW_BANNER_ACCENT,
             Theme.HL_GROUPS.ACTIVITY_TEXT,
             max_width
@@ -227,7 +273,7 @@ function M.build_virtual_lines(self, entry, selection, max_width)
         local result_hl = entry.phase == "failed"
                 and Theme.HL_GROUPS.STATUS_FAILED
             or Theme.HL_GROUPS.REVIEW_BANNER
-        detail_line = M.build_compact_line(
+        detail_lines = M.build_compact_lines(
             self,
             Utils.is_terminal_phase(entry.phase) and "Result" or "Response",
             latest_response,
@@ -236,8 +282,16 @@ function M.build_virtual_lines(self, entry, selection, max_width)
             result_hl,
             max_width
         )
-    elseif entry.tool_label and entry.tool_label ~= "" then
-        local tool_line = M.build_compact_line(
+    elseif
+        entry.tool_label
+        and entry.tool_label ~= ""
+        and (
+            entry.phase == "tool"
+            or entry.phase == "waiting"
+            or not latest_response
+        )
+    then
+        detail_lines = M.build_compact_lines(
             self,
             "Tool",
             entry.tool_label,
@@ -245,9 +299,8 @@ function M.build_virtual_lines(self, entry, selection, max_width)
             Theme.HL_GROUPS.ACTIVITY_TEXT,
             max_width
         )
-        detail_line = tool_line
     elseif entry.prompt ~= "" then
-        detail_line = M.build_compact_line(
+        detail_lines = M.build_compact_lines(
             self,
             "Prompt",
             entry.prompt,
@@ -256,7 +309,7 @@ function M.build_virtual_lines(self, entry, selection, max_width)
             max_width
         )
     elseif config_context and config_context ~= "" then
-        detail_line = M.build_compact_line(
+        detail_lines = M.build_compact_lines(
             self,
             "Config",
             config_context,
@@ -266,8 +319,8 @@ function M.build_virtual_lines(self, entry, selection, max_width)
         )
     end
 
-    if detail_line then
-        lines[#lines + 1] = detail_line
+    if detail_lines then
+        append_virtual_lines(lines, detail_lines)
     end
 
     return lines
@@ -372,18 +425,21 @@ function M.clear_thread_runtime(self, runtime_id)
     stop_thread_close_timer(self, runtime)
     M.clear_thread_overlay(self, runtime_id)
 
-    local active_request = self._active_request
-    if
-        active_request
-        and Utils.is_terminal_phase(active_request.phase)
-        and Utils.thread_runtime_key(
-                active_request.source_bufnr,
-                active_request.range_extmark_id
-            )
-            == runtime_id
-    then
-        M.dismiss_progress(self, active_request)
-        self._active_request = nil
+    for conversation_id, active_request in pairs(self._active_requests or {}) do
+        if
+            Utils.is_terminal_phase(active_request.phase)
+            and Utils.thread_runtime_key(
+                    active_request.source_bufnr,
+                    active_request.range_extmark_id
+                )
+                == runtime_id
+        then
+            M.dismiss_progress(self, active_request)
+            self._active_requests[conversation_id] = nil
+            if self._active_request == active_request then
+                self._active_request = nil
+            end
+        end
     end
 
     for submission_id, queued_request in pairs(self._queued_requests) do

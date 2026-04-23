@@ -9,15 +9,31 @@ local WidgetBinding = require("agentic.session.widget_binding")
 
 --- @class agentic.SessionManager.QueuedSubmission
 --- @field id integer
+--- @field turn_id? string
 --- @field input_text string
 --- @field prompt agentic.acp.Content[]
---- @field request {kind: "user"|"review", surface: "chat"|"inline", text: string, timestamp: integer, content: agentic.acp.Content[]}
---- @field inline_request? {prompt: string, selection: agentic.Selection, source_bufnr: integer, source_winid: integer}|nil
+--- @field request {turn_id?: string, kind: "user"|"review", surface: "chat"|"inline", text: string, timestamp: integer, content: agentic.acp.Content[]}
+--- @field inline_request? {conversation_id?: string, prompt: string, selection: agentic.Selection, source_bufnr: integer, source_winid: integer}|nil
+
+--- @class agentic.SessionManager.InlineSession
+--- @field session_id? string
+--- @field starting boolean
+--- @field is_generating boolean
+--- @field active_turn_id? string
+--- @field pending_callbacks fun(session_id: string)[]
+--- @field awaiting_rejected_followup boolean
+--- @field close_on_complete boolean
 
 --- @class agentic.SessionManager
 --- @field instance_id? integer
 --- @field session_id? string
 --- @field _inline_session_id? string
+--- @field _inline_sessions table<string, agentic.SessionManager.InlineSession>
+--- @field _next_inline_conversation_id integer
+--- @field _next_inline_submission_id integer
+--- @field _inline_submission_queues table<string, agentic.SessionManager.QueuedSubmission[]>
+--- @field _next_interaction_turn_id integer
+--- @field _active_chat_turn_id? string
 --- @field tab_page_id integer Current widget tab page
 --- @field _is_first_message boolean Whether this is the first message in the session, used to add system info only once
 --- @field is_generating boolean
@@ -64,6 +80,12 @@ function SessionManager:new(opts)
         instance_id = opts.instance_id,
         session_id = nil,
         _inline_session_id = nil,
+        _inline_sessions = {},
+        _next_inline_conversation_id = 0,
+        _next_inline_submission_id = 0,
+        _inline_submission_queues = {},
+        _next_interaction_turn_id = 0,
+        _active_chat_turn_id = nil,
         tab_page_id = widget_tab_page_id,
         _is_first_message = true,
         is_generating = false,
@@ -97,6 +119,9 @@ function SessionManager:new(opts)
         tab_page_id = widget_tab_page_id,
         on_submit = function(request)
             return self:_submit_inline_request(request)
+        end,
+        on_conversation_exit = function(conversation_id)
+            self:_cancel_inline_session(conversation_id)
         end,
         on_change_mode = function()
             self.config_options:show_mode_selector()
@@ -157,12 +182,17 @@ function SessionManager:_ensure_session_started()
     SessionController.ensure_session_started(self)
 end
 
-function SessionManager:_drain_pending_inline_session_callbacks()
-    SessionController.drain_pending_inline_session_callbacks(self)
+--- @param conversation_id string|nil
+function SessionManager:_drain_pending_inline_session_callbacks(conversation_id)
+    SessionController.drain_pending_inline_session_callbacks(
+        self,
+        conversation_id
+    )
 end
 
-function SessionManager:_ensure_inline_session_started()
-    SessionController.ensure_inline_session_started(self)
+--- @param conversation_id string|nil
+function SessionManager:_ensure_inline_session_started(conversation_id)
+    SessionController.ensure_inline_session_started(self, conversation_id)
 end
 
 --- @param callback fun()
@@ -170,18 +200,24 @@ function SessionManager:_with_active_session(callback)
     SessionController.with_active_session(self, callback)
 end
 
---- @param callback fun()
-function SessionManager:_with_active_inline_session(callback)
-    SessionController.with_active_inline_session(self, callback)
+--- @param conversation_id string
+--- @param callback fun(session_id: string)
+function SessionManager:_with_active_inline_session(conversation_id, callback)
+    SessionController.with_active_inline_session(
+        self,
+        conversation_id,
+        callback
+    )
 end
 
---- @param opts {on_created: fun()|nil}|nil
+--- @param opts {conversation_id?: string|nil, on_created: fun(session_id: string)|nil}|nil
 function SessionManager:_start_inline_session(opts)
     SessionController.start_inline_session(self, opts)
 end
 
-function SessionManager:_cancel_inline_session()
-    SessionController.cancel_inline_session(self)
+--- @param conversation_id string|nil
+function SessionManager:_cancel_inline_session(conversation_id)
+    SessionController.cancel_inline_session(self, conversation_id)
 end
 
 --- @param input_text string
@@ -221,40 +257,41 @@ end
 
 --- @return string|nil
 function SessionManager:get_active_generation_session_id()
-    if
-        self.inline_chat
-        and self.inline_chat.is_active
-        and self.inline_chat:is_active()
-        and self._inline_session_id
-    then
-        return self._inline_session_id
+    if self.is_generating and self.session_id then
+        return self.session_id
+    end
+
+    for _, inline_session in pairs(self._inline_sessions or {}) do
+        if inline_session.is_generating and inline_session.session_id then
+            return inline_session.session_id
+        end
     end
 
     return self.session_id
 end
 
 --- @param update agentic.acp.SessionUpdateMessage
---- @param opts {route?: "chat"|"inline"|nil}|nil
+--- @param opts {route?: "chat"|"inline"|nil, inline_conversation_id?: string|nil}|nil
 function SessionManager:_on_session_update(update, opts)
     SessionController.on_session_update(self, update, opts)
 end
 
 --- @param tool_call agentic.ui.MessageWriter.ToolCallBlock
---- @param opts {route?: "chat"|"inline"|nil}|nil
+--- @param opts {route?: "chat"|"inline"|nil, inline_conversation_id?: string|nil}|nil
 function SessionManager:_on_tool_call(tool_call, opts)
     SessionController.on_tool_call(self, tool_call, opts)
 end
 
 --- Handle tool call update: update UI, history, diff preview, permissions, and reload buffers
 --- @param tool_call_update agentic.ui.MessageWriter.ToolCallBlock
---- @param opts {route?: "chat"|"inline"|nil}|nil
+--- @param opts {route?: "chat"|"inline"|nil, inline_conversation_id?: string|nil}|nil
 function SessionManager:_on_tool_call_update(tool_call_update, opts)
     SessionController.on_tool_call_update(self, tool_call_update, opts)
 end
 
 --- @param request agentic.acp.RequestPermission
 --- @param callback fun(option_id: string|nil)
---- @param opts {route?: "chat"|"inline"|nil}|nil
+--- @param opts {route?: "chat"|"inline"|nil, inline_conversation_id?: string|nil}|nil
 function SessionManager:_handle_permission_request(request, callback, opts)
     SessionController.handle_permission_request(self, request, callback, opts)
 end
@@ -418,7 +455,7 @@ function SessionManager:open_inline_chat(selection)
     self.inline_chat:open(inline_selection)
 end
 
---- @param request {prompt: string, selection: agentic.Selection, source_bufnr: integer, source_winid: integer}
+--- @param request {conversation_id?: string|nil, prompt: string, selection: agentic.Selection, source_bufnr: integer, source_winid: integer}
 --- @return boolean accepted
 function SessionManager:_submit_inline_request(request)
     return SubmissionController.submit_inline_request(self, request)

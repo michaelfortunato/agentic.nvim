@@ -18,6 +18,8 @@ describe("agentic", function()
     local current_session_stub
     --- @type TestStub|nil
     local clear_inline_buffer_stub
+    --- @type TestStub|nil
+    local get_widget_sessions_stub
     --- @type integer
     local test_bufnr
 
@@ -35,12 +37,14 @@ describe("agentic", function()
         pcall(vim.api.nvim_del_user_command, "AgenticInlineClear")
     end
 
-    --- @param opts {is_open?: boolean}|nil
+    --- @param opts {is_open?: boolean, tab_page_id?: integer}|nil
     local function create_session(opts)
         opts = opts or {}
 
         local widget = {
             _open = opts.is_open == true,
+            tab_page_id = opts.tab_page_id
+                or vim.api.nvim_get_current_tabpage(),
             is_open = function(self)
                 return self._open
             end,
@@ -114,6 +118,11 @@ describe("agentic", function()
             clear_inline_buffer_stub = nil
         end
 
+        if get_widget_sessions_stub then
+            get_widget_sessions_stub:revert()
+            get_widget_sessions_stub = nil
+        end
+
         if new_signal_stub then
             new_signal_stub:revert()
             new_signal_stub = nil
@@ -143,6 +152,22 @@ describe("agentic", function()
         assert.spy(session.widget.show).was.called(0)
     end)
 
+    it("toggles an open tab widget even without context affinity", function()
+        local session = create_session({ is_open = true })
+
+        get_widget_sessions_stub =
+            spy.stub(SessionRegistry, "get_widget_sessions")
+        get_widget_sessions_stub:returns({ session })
+
+        get_session_stub = spy.stub(SessionRegistry, "get_or_create_session")
+
+        vim.cmd("AgenticChat")
+
+        assert.spy(session.widget.hide).was.called(1)
+        assert.spy(session.widget.show).was.called(0)
+        assert.spy(get_session_stub).was.called(0)
+    end)
+
     it("prefills the prompt when AgenticChat is called with a range", function()
         local session = create_session({ is_open = true })
 
@@ -165,6 +190,22 @@ describe("agentic", function()
         assert.spy(session.add_selection_or_file_to_session).was.called(0)
     end)
 
+    it("reuses the open tab widget for Agentic.open", function()
+        local session = create_session({ is_open = true })
+
+        get_widget_sessions_stub =
+            spy.stub(SessionRegistry, "get_widget_sessions")
+        get_widget_sessions_stub:returns({ session })
+
+        get_session_stub = spy.stub(SessionRegistry, "get_or_create_session")
+
+        Agentic.open({ auto_add_to_context = false })
+
+        assert.spy(get_session_stub).was.called(0)
+        assert.spy(session.widget.hide).was.called(0)
+        assert.spy(session.widget.show).was.called(1)
+    end)
+
     it(
         "starts a new session and prefills the prompt for AgenticChat new",
         function()
@@ -183,6 +224,25 @@ describe("agentic", function()
             assert.spy(session.add_selection_or_file_to_session).was.called(0)
         end
     )
+
+    it("hides an existing tab widget before showing a new session", function()
+        local existing_session = create_session({ is_open = true })
+        local new_session = create_session({ is_open = false })
+
+        get_widget_sessions_stub =
+            spy.stub(SessionRegistry, "get_widget_sessions")
+        get_widget_sessions_stub:returns({ existing_session, new_session })
+
+        new_session_stub = spy.stub(SessionRegistry, "new_session")
+        new_session_stub:returns(new_session)
+
+        Agentic.new_session({ auto_add_to_context = false })
+
+        assert.spy(existing_session.widget.hide).was.called(1)
+        assert.spy(existing_session.widget.show).was.called(0)
+        assert.spy(new_session.widget.hide).was.called(0)
+        assert.spy(new_session.widget.show).was.called(1)
+    end)
 
     it("routes AgenticChat restore through the session picker", function()
         local session = create_session()
@@ -238,15 +298,22 @@ describe("agentic", function()
             local stop_generation_spy = spy.new(function() end)
             local clear_permissions_spy = spy.new(function() end)
             local session = {
-                is_generating = true,
+                is_generating = false,
                 session_id = "chat-session",
-                _inline_session_id = "inline-session",
+                _inline_sessions = {
+                    ["conversation-1"] = {
+                        session_id = "inline-session",
+                        starting = false,
+                        is_generating = true,
+                        active_turn_id = "inline-1",
+                        pending_callbacks = {},
+                        awaiting_rejected_followup = false,
+                        close_on_complete = false,
+                    },
+                },
                 agent = {
                     stop_generation = stop_generation_spy,
                 },
-                get_active_generation_session_id = function(self)
-                    return self._inline_session_id
-                end,
                 inline_chat = {
                     is_active = function()
                         return true

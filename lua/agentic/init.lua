@@ -13,6 +13,11 @@ local Agentic = {}
 --- @class agentic.Agentic.ChatOpts : agentic.ui.ChatWidget.ShowOpts
 --- @field prompt_text? string Pre-fill the chat input buffer after opening
 
+--- @alias agentic.Agentic.ShowSessionOpts
+--- | agentic.Agentic.ChatOpts
+--- | agentic.ui.ChatWidget.AddToContextOpts
+--- | agentic.ui.ChatWidget.AddFilesToContextOpts
+
 --- @class agentic.Agentic.InlineChatOpts
 --- @field selection? agentic.Selection
 
@@ -23,8 +28,68 @@ local Agentic = {}
 --- @field line2 integer
 --- @field range integer
 
+--- @param tab_page_id integer|nil
+--- @return agentic.SessionManager[] sessions
+local function get_open_widget_sessions(tab_page_id)
+    local resolved_tab_page_id = tab_page_id
+        or vim.api.nvim_get_current_tabpage()
+    --- @type agentic.SessionManager[]
+    local sessions = {}
+
+    for _, session in
+        ipairs(SessionRegistry.get_widget_sessions(resolved_tab_page_id))
+    do
+        local widget = session and session.widget or nil
+        if widget and widget.is_open and widget:is_open() then
+            sessions[#sessions + 1] = session
+        end
+    end
+
+    return sessions
+end
+
+--- @param tab_page_id integer|nil
+--- @return agentic.SessionManager|nil session
+local function get_open_widget_session(tab_page_id)
+    return get_open_widget_sessions(tab_page_id)[1]
+end
+
+--- @param tab_page_id integer|nil
+--- @param except_session agentic.SessionManager|nil
+--- @return integer hidden_count
+local function hide_open_widget_sessions(tab_page_id, except_session)
+    local hidden_count = 0
+
+    for _, session in ipairs(get_open_widget_sessions(tab_page_id)) do
+        if
+            session ~= except_session
+            and session.widget
+            and session.widget.hide
+        then
+            session.widget:hide()
+            hidden_count = hidden_count + 1
+        end
+    end
+
+    return hidden_count
+end
+
+--- @param callback fun(session: agentic.SessionManager)|nil
+--- @return agentic.SessionManager|nil session
+local function get_or_create_widget_session(callback)
+    local session = get_open_widget_session(nil)
+    if session then
+        if callback then
+            callback(session)
+        end
+        return session
+    end
+
+    return SessionRegistry.get_or_create_session(callback)
+end
+
 --- @param session agentic.SessionManager
---- @param opts agentic.Agentic.ChatOpts|nil
+--- @param opts agentic.Agentic.ShowSessionOpts|nil
 local function show_session_widget(session, opts)
     opts = opts or {}
 
@@ -48,6 +113,16 @@ local function show_session_widget(session, opts)
         else
             show_opts.anchor_winid = invoking_winid
         end
+    end
+
+    local widget_tab_page_id = session.widget and session.widget.tab_page_id
+        or vim.api.nvim_get_current_tabpage()
+    hide_open_widget_sessions(widget_tab_page_id, session)
+    if
+        show_opts.anchor_winid ~= nil
+        and not vim.api.nvim_win_is_valid(show_opts.anchor_winid)
+    then
+        show_opts.anchor_winid = vim.api.nvim_get_current_win()
     end
 
     session.widget:show(show_opts)
@@ -193,7 +268,7 @@ end
 --- Safe to call multiple times
 --- @param opts agentic.Agentic.ChatOpts|nil
 function Agentic.open(opts)
-    SessionRegistry.get_or_create_session(function(session)
+    get_or_create_widget_session(function(session)
         if not opts or opts.auto_add_to_context ~= false then
             session:add_selection_or_file_to_session()
         end
@@ -205,6 +280,10 @@ end
 --- Closes the chat widget for the current tab page
 --- Safe to call multiple times
 function Agentic.close()
+    if hide_open_widget_sessions(nil, nil) > 0 then
+        return
+    end
+
     SessionRegistry.get_current_session(function(session)
         session.widget:hide()
     end)
@@ -214,7 +293,14 @@ end
 --- Safe to call multiple times
 --- @param opts agentic.Agentic.ChatOpts|nil
 function Agentic.toggle(opts)
-    SessionRegistry.get_or_create_session(function(session)
+    if
+        (not opts or opts.prompt_text == nil)
+        and hide_open_widget_sessions(nil, nil) > 0
+    then
+        return
+    end
+
+    get_or_create_widget_session(function(session)
         if
             session.widget:is_open() and (not opts or opts.prompt_text == nil)
         then
@@ -232,6 +318,13 @@ end
 --- Rotates through predefined window layouts for the chat widget
 --- @param layouts agentic.UserConfig.Windows.Position[]|nil
 function Agentic.rotate_layout(layouts)
+    local open_widget_session = get_open_widget_session(nil)
+    if open_widget_session then
+        hide_open_widget_sessions(nil, open_widget_session)
+        open_widget_session.widget:rotate_layout(layouts)
+        return
+    end
+
     SessionRegistry.get_current_session(function(session)
         session.widget:rotate_layout(layouts)
     end)
@@ -240,18 +333,18 @@ end
 --- Add the current visual selection to the Chat context
 --- @param opts agentic.ui.ChatWidget.AddToContextOpts|nil
 function Agentic.add_selection(opts)
-    SessionRegistry.get_or_create_session(function(session)
+    get_or_create_widget_session(function(session)
         session:add_selection_to_session()
-        session.widget:show(opts)
+        show_session_widget(session, opts)
     end)
 end
 
 --- Add the current file to the Chat context
 --- @param opts agentic.ui.ChatWidget.AddToContextOpts|nil
 function Agentic.add_file(opts)
-    SessionRegistry.get_or_create_session(function(session)
+    get_or_create_widget_session(function(session)
         session:add_file_to_session()
-        session.widget:show(opts)
+        show_session_widget(session, opts)
     end)
 end
 
@@ -259,7 +352,7 @@ end
 --- You can add 1 or more in a single call
 --- @param opts agentic.ui.ChatWidget.AddFilesToContextOpts
 function Agentic.add_files_to_context(opts)
-    SessionRegistry.get_or_create_session(function(session)
+    get_or_create_widget_session(function(session)
         local files = opts.files
 
         if files and type(files) == "table" then
@@ -273,16 +366,16 @@ function Agentic.add_files_to_context(opts)
             )
         end
 
-        session.widget:show(opts)
+        show_session_widget(session, opts)
     end)
 end
 
 --- Add either the current visual selection or the current file to the Chat context
 --- @param opts agentic.ui.ChatWidget.AddToContextOpts|nil
 function Agentic.add_selection_or_file_to_context(opts)
-    SessionRegistry.get_or_create_session(function(session)
+    get_or_create_widget_session(function(session)
         session:add_selection_or_file_to_session()
-        session.widget:show(opts)
+        show_session_widget(session, opts)
     end)
 end
 
@@ -292,10 +385,10 @@ end
 --- Add diagnostics at the current cursor line to the Chat context
 --- @param opts agentic.ui.ChatWidget.AddToContextOpts|nil
 function Agentic.add_current_line_diagnostics(opts)
-    SessionRegistry.get_or_create_session(function(session)
+    get_or_create_widget_session(function(session)
         local count = session:add_current_line_diagnostics_to_context()
         if count > 0 then
-            session.widget:show(opts)
+            show_session_widget(session, opts)
         else
             Logger.notify(
                 "No diagnostics found on the current line",
@@ -308,10 +401,10 @@ end
 --- Add all diagnostics from the current buffer to the Chat context
 --- @param opts agentic.ui.ChatWidget.AddToContextOpts|nil
 function Agentic.add_buffer_diagnostics(opts)
-    SessionRegistry.get_or_create_session(function(session)
+    get_or_create_widget_session(function(session)
         local count = session:add_buffer_diagnostics_to_context()
         if count > 0 then
-            session.widget:show(opts)
+            show_session_widget(session, opts)
         else
             Logger.notify(
                 "No diagnostics found in the current buffer",
@@ -390,13 +483,32 @@ end
 --- Safe to call multiple times or when no generation is active
 function Agentic.stop_generation()
     SessionRegistry.get_current_session(function(session)
-        if session.is_generating then
-            local target_session_id = session.session_id
-            if session.get_active_generation_session_id then
-                target_session_id = session:get_active_generation_session_id()
-            end
+        local target_session_ids = {}
+        if session.is_generating and session.session_id then
+            target_session_ids[#target_session_ids + 1] = session.session_id
+        end
 
+        for _, inline_session in
+            pairs(rawget(session, "_inline_sessions") or {})
+        do
+            if inline_session.is_generating and inline_session.session_id then
+                target_session_ids[#target_session_ids + 1] =
+                    inline_session.session_id
+            end
+        end
+
+        if
+            #target_session_ids == 0
+            and session.get_active_generation_session_id
+        then
+            local target_session_id = session:get_active_generation_session_id()
             if target_session_id then
+                target_session_ids[#target_session_ids + 1] = target_session_id
+            end
+        end
+
+        if #target_session_ids > 0 then
+            for _, target_session_id in ipairs(target_session_ids) do
                 session.agent:stop_generation(target_session_id)
             end
             session.permission_manager:clear()
@@ -406,12 +518,14 @@ end
 
 --- show a selector to restore a previous session
 function Agentic.restore_session()
-    local current_session = SessionRegistry.get_current_session()
+    local current_session = get_open_widget_session(nil)
+        or SessionRegistry.get_current_session()
     SessionRestore.show_picker(current_session)
 end
 
 function Agentic.load_session()
-    local current_session = SessionRegistry.get_current_session()
+    local current_session = get_open_widget_session(nil)
+        or SessionRegistry.get_current_session()
     if not current_session then
         Logger.notify(
             "Open or focus a chat widget before loading another live session.",

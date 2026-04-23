@@ -173,78 +173,100 @@ describe("agentic.acp.SlashCommands", function()
             assert.equal("menu,menuone,noinsert,popup,fuzzy", completeopt)
         end)
 
-        it("adds '-' to iskeyword", function()
-            local iskeyword = vim.bo[bufnr].iskeyword
-            assert.is_true(iskeyword:match(",-") ~= nil)
-        end)
-
-        it("sets completefunc - must not use () - vim fallback", function()
+        it("does not install a completefunc", function()
             local completefunc = vim.bo[bufnr].completefunc
-            assert.equal(
-                "v:lua.require'agentic.acp.slash_commands'.complete_func",
-                completefunc
-            )
+            assert.equal("", completefunc)
         end)
     end)
 
-    describe("complete_func", function()
-        it("returns commands on findstart=0", function()
+    describe("trigger_completion", function()
+        --- @type TestStub
+        local complete_stub
+
+        before_each(function()
+            complete_stub = spy.stub(vim.fn, "complete")
+        end)
+
+        after_each(function()
+            complete_stub:revert()
+        end)
+
+        it("starts native completion after the slash", function()
             --- @type agentic.acp.AvailableCommand[]
             local commands_mock = {
                 { name = "plan", description = "Create a plan" },
+                { name = "review", description = "Review code" },
             }
 
             SlashCommands.setCommands(bufnr, commands_mock)
+            vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "/pl" })
+            vim.api.nvim_win_set_cursor(0, { 1, 3 })
 
-            local result = SlashCommands.complete_func(0, "pl")
-            assert.is_table(result)
-            assert.is_true(#result > 0)
+            assert.is_true(SlashCommands.trigger_completion(bufnr))
+            assert.equal(1, complete_stub.call_count)
+            assert.equal(2, complete_stub.calls[1][1])
+            assert.equal("plan", complete_stub.calls[1][2][1].word)
+            assert.equal(1, #complete_stub.calls[1][2])
         end)
 
-        it("returns empty table when no instance for buffer", function()
-            local new_bufnr = vim.api.nvim_create_buf(false, true)
-            vim.api.nvim_set_current_buf(new_bufnr)
+        it("shows all slash commands for an empty slash prefix", function()
+            SlashCommands.setCommands(bufnr, {
+                { name = "plan", description = "Create a plan" },
+                { name = "review", description = "Review code" },
+            })
+            vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "/" })
+            vim.api.nvim_win_set_cursor(0, { 1, 1 })
 
-            local result = SlashCommands.complete_func(0, "test")
+            assert.is_true(SlashCommands.trigger_completion(bufnr))
 
-            assert.is_table(result)
-            assert.equal(0, #result)
+            local items = complete_stub.calls[1][2]
+            assert.equal(3, #items)
+            assert.equal("plan", items[1].word)
+            assert.equal("review", items[2].word)
+            assert.equal("new", items[3].word)
+        end)
 
-            if vim.api.nvim_buf_is_valid(new_bufnr) then
-                vim.api.nvim_buf_delete(new_bufnr, { force = true })
-            end
+        it("does not complete non-command text", function()
+            SlashCommands.setCommands(bufnr, {
+                { name = "plan", description = "Create a plan" },
+            })
+            vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "some /p" })
+            vim.api.nvim_win_set_cursor(0, { 1, 7 })
+
+            assert.is_false(SlashCommands.trigger_completion(bufnr))
+            assert.equal(0, complete_stub.call_count)
         end)
     end)
 
     describe("TextChangedI autocommand", function()
-        it("triggers feedkeys when typing / at start of line", function()
-            --- @type agentic.acp.AvailableCommand[]
-            local commands_mock = {
-                { name = "plan", description = "Create a plan" },
-            }
+        it(
+            "triggers native completion when typing / at start of line",
+            function()
+                --- @type agentic.acp.AvailableCommand[]
+                local commands_mock = {
+                    { name = "plan", description = "Create a plan" },
+                }
 
-            SlashCommands.setCommands(bufnr, commands_mock)
+                SlashCommands.setCommands(bufnr, commands_mock)
 
-            local feedkeys_spy = spy.on(vim.api, "nvim_feedkeys")
+                local complete_stub = spy.stub(vim.fn, "complete")
 
-            vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "/p" })
-            vim.api.nvim_win_set_cursor(0, { 1, 2 })
+                vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "/p" })
+                vim.api.nvim_win_set_cursor(0, { 1, 2 })
 
-            vim.cmd("startinsert")
-            vim.cmd("doautocmd TextChangedI")
+                vim.cmd("startinsert")
+                vim.cmd("doautocmd TextChangedI")
 
-            local completion_keys =
-                vim.api.nvim_replace_termcodes("<C-x><C-u>", true, false, true)
-            assert
-                .spy(feedkeys_spy).was
-                .called_with(completion_keys, "n", false)
+                assert.equal(1, complete_stub.call_count)
+                assert.equal(2, complete_stub.calls[1][1])
+                assert.equal("plan", complete_stub.calls[1][2][1].word)
 
-            -- Cleanup
-            feedkeys_spy:revert()
-        end)
+                complete_stub:revert()
+            end
+        )
 
         it("does not trigger completion when commands list is empty", function()
-            local feedkeys_spy = spy.on(vim.api, "nvim_feedkeys")
+            local complete_stub = spy.stub(vim.fn, "complete")
 
             vim.cmd("startinsert")
 
@@ -253,9 +275,9 @@ describe("agentic.acp.SlashCommands", function()
 
             vim.cmd("doautocmd TextChangedI")
 
-            assert.spy(feedkeys_spy).was.called(0)
+            assert.equal(0, complete_stub.call_count)
 
-            feedkeys_spy:revert()
+            complete_stub:revert()
         end)
 
         it("does not trigger completion when not at start of line", function()
@@ -266,7 +288,7 @@ describe("agentic.acp.SlashCommands", function()
 
             SlashCommands.setCommands(bufnr, commands)
 
-            local feedkeys_spy = spy.on(vim.api, "nvim_feedkeys")
+            local complete_stub = spy.stub(vim.fn, "complete")
 
             vim.cmd("startinsert")
             vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "some /p" })
@@ -274,9 +296,9 @@ describe("agentic.acp.SlashCommands", function()
 
             vim.cmd("doautocmd TextChangedI")
 
-            assert.spy(feedkeys_spy).was.called(0)
+            assert.equal(0, complete_stub.call_count)
 
-            feedkeys_spy:revert()
+            complete_stub:revert()
         end)
 
         it("does not trigger completion when line contains space", function()
@@ -287,7 +309,7 @@ describe("agentic.acp.SlashCommands", function()
 
             SlashCommands.setCommands(bufnr, commands)
 
-            local feedkeys_spy = spy.on(vim.api, "nvim_feedkeys")
+            local complete_stub = spy.stub(vim.fn, "complete")
 
             vim.cmd("startinsert")
             vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "/p " })
@@ -295,31 +317,40 @@ describe("agentic.acp.SlashCommands", function()
 
             vim.cmd("doautocmd TextChangedI")
 
-            assert.spy(feedkeys_spy).was.called(0)
+            assert.equal(0, complete_stub.call_count)
 
-            feedkeys_spy:revert()
+            complete_stub:revert()
         end)
 
-        it("does not trigger completion when not on first row", function()
-            --- @type agentic.acp.AvailableCommand[]
-            local commands = {
-                { name = "plan", description = "Create a plan" },
-            }
+        it(
+            "does not trigger completion when slash command has prior text",
+            function()
+                --- @type agentic.acp.AvailableCommand[]
+                local commands = {
+                    { name = "plan", description = "Create a plan" },
+                }
 
-            SlashCommands.setCommands(bufnr, commands)
+                SlashCommands.setCommands(bufnr, commands)
 
-            local feedkeys_spy = spy.on(vim.api, "nvim_feedkeys")
+                local complete_stub = spy.stub(vim.fn, "complete")
 
-            vim.cmd("startinsert")
-            vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "line1", "/p" })
-            vim.api.nvim_win_set_cursor(0, { 2, 2 })
+                vim.cmd("startinsert")
+                vim.api.nvim_buf_set_lines(
+                    bufnr,
+                    0,
+                    -1,
+                    false,
+                    { "line1", "/p" }
+                )
+                vim.api.nvim_win_set_cursor(0, { 2, 2 })
 
-            vim.cmd("doautocmd TextChangedI")
+                vim.cmd("doautocmd TextChangedI")
 
-            assert.spy(feedkeys_spy).was.called(0)
+                assert.equal(0, complete_stub.call_count)
 
-            feedkeys_spy:revert()
-        end)
+                complete_stub:revert()
+            end
+        )
     end)
 
     describe("instance management", function()

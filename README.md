@@ -674,15 +674,26 @@ the appropriate keybinding for the current mode.
 ### Inline Chat
 
 Inline chat opens a small anchored prompt from a visual selection and sends that
-range to the active ACP session as structured selection context.
+range to a fresh ACP session for that inline conversation.
 
 - It uses the same provider, model, reasoning level, and approval preset as the
-  regular chat for the current tabpage.
+  regular chat.
+- Each new inline conversation gets its own ACP session. Follow-up prompts after
+  a rejected review reuse that conversation's ACP session until the edit is
+  accepted or the follow-up prompt is closed.
+- Independent inline conversations can run at the same time, including multiple
+  active inline conversations in the same source buffer. Follow-up prompts within
+  one conversation are still queued in order.
 - Provider-sent `agent_thought_chunk` updates are rendered inline in the source
   buffer while the request is running.
 - The inline thread is anchored to the selected range with a tracked extmark, so
   the status overlay follows buffer edits and Agentic can retain per-range
   inline history.
+- Inline status details are manually wrapped to `inline.overlay_width` columns
+  because Neovim virtual lines do not use the window's `wrap` setting.
+- Recoverable provider tool failures are shown as inline tool issues, while the
+  full tool details remain in the chat transcript. When the provider includes
+  detail text, the inline notice shows a compact first/last excerpt.
 - File edits still go through the normal ACP tool-call and approval flow, so
   reviewable diffs appear inline in the buffer when the provider requests
   permission.
@@ -702,6 +713,7 @@ range to the active ACP session as structured selection context.
       prompt_height = 1,
       show_thoughts = true,
       max_thought_lines = 6,
+      overlay_width = 80,
       result_ttl_ms = 2500,
       progress = true,
     },
@@ -932,7 +944,7 @@ Agentic.nvim uses custom highlight groups that you can override to match your
 colorscheme.
 
 ```lua
-vim.api.nvim_set_hl(0, "AgenticInlineFade", { blend = 55, italic = true })
+vim.api.nvim_set_hl(0, "AgenticInlineFade", { fg = "#7c7c7c", italic = true })
 vim.api.nvim_set_hl(0, "AgenticChunkBoundary", { underline = true })
 ```
 
@@ -950,7 +962,7 @@ vim.api.nvim_set_hl(0, "AgenticChunkBoundary", { underline = true })
 | `AgenticCodeBlockFence`  | The left border decoration on tool calls | Links to `Directory`                |
 | `AgenticTitle`           | Window titles in sidebar                 | `bg=#2787b0, fg=#000000, bold=true` |
 | `AgenticChunkBoundary`   | Debug-only merged chunk edge marker      | Links to `DiagnosticHint` + underline |
-| `AgenticInlineFade`      | Fade layer applied to inline extmark UI  | `blend=55, italic=true`             |
+| `AgenticInlineFade`      | Fade layer applied to inline extmark UI  | Comment-derived fg + italic/blend   |
 
 If any of these highlight exists, Agentic will use it instead of creating new
 ones.

@@ -70,17 +70,116 @@ local SubmissionController = {}
 --- @param session agentic.SessionManager
 --- @return string|nil
 local function get_active_generation_session_id(session)
-    local inline_chat = session.inline_chat
-    if
-        inline_chat
-        and inline_chat.is_active
-        and inline_chat:is_active()
-        and session["_inline_session_id"]
-    then
-        return session["_inline_session_id"]
+    if session.is_generating and session.session_id then
+        return session.session_id
+    end
+
+    for _, inline_session in pairs(session["_inline_sessions"] or {}) do
+        if inline_session.is_generating and inline_session.session_id then
+            return inline_session.session_id
+        end
     end
 
     return session.session_id
+end
+
+--- @param session agentic.SessionManager
+--- @param surface "chat"|"inline"
+--- @return string
+local function next_turn_id(session, surface)
+    session["_next_interaction_turn_id"] = (
+        session["_next_interaction_turn_id"] or 0
+    ) + 1
+    return string.format("%s-%d", surface, session["_next_interaction_turn_id"])
+end
+
+--- @param session agentic.SessionManager
+--- @return string
+local function next_inline_conversation_id(session)
+    session["_next_inline_conversation_id"] = (
+        session["_next_inline_conversation_id"] or 0
+    ) + 1
+    return string.format(
+        "inline-conversation-%d",
+        session["_next_inline_conversation_id"]
+    )
+end
+
+--- @param session agentic.SessionManager
+--- @param conversation_id string
+--- @return agentic.SessionManager.InlineSession|nil
+local function get_inline_session(session, conversation_id)
+    return session["_inline_sessions"]
+            and session["_inline_sessions"][conversation_id]
+        or nil
+end
+
+--- @param session agentic.SessionManager
+--- @param conversation_id string
+--- @return boolean
+local function inline_conversation_is_generating(session, conversation_id)
+    local inline_session = get_inline_session(session, conversation_id)
+    return inline_session ~= nil and inline_session.is_generating == true
+end
+
+--- @param session agentic.SessionManager
+--- @param submission agentic.SessionManager.QueuedSubmission
+local function enqueue_inline_submission(session, submission)
+    local inline_request = submission.inline_request
+    if not inline_request then
+        return
+    end
+
+    local conversation_id = inline_request.conversation_id
+    if conversation_id == nil or conversation_id == "" then
+        return
+    end
+
+    session["_next_inline_submission_id"] = (
+        session["_next_inline_submission_id"] or 0
+    ) + 1
+    submission.id = session["_next_inline_submission_id"]
+
+    local queues = session["_inline_submission_queues"] or {}
+    local queue = queues[conversation_id] or {}
+    queue[#queue + 1] = submission
+    queues[conversation_id] = queue
+    session["_inline_submission_queues"] = queues
+
+    if session.inline_chat and session.inline_chat.queue_request then
+        session.inline_chat:queue_request({
+            conversation_id = conversation_id,
+            submission_id = submission.id,
+            prompt = inline_request.prompt,
+            selection = inline_request.selection,
+            source_bufnr = inline_request.source_bufnr,
+            source_winid = inline_request.source_winid,
+        })
+    end
+end
+
+--- @param session agentic.SessionManager
+--- @param conversation_id string
+local function drain_inline_submission_queue(session, conversation_id)
+    if inline_conversation_is_generating(session, conversation_id) then
+        return
+    end
+
+    local queues = session["_inline_submission_queues"] or {}
+    local queue = queues[conversation_id]
+    if queue == nil or #queue == 0 then
+        queues[conversation_id] = nil
+        session["_inline_submission_queues"] = queues
+        return
+    end
+
+    local next_submission = table.remove(queue, 1)
+    if #queue == 0 then
+        queues[conversation_id] = nil
+    end
+    session["_inline_submission_queues"] = queues
+
+    call_session_method(session, "_dispatch_submission", next_submission)
 end
 
 --- @param value any
@@ -193,10 +292,12 @@ function SubmissionController.prepare_submission(session, input_text, opts)
     --- @type agentic.SessionManager.QueuedSubmission
     local submission = {
         id = 0,
+        turn_id = next_turn_id(session, opts.surface or "chat"),
         input_text = input_text,
         prompt = built_submission.prompt,
         request = built_submission.request,
     }
+    submission.request.turn_id = submission.turn_id
 
     return submission
 end
@@ -370,100 +471,141 @@ end
 --- @param session agentic.SessionManager
 --- @param submission agentic.SessionManager.QueuedSubmission
 function SubmissionController.dispatch_submission(session, submission)
-    if submission.inline_request then
-        local inline_session_id = session["_inline_session_id"]
-        if not inline_session_id then
-            call_session_method(
-                session,
-                "_with_active_inline_session",
-                function()
-                    call_session_method(
-                        session,
-                        "_dispatch_submission",
-                        submission
-                    )
-                end
-            )
+    local inline_request = submission.inline_request
+    if inline_request ~= nil then
+        local conversation_id = inline_request.conversation_id
+        if conversation_id == nil or conversation_id == "" then
+            conversation_id = next_inline_conversation_id(session)
+            inline_request.conversation_id = conversation_id
+        end
+        local inline_prompt = inline_request.prompt
+        local inline_selection = inline_request.selection
+        local inline_source_bufnr = inline_request.source_bufnr
+        local inline_source_winid = inline_request.source_winid
+
+        if inline_conversation_is_generating(session, conversation_id) then
+            enqueue_inline_submission(session, submission)
             return
         end
 
-        local target_session_id = inline_session_id
+        call_session_method(
+            session,
+            "_with_active_inline_session",
+            conversation_id,
+            function(target_session_id)
+                local inline_session =
+                    get_inline_session(session, conversation_id)
+                if inline_session == nil then
+                    return
+                end
 
-        if session.inline_chat and session.inline_chat.begin_request then
-            session.inline_chat:begin_request({
-                submission_id = submission.id,
-                prompt = submission.inline_request.prompt,
-                selection = submission.inline_request.selection,
-                source_bufnr = submission.inline_request.source_bufnr,
-                source_winid = submission.inline_request.source_winid,
-                phase = "thinking",
-                status_text = "Preparing inline request",
-            })
-        end
-
-        session.session_state:dispatch(
-            SessionEvents.append_interaction_request(submission.request)
-        )
-
-        invoke_hook("on_prompt_submit", {
-            prompt = submission.input_text,
-            session_id = target_session_id,
-            tab_page_id = session.tab_page_id,
-        })
-
-        local session_id = target_session_id
-        local tab_page_id = session.tab_page_id
-        session.is_generating = true
-        session["_agent_phase"] = "thinking"
-        render_window_headers(session)
-        refresh_chat_activity(session)
-
-        session.agent:send_prompt(
-            target_session_id,
-            submission.prompt,
-            function(response, err)
-                local prompt_response = response
-                --- @cast prompt_response agentic.acp.PromptResponse|nil
-                vim.schedule(function()
-                    session.is_generating = false
-                    session["_agent_phase"] = nil
-
-                    session.session_state:dispatch(
-                        SessionEvents.set_interaction_turn_result(
-                            build_turn_result_message(prompt_response, err),
-                            session.agent.provider_config.name
-                        )
-                    )
-                    refresh_chat_activity(session)
-
-                    invoke_hook("on_response_complete", {
-                        session_id = session_id,
-                        tab_page_id = tab_page_id,
-                        success = err == nil,
-                        error = err,
+                if
+                    session.inline_chat and session.inline_chat.begin_request
+                then
+                    session.inline_chat:begin_request({
+                        conversation_id = conversation_id,
+                        submission_id = submission.id,
+                        prompt = inline_prompt,
+                        selection = inline_selection,
+                        source_bufnr = inline_source_bufnr,
+                        source_winid = inline_source_winid,
+                        phase = "thinking",
+                        status_text = "Preparing inline request",
                     })
+                end
 
-                    if session.inline_chat then
-                        session.inline_chat:complete(prompt_response, err)
-                    end
+                session.session_state:dispatch(
+                    SessionEvents.append_interaction_request(submission.request)
+                )
 
-                    call_session_method(session, "_cancel_inline_session")
+                invoke_hook("on_prompt_submit", {
+                    prompt = submission.input_text,
+                    session_id = target_session_id,
+                    tab_page_id = session.tab_page_id,
+                })
 
-                    if not err then
-                        session.session_state:save_persisted_session_data(
-                            function(save_err)
-                                if save_err then
-                                    Logger.debug(
-                                        "Chat history save error:",
-                                        save_err
-                                    )
-                                end
+                local session_id = target_session_id
+                local tab_page_id = session.tab_page_id
+                local turn_id = submission.turn_id
+                inline_session.is_generating = true
+                inline_session.active_turn_id = turn_id
+                inline_session.awaiting_rejected_followup = false
+                inline_session.close_on_complete = false
+
+                session.agent:send_prompt(
+                    target_session_id,
+                    submission.prompt,
+                    function(response, err)
+                        local prompt_response = response
+                        --- @cast prompt_response agentic.acp.PromptResponse|nil
+                        vim.schedule(function()
+                            local current_inline_session =
+                                get_inline_session(session, conversation_id)
+
+                            if current_inline_session then
+                                current_inline_session.is_generating = false
                             end
-                        )
-                    end
 
-                    call_session_method(session, "_drain_queued_submissions")
-                end)
+                            session.session_state:dispatch(
+                                SessionEvents.set_interaction_turn_result(
+                                    build_turn_result_message(
+                                        prompt_response,
+                                        err
+                                    ),
+                                    session.agent.provider_config.name,
+                                    { turn_id = turn_id }
+                                )
+                            )
+
+                            invoke_hook("on_response_complete", {
+                                session_id = session_id,
+                                tab_page_id = tab_page_id,
+                                success = err == nil,
+                                error = err,
+                            })
+
+                            if session.inline_chat then
+                                session.inline_chat:complete(
+                                    prompt_response,
+                                    err,
+                                    { conversation_id = conversation_id }
+                                )
+                            end
+
+                            local should_close = true
+                            if current_inline_session then
+                                should_close = current_inline_session.close_on_complete
+                                    or not current_inline_session.awaiting_rejected_followup
+                            end
+
+                            if should_close then
+                                call_session_method(
+                                    session,
+                                    "_cancel_inline_session",
+                                    conversation_id
+                                )
+                            else
+                                drain_inline_submission_queue(
+                                    session,
+                                    conversation_id
+                                )
+                            end
+
+                            if not err then
+                                session.session_state:save_persisted_session_data(
+                                    function(save_err)
+                                        if save_err then
+                                            Logger.debug(
+                                                "Chat history save error:",
+                                                save_err
+                                            )
+                                        end
+                                    end
+                                )
+                            end
+                        end)
+                    end
+                )
             end
         )
         return
@@ -490,7 +632,9 @@ function SubmissionController.dispatch_submission(session, submission)
 
     local session_id = target_session_id
     local tab_page_id = session.tab_page_id
+    local turn_id = submission.turn_id
     session.is_generating = true
+    session["_active_chat_turn_id"] = turn_id
     session["_agent_phase"] = "thinking"
     render_window_headers(session)
     refresh_chat_activity(session)
@@ -503,12 +647,14 @@ function SubmissionController.dispatch_submission(session, submission)
             --- @cast prompt_response agentic.acp.PromptResponse|nil
             vim.schedule(function()
                 session.is_generating = false
+                session["_active_chat_turn_id"] = nil
                 session["_agent_phase"] = nil
 
                 session.session_state:dispatch(
                     SessionEvents.set_interaction_turn_result(
                         build_turn_result_message(prompt_response, err),
-                        session.agent.provider_config.name
+                        session.agent.provider_config.name,
+                        { turn_id = turn_id }
                     )
                 )
                 refresh_chat_activity(session)
@@ -540,9 +686,14 @@ function SubmissionController.dispatch_submission(session, submission)
 end
 
 --- @param session agentic.SessionManager
---- @param request {prompt: string, selection: agentic.Selection, source_bufnr: integer, source_winid: integer}
+--- @param request {conversation_id?: string|nil, prompt: string, selection: agentic.Selection, source_bufnr: integer, source_winid: integer}
 --- @return boolean accepted
 function SubmissionController.submit_inline_request(session, request)
+    local conversation_id = request.conversation_id
+    if conversation_id == nil or conversation_id == "" then
+        conversation_id = next_inline_conversation_id(session)
+    end
+
     local submission =
         call_session_method(session, "_prepare_submission", request.prompt, {
             selections = { request.selection },
@@ -551,10 +702,16 @@ function SubmissionController.submit_inline_request(session, request)
             include_system_info = true,
             use_session_context = false,
         })
-    submission.inline_request = request
+    submission.inline_request = {
+        conversation_id = conversation_id,
+        prompt = request.prompt,
+        selection = request.selection,
+        source_bufnr = request.source_bufnr,
+        source_winid = request.source_winid,
+    }
 
-    if session.is_generating then
-        call_session_method(session, "_enqueue_submission", submission)
+    if inline_conversation_is_generating(session, conversation_id) then
+        enqueue_inline_submission(session, submission)
         return true
     end
 

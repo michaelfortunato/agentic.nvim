@@ -108,7 +108,7 @@ end
 
 --- @param self agentic.ui.InlineChat
 --- @param selection agentic.Selection
---- @param opts {source_bufnr?: integer|nil, source_winid?: integer|nil}|nil
+--- @param opts {conversation_id?: string|nil, close_cancels_conversation?: boolean|nil, source_bufnr?: integer|nil, source_winid?: integer|nil}|nil
 --- @return boolean opened
 function M.open(self, selection, opts)
     opts = opts or {}
@@ -171,6 +171,8 @@ function M.open(self, selection, opts)
     self._prompt = {
         prompt_bufnr = prompt_bufnr,
         prompt_winid = prompt_winid,
+        conversation_id = opts.conversation_id,
+        close_cancels_conversation = opts.close_cancels_conversation == true,
         selection = normalized_selection,
         source_bufnr = source_bufnr,
         source_winid = source_winid,
@@ -297,6 +299,7 @@ function M.submit_prompt(self)
     end
 
     local accepted = self._on_submit({
+        conversation_id = prompt.conversation_id,
         prompt = text,
         selection = vim.deepcopy(prompt.selection),
         source_bufnr = prompt.source_bufnr,
@@ -307,13 +310,15 @@ function M.submit_prompt(self)
         if vim.fn.mode():sub(1, 1) == "i" then
             vim.cmd.stopinsert()
         end
-        M.close_prompt(self, true)
+        M.close_prompt(self, true, { submitted = true })
     end
 end
 
 --- @param self agentic.ui.InlineChat
 --- @param restore_focus boolean
-function M.close_prompt(self, restore_focus)
+--- @param opts {submitted?: boolean|nil}|nil
+function M.close_prompt(self, restore_focus, opts)
+    opts = opts or {}
     local prompt = self._prompt
     if not prompt then
         return
@@ -335,6 +340,15 @@ function M.close_prompt(self, restore_focus)
         and vim.api.nvim_win_is_valid(prompt.source_winid)
     then
         vim.api.nvim_set_current_win(prompt.source_winid)
+    end
+
+    if
+        not opts.submitted
+        and prompt.close_cancels_conversation
+        and prompt.conversation_id
+        and prompt.conversation_id ~= ""
+    then
+        self._on_conversation_exit(prompt.conversation_id)
     end
 end
 

@@ -1605,7 +1605,11 @@ describe("agentic.SessionManager", function()
 
             SessionManager._on_tool_call_update(
                 session,
-                { tool_call_id = "tc-1", status = "completed" }
+                { tool_call_id = "tc-1", status = "completed" },
+                {
+                    route = "inline",
+                    inline_conversation_id = "conversation-1",
+                }
             )
 
             assert.spy(handle_tool_call_update_spy).was.called(1)
@@ -1759,13 +1763,15 @@ describe("agentic.SessionManager", function()
             assert.truthy(combined_prompt:match("<col_end>12</col_end>"))
         end)
 
-        it("queues inline requests while the agent is busy", function()
+        it("dispatches new inline conversations while chat is busy", function()
             local queue_request_spy = spy.new(function() end)
             local dispatch_spy = spy.new(function() end)
 
             local session = {
                 session_id = "sess-inline-2",
                 is_generating = true,
+                _next_inline_conversation_id = 0,
+                _inline_sessions = {},
                 _session_starting = false,
                 _restored_turns_to_send = nil,
                 _is_first_message = false,
@@ -1801,26 +1807,43 @@ describe("agentic.SessionManager", function()
             })
 
             assert.is_true(accepted)
-            assert.spy(dispatch_spy).was.called(0)
-            assert.equal(1, session.submission_queue:count())
-            assert.spy(queue_request_spy).was.called(1)
+            assert.spy(dispatch_spy).was.called(1)
+            assert.equal(0, session.submission_queue:count())
+            assert.spy(queue_request_spy).was.called(0)
         end)
 
         it(
-            "dispatches inline requests without depending on the chat session",
+            "queues follow-ups for the same inline conversation while it is busy",
             function()
+                local queue_request_spy = spy.new(function() end)
                 local dispatch_spy = spy.new(function() end)
 
                 local session = {
-                    session_id = nil,
+                    session_id = "sess-inline-2",
                     is_generating = false,
+                    _next_inline_submission_id = 0,
+                    _inline_submission_queues = {},
+                    _inline_sessions = {
+                        ["conversation-1"] = {
+                            session_id = "inline-session-1",
+                            starting = false,
+                            is_generating = true,
+                            active_turn_id = "inline-1",
+                            pending_callbacks = {},
+                            awaiting_rejected_followup = false,
+                            close_on_complete = false,
+                        },
+                    },
+                    _session_starting = false,
                     _restored_turns_to_send = nil,
                     _is_first_message = false,
+                    session_state = SessionState:new(),
                     agent = {
-                        state = "ready",
                         provider_config = { name = "Codex" },
                     },
-                    session_state = SessionState:new(),
+                    inline_chat = {
+                        queue_request = queue_request_spy,
+                    },
                     _render_window_headers = function() end,
                     _prepare_submission = SessionManager._prepare_submission,
                     _dispatch_submission = dispatch_spy,
@@ -1828,11 +1851,12 @@ describe("agentic.SessionManager", function()
                 } --[[@as agentic.SessionManager]]
 
                 local accepted = session:_submit_inline_request({
-                    prompt = "Refactor the selection",
+                    conversation_id = "conversation-1",
+                    prompt = "Try a smaller edit",
                     selection = {
-                        lines = { "local value = 1" },
-                        start_line = 4,
-                        end_line = 4,
+                        lines = { "return value" },
+                        start_line = 5,
+                        end_line = 5,
                         file_path = "/tmp/example.lua",
                         file_type = "lua",
                     },
@@ -1841,233 +1865,512 @@ describe("agentic.SessionManager", function()
                 })
 
                 assert.is_true(accepted)
-                assert.spy(dispatch_spy).was.called(1)
-
-                local submission = dispatch_spy.calls[1][2]
-                assert.is_not_nil(submission.inline_request)
-                assert.equal("inline", submission.request.surface)
+                assert.spy(dispatch_spy).was.called(0)
+                assert.spy(queue_request_spy).was.called(1)
+                assert.equal(
+                    1,
+                    #session._inline_submission_queues["conversation-1"]
+                )
             end
         )
     end)
 
-    describe("open_inline_chat", function()
-        it(
-            "removes overlapping queued inline requests instead of opening",
-            function()
-                local remove_spy = spy.new(function() end)
-                local notify_stub = spy.stub(Logger, "notify")
+    it(
+        "dispatches inline requests without depending on the chat session",
+        function()
+            local dispatch_spy = spy.new(function() end)
 
-                local session = {
-                    inline_chat = {
-                        find_overlapping_queued_submission = function()
-                            return 42
-                        end,
-                        open = spy.new(function() end),
-                    },
-                    _remove_queued_submission = remove_spy,
-                    open_inline_chat = SessionManager.open_inline_chat,
-                } --[[@as agentic.SessionManager]]
+            local session = {
+                session_id = nil,
+                is_generating = false,
+                _restored_turns_to_send = nil,
+                _is_first_message = false,
+                agent = {
+                    state = "ready",
+                    provider_config = { name = "Codex" },
+                },
+                session_state = SessionState:new(),
+                _render_window_headers = function() end,
+                _prepare_submission = SessionManager._prepare_submission,
+                _dispatch_submission = dispatch_spy,
+                _submit_inline_request = SessionManager._submit_inline_request,
+            } --[[@as agentic.SessionManager]]
 
-                session:open_inline_chat({
+            local accepted = session:_submit_inline_request({
+                prompt = "Refactor the selection",
+                selection = {
                     lines = { "local value = 1" },
-                    start_line = 1,
-                    end_line = 1,
+                    start_line = 4,
+                    end_line = 4,
                     file_path = "/tmp/example.lua",
                     file_type = "lua",
-                })
+                },
+                source_bufnr = 10,
+                source_winid = 11,
+            })
 
-                assert.spy(remove_spy).was.called_with(session, 42)
-                assert.spy(session.inline_chat.open).was.called(0)
-                assert.truthy(
-                    notify_stub.calls[1][1]:match("Removed queued inline")
-                )
+            assert.is_true(accepted)
+            assert.spy(dispatch_spy).was.called(1)
 
-                notify_stub:revert()
-            end
-        )
-    end)
+            local submission = dispatch_spy.calls[1][2]
+            assert.is_not_nil(submission.inline_request)
+            assert.equal("inline", submission.request.surface)
+        end
+    )
+end)
 
-    describe("_handle_input_submit", function()
-        it(
-            "waits for the first ACP session before sending chat prompts",
-            function()
-                local dispatch_spy = spy.new(function() end)
-                local new_session_spy = spy.new(function(_self, opts)
-                    _self._captured_on_created = opts.on_created
-                end)
+describe("open_inline_chat", function()
+    it(
+        "removes overlapping queued inline requests instead of opening",
+        function()
+            local remove_spy = spy.new(function() end)
+            local notify_stub = spy.stub(Logger, "notify")
 
-                local session = {
-                    session_id = nil,
-                    is_generating = false,
-                    _session_starting = false,
-                    _pending_session_callbacks = {},
-                    _restored_turns_to_send = nil,
-                    _is_first_message = false,
-                    agent = {
-                        state = "ready",
-                        provider_config = { name = "Codex" },
-                    },
-                    session_state = SessionState:new(),
-                    submission_queue = SubmissionQueue:new(),
-                    todo_list = {
-                        close_if_all_completed = function() end,
-                    },
-                    code_selection = {
-                        is_empty = function()
-                            return true
-                        end,
-                    },
-                    file_list = {
-                        is_empty = function()
-                            return true
-                        end,
-                    },
-                    diagnostics_list = {
-                        is_empty = function()
-                            return true
-                        end,
-                    },
-                    widget = {
-                        win_nrs = {},
-                    },
-                    new_session = new_session_spy,
-                    _render_window_headers = function() end,
-                    _prepare_submission = SessionManager._prepare_submission,
-                    _dispatch_submission = dispatch_spy,
-                    _drain_queued_submissions = function() end,
-                    _drain_pending_session_callbacks = SessionManager._drain_pending_session_callbacks,
-                    _ensure_session_started = SessionManager._ensure_session_started,
-                    _with_active_session = SessionManager._with_active_session,
-                    _handle_input_submit = SessionManager._handle_input_submit,
-                } --[[@as agentic.SessionManager]]
+            local session = {
+                inline_chat = {
+                    find_overlapping_queued_submission = function()
+                        return 42
+                    end,
+                    open = spy.new(function() end),
+                },
+                _remove_queued_submission = remove_spy,
+                open_inline_chat = SessionManager.open_inline_chat,
+            } --[[@as agentic.SessionManager]]
 
-                session:_handle_input_submit("hello")
+            session:open_inline_chat({
+                lines = { "local value = 1" },
+                start_line = 1,
+                end_line = 1,
+                file_path = "/tmp/example.lua",
+                file_type = "lua",
+            })
 
-                assert.spy(new_session_spy).was.called(1)
-                assert.is_true(new_session_spy.calls[1][2].restore_mode)
-                assert.spy(dispatch_spy).was.called(0)
+            assert.spy(remove_spy).was.called_with(session, 42)
+            assert.spy(session.inline_chat.open).was.called(0)
+            assert.truthy(
+                notify_stub.calls[1][1]:match("Removed queued inline")
+            )
 
-                session.session_id = "sess-chat-queued"
-                session._captured_on_created()
+            notify_stub:revert()
+        end
+    )
+end)
 
-                assert.spy(dispatch_spy).was.called(1)
-                assert.equal("hello", dispatch_spy.calls[1][2].input_text)
-            end
-        )
+describe("_handle_input_submit", function()
+    it("waits for the first ACP session before sending chat prompts", function()
+        local dispatch_spy = spy.new(function() end)
+        local new_session_spy = spy.new(function(_self, opts)
+            _self._captured_on_created = opts.on_created
+        end)
 
-        it(
-            "handles local Codex slash commands without starting a session",
-            function()
-                local new_session_spy = spy.new(function() end)
-                local local_command_spy = spy.new(function()
+        local session = {
+            session_id = nil,
+            is_generating = false,
+            _session_starting = false,
+            _pending_session_callbacks = {},
+            _restored_turns_to_send = nil,
+            _is_first_message = false,
+            agent = {
+                state = "ready",
+                provider_config = { name = "Codex" },
+            },
+            session_state = SessionState:new(),
+            submission_queue = SubmissionQueue:new(),
+            todo_list = {
+                close_if_all_completed = function() end,
+            },
+            code_selection = {
+                is_empty = function()
                     return true
-                end)
+                end,
+            },
+            file_list = {
+                is_empty = function()
+                    return true
+                end,
+            },
+            diagnostics_list = {
+                is_empty = function()
+                    return true
+                end,
+            },
+            widget = {
+                win_nrs = {},
+            },
+            new_session = new_session_spy,
+            _render_window_headers = function() end,
+            _prepare_submission = SessionManager._prepare_submission,
+            _dispatch_submission = dispatch_spy,
+            _drain_queued_submissions = function() end,
+            _drain_pending_session_callbacks = SessionManager._drain_pending_session_callbacks,
+            _ensure_session_started = SessionManager._ensure_session_started,
+            _with_active_session = SessionManager._with_active_session,
+            _handle_input_submit = SessionManager._handle_input_submit,
+        } --[[@as agentic.SessionManager]]
 
-                local session = {
-                    session_id = nil,
-                    is_generating = false,
-                    _session_starting = false,
-                    _pending_session_callbacks = {},
-                    _restored_turns_to_send = nil,
-                    _is_first_message = false,
-                    agent = {
-                        state = "ready",
-                        provider_config = { name = "Codex" },
-                    },
-                    session_state = SessionState:new(),
-                    submission_queue = SubmissionQueue:new(),
-                    todo_list = {
-                        close_if_all_completed = function() end,
-                    },
-                    code_selection = {
-                        is_empty = function()
-                            return true
-                        end,
-                    },
-                    file_list = {
-                        is_empty = function()
-                            return true
-                        end,
-                    },
-                    diagnostics_list = {
-                        is_empty = function()
-                            return true
-                        end,
-                    },
-                    widget = {
-                        win_nrs = {},
-                    },
-                    new_session = new_session_spy,
-                    _handle_local_slash_command = local_command_spy,
-                    _handle_input_submit = SessionManager._handle_input_submit,
-                } --[[@as agentic.SessionManager]]
+        session:_handle_input_submit("hello")
 
-                session:_handle_input_submit("/skills")
+        assert.spy(new_session_spy).was.called(1)
+        assert.is_true(new_session_spy.calls[1][2].restore_mode)
+        assert.spy(dispatch_spy).was.called(0)
 
-                assert.spy(local_command_spy).was.called(1)
-                assert.spy(new_session_spy).was.called(0)
-            end
-        )
+        session.session_id = "sess-chat-queued"
+        session._captured_on_created()
+
+        assert.spy(dispatch_spy).was.called(1)
+        assert.equal("hello", dispatch_spy.calls[1][2].input_text)
     end)
 
-    describe("_dispatch_submission", function()
-        it("waits for an active session before sending the prompt", function()
-            local send_prompt_spy = spy.new(function() end)
-            local with_active_session_spy = spy.new(function(_self, callback)
-                _self._queued_dispatch = callback
+    it(
+        "handles local Codex slash commands without starting a session",
+        function()
+            local new_session_spy = spy.new(function() end)
+            local local_command_spy = spy.new(function()
+                return true
             end)
 
             local session = {
                 session_id = nil,
-                session_state = SessionState:new(),
+                is_generating = false,
+                _session_starting = false,
+                _pending_session_callbacks = {},
+                _restored_turns_to_send = nil,
+                _is_first_message = false,
                 agent = {
+                    state = "ready",
                     provider_config = { name = "Codex" },
-                    send_prompt = send_prompt_spy,
                 },
-                inline_chat = nil,
-                _with_active_session = with_active_session_spy,
-                _dispatch_submission = SessionManager._dispatch_submission,
+                session_state = SessionState:new(),
+                submission_queue = SubmissionQueue:new(),
+                todo_list = {
+                    close_if_all_completed = function() end,
+                },
+                code_selection = {
+                    is_empty = function()
+                        return true
+                    end,
+                },
+                file_list = {
+                    is_empty = function()
+                        return true
+                    end,
+                },
+                diagnostics_list = {
+                    is_empty = function()
+                        return true
+                    end,
+                },
+                widget = {
+                    win_nrs = {},
+                },
+                new_session = new_session_spy,
+                _handle_local_slash_command = local_command_spy,
+                _handle_input_submit = SessionManager._handle_input_submit,
             } --[[@as agentic.SessionManager]]
 
-            session:_dispatch_submission({
-                id = 1,
-                input_text = "hello",
-                prompt = { { type = "text", text = "hello" } },
-                request = {
-                    kind = "user",
-                    text = "hello",
-                    timestamp = os.time(),
-                    content = { { type = "text", text = "hello" } },
-                },
-            })
+            session:_handle_input_submit("/skills")
 
-            assert.spy(with_active_session_spy).was.called(1)
-            assert.spy(send_prompt_spy).was.called(0)
-            assert.equal(
-                0,
-                #session.session_state:get_state().interaction.turns
-            )
+            assert.spy(local_command_spy).was.called(1)
+            assert.spy(new_session_spy).was.called(0)
+        end
+    )
+end)
+
+describe("_dispatch_submission", function()
+    it("waits for an active session before sending the prompt", function()
+        local send_prompt_spy = spy.new(function() end)
+        local with_active_session_spy = spy.new(function(_self, callback)
+            _self._queued_dispatch = callback
         end)
 
-        it("creates a fresh ACP session for each inline submission", function()
+        local session = {
+            session_id = nil,
+            session_state = SessionState:new(),
+            agent = {
+                provider_config = { name = "Codex" },
+                send_prompt = send_prompt_spy,
+            },
+            inline_chat = nil,
+            _with_active_session = with_active_session_spy,
+            _dispatch_submission = SessionManager._dispatch_submission,
+        } --[[@as agentic.SessionManager]]
+
+        session:_dispatch_submission({
+            id = 1,
+            input_text = "hello",
+            prompt = { { type = "text", text = "hello" } },
+            request = {
+                kind = "user",
+                text = "hello",
+                timestamp = os.time(),
+                content = { { type = "text", text = "hello" } },
+            },
+        })
+
+        assert.spy(with_active_session_spy).was.called(1)
+        assert.spy(send_prompt_spy).was.called(0)
+        assert.equal(0, #session.session_state:get_state().interaction.turns)
+    end)
+
+    it("creates a fresh ACP session for each inline submission", function()
+        local schedule_stub = spy.stub(vim, "schedule")
+        schedule_stub:invokes(function(callback)
+            callback()
+        end)
+
+        local created_session_ids = {}
+        local send_prompt_spy = spy.new(
+            function(_agent, _session_id, _prompt, callback)
+                callback({ stopReason = "end_turn" }, nil)
+            end
+        )
+        local cancel_session_spy = spy.new(function() end)
+        local begin_request_spy = spy.new(function() end)
+        local complete_spy = spy.new(function() end)
+        local save_stub
+        local session_state = SessionState:new()
+
+        save_stub = spy.stub(session_state, "save_persisted_session_data")
+        save_stub:invokes(function(_self, callback)
+            if callback then
+                callback(nil)
+            end
+        end)
+
+        local session = {
+            session_id = nil,
+            _inline_session_id = nil,
+            is_generating = false,
+            _inline_session_starting = false,
+            _pending_inline_session_callbacks = {},
+            tab_page_id = 3,
+            session_state = session_state,
+            config_options = { _options = {} },
+            agent = {
+                state = "ready",
+                provider_config = { name = "Codex" },
+                create_session = spy.new(function(_agent, _handlers, callback)
+                    local session_id = "inline-"
+                        .. tostring(#created_session_ids + 1)
+                    created_session_ids[#created_session_ids + 1] = session_id
+                    callback({ sessionId = session_id }, nil)
+                end),
+                send_prompt = send_prompt_spy,
+                cancel_session = cancel_session_spy,
+            },
+            inline_chat = {
+                begin_request = begin_request_spy,
+                complete = complete_spy,
+            },
+            _render_window_headers = function() end,
+            _refresh_chat_activity = function() end,
+            _dispatch_submission = SessionManager._dispatch_submission,
+            _drain_pending_inline_session_callbacks = SessionManager._drain_pending_inline_session_callbacks,
+            _ensure_inline_session_started = SessionManager._ensure_inline_session_started,
+            _with_active_inline_session = SessionManager._with_active_inline_session,
+            _start_inline_session = SessionManager._start_inline_session,
+            _cancel_inline_session = SessionManager._cancel_inline_session,
+            _drain_queued_submissions = function() end,
+        } --[[@as agentic.SessionManager]]
+
+        --- @param prompt string
+        --- @return agentic.SessionManager.QueuedSubmission
+        local function make_inline_submission(prompt)
+            --- @type agentic.SessionManager.QueuedSubmission
+            local submission = {
+                id = 1,
+                input_text = prompt,
+                prompt = { { type = "text", text = prompt } },
+                request = {
+                    kind = "user",
+                    surface = "inline",
+                    text = prompt,
+                    timestamp = os.time(),
+                    content = { { type = "text", text = prompt } },
+                },
+                inline_request = {
+                    prompt = prompt,
+                    selection = {
+                        lines = { "local value = 1" },
+                        start_line = 1,
+                        end_line = 1,
+                        file_path = "/tmp/example.lua",
+                        file_type = "lua",
+                    },
+                    source_bufnr = 10,
+                    source_winid = 11,
+                },
+            }
+
+            return submission
+        end
+
+        session:_dispatch_submission(
+            make_inline_submission("Inline request one")
+        )
+        session:_dispatch_submission(
+            make_inline_submission("Inline request two")
+        )
+
+        assert.same({ "inline-1", "inline-2" }, created_session_ids)
+        assert.equal(2, send_prompt_spy.call_count)
+        assert.equal("inline-1", send_prompt_spy.calls[1][2])
+        assert.equal("inline-2", send_prompt_spy.calls[2][2])
+        assert.spy(cancel_session_spy).was.called(2)
+        assert.equal("inline-1", cancel_session_spy.calls[1][2])
+        assert.equal("inline-2", cancel_session_spy.calls[2][2])
+        assert.spy(begin_request_spy).was.called(2)
+        assert.spy(complete_spy).was.called(2)
+        assert.is_nil(session._inline_session_id)
+        assert.is_nil(session.session_id)
+
+        save_stub:revert()
+        schedule_stub:revert()
+    end)
+
+    it("runs independent inline conversations at the same time", function()
+        local schedule_stub = spy.stub(vim, "schedule")
+        schedule_stub:invokes(function(callback)
+            callback()
+        end)
+
+        local created_session_ids = {}
+        local prompt_callbacks = {}
+        local send_prompt_spy = spy.new(
+            function(_agent, _session_id, _prompt, callback)
+                prompt_callbacks[#prompt_callbacks + 1] = callback
+            end
+        )
+        local cancel_session_spy = spy.new(function() end)
+        local session_state = SessionState:new()
+        local save_stub = spy.stub(session_state, "save_persisted_session_data")
+        save_stub:invokes(function(_self, callback)
+            if callback then
+                callback(nil)
+            end
+        end)
+
+        local session = {
+            session_id = nil,
+            _inline_session_id = nil,
+            _inline_sessions = {},
+            _inline_submission_queues = {},
+            _next_inline_conversation_id = 0,
+            _next_inline_submission_id = 0,
+            is_generating = false,
+            _inline_session_starting = false,
+            _pending_inline_session_callbacks = {},
+            tab_page_id = 3,
+            session_state = session_state,
+            config_options = { _options = {} },
+            agent = {
+                state = "ready",
+                provider_config = { name = "Codex" },
+                create_session = spy.new(function(_agent, _handlers, callback)
+                    local session_id = "inline-"
+                        .. tostring(#created_session_ids + 1)
+                    created_session_ids[#created_session_ids + 1] = session_id
+                    callback({ sessionId = session_id }, nil)
+                end),
+                send_prompt = send_prompt_spy,
+                cancel_session = cancel_session_spy,
+            },
+            inline_chat = {
+                begin_request = function() end,
+                complete = function() end,
+            },
+            _render_window_headers = function() end,
+            _refresh_chat_activity = function() end,
+            _dispatch_submission = SessionManager._dispatch_submission,
+            _drain_pending_inline_session_callbacks = SessionManager._drain_pending_inline_session_callbacks,
+            _ensure_inline_session_started = SessionManager._ensure_inline_session_started,
+            _with_active_inline_session = SessionManager._with_active_inline_session,
+            _start_inline_session = SessionManager._start_inline_session,
+            _cancel_inline_session = SessionManager._cancel_inline_session,
+        } --[[@as agentic.SessionManager]]
+
+        --- @param prompt string
+        --- @return agentic.SessionManager.QueuedSubmission
+        local function make_inline_submission(prompt)
+            --- @type agentic.SessionManager.QueuedSubmission
+            local submission = {
+                id = 1,
+                turn_id = prompt,
+                input_text = prompt,
+                prompt = { { type = "text", text = prompt } },
+                request = {
+                    turn_id = prompt,
+                    kind = "user",
+                    surface = "inline",
+                    text = prompt,
+                    timestamp = os.time(),
+                    content = { { type = "text", text = prompt } },
+                },
+                inline_request = {
+                    prompt = prompt,
+                    selection = {
+                        lines = { "local value = 1" },
+                        start_line = 1,
+                        end_line = 1,
+                        file_path = "/tmp/example.lua",
+                        file_type = "lua",
+                    },
+                    source_bufnr = 10,
+                    source_winid = 11,
+                },
+            }
+
+            return submission
+        end
+
+        session:_dispatch_submission(
+            make_inline_submission("Inline request one")
+        )
+        session:_dispatch_submission(
+            make_inline_submission("Inline request two")
+        )
+
+        assert.same({ "inline-1", "inline-2" }, created_session_ids)
+        assert.equal(2, send_prompt_spy.call_count)
+        assert.equal("inline-1", send_prompt_spy.calls[1][2])
+        assert.equal("inline-2", send_prompt_spy.calls[2][2])
+        assert.equal(2, #prompt_callbacks)
+        assert.equal(0, cancel_session_spy.call_count)
+
+        prompt_callbacks[1]({ stopReason = "end_turn" }, nil)
+        prompt_callbacks[2]({ stopReason = "end_turn" }, nil)
+
+        assert.spy(cancel_session_spy).was.called(2)
+
+        save_stub:revert()
+        schedule_stub:revert()
+    end)
+
+    it(
+        "keeps a rejected inline conversation on the same ACP session",
+        function()
             local schedule_stub = spy.stub(vim, "schedule")
             schedule_stub:invokes(function(callback)
                 callback()
             end)
 
-            local created_session_ids = {}
+            local handlers = nil
+            local prompt_callbacks = {}
             local send_prompt_spy = spy.new(
                 function(_agent, _session_id, _prompt, callback)
-                    callback({ stopReason = "end_turn" }, nil)
+                    prompt_callbacks[#prompt_callbacks + 1] = callback
+                end
+            )
+            local create_session_spy = spy.new(
+                function(_agent, new_handlers, callback)
+                    handlers = new_handlers
+                    callback({ sessionId = "inline-1" }, nil)
                 end
             )
             local cancel_session_spy = spy.new(function() end)
-            local begin_request_spy = spy.new(function() end)
-            local complete_spy = spy.new(function() end)
-            local save_stub
             local session_state = SessionState:new()
-
-            save_stub = spy.stub(session_state, "save_persisted_session_data")
+            local save_stub =
+                spy.stub(session_state, "save_persisted_session_data")
             save_stub:invokes(function(_self, callback)
                 if callback then
                     callback(nil)
@@ -2077,6 +2380,10 @@ describe("agentic.SessionManager", function()
             local session = {
                 session_id = nil,
                 _inline_session_id = nil,
+                _inline_sessions = {},
+                _inline_submission_queues = {},
+                _next_inline_conversation_id = 0,
+                _next_inline_submission_id = 0,
                 is_generating = false,
                 _inline_session_starting = false,
                 _pending_inline_session_callbacks = {},
@@ -2086,21 +2393,24 @@ describe("agentic.SessionManager", function()
                 agent = {
                     state = "ready",
                     provider_config = { name = "Codex" },
-                    create_session = spy.new(
-                        function(_agent, _handlers, callback)
-                            local session_id = "inline-"
-                                .. tostring(#created_session_ids + 1)
-                            created_session_ids[#created_session_ids + 1] =
-                                session_id
-                            callback({ sessionId = session_id }, nil)
-                        end
-                    ),
+                    create_session = create_session_spy,
                     send_prompt = send_prompt_spy,
                     cancel_session = cancel_session_spy,
                 },
+                permission_manager = {
+                    add_request = function(_self, _request, callback)
+                        callback("reject_once")
+                    end,
+                    remove_request_by_tool_call_id = function() end,
+                },
                 inline_chat = {
-                    begin_request = begin_request_spy,
-                    complete = complete_spy,
+                    is_active = function()
+                        return true
+                    end,
+                    begin_request = function() end,
+                    complete = function() end,
+                    handle_permission_request = function() end,
+                    handle_permission_resolution = function() end,
                 },
                 _render_window_headers = function() end,
                 _refresh_chat_activity = function() end,
@@ -2110,7 +2420,6 @@ describe("agentic.SessionManager", function()
                 _with_active_inline_session = SessionManager._with_active_inline_session,
                 _start_inline_session = SessionManager._start_inline_session,
                 _cancel_inline_session = SessionManager._cancel_inline_session,
-                _drain_queued_submissions = function() end,
             } --[[@as agentic.SessionManager]]
 
             --- @param prompt string
@@ -2119,9 +2428,11 @@ describe("agentic.SessionManager", function()
                 --- @type agentic.SessionManager.QueuedSubmission
                 local submission = {
                     id = 1,
+                    turn_id = prompt,
                     input_text = prompt,
                     prompt = { { type = "text", text = prompt } },
                     request = {
+                        turn_id = prompt,
                         kind = "user",
                         surface = "inline",
                         text = prompt,
@@ -2129,6 +2440,7 @@ describe("agentic.SessionManager", function()
                         content = { { type = "text", text = prompt } },
                     },
                     inline_request = {
+                        conversation_id = "conversation-1",
                         prompt = prompt,
                         selection = {
                             lines = { "local value = 1" },
@@ -2145,27 +2457,32 @@ describe("agentic.SessionManager", function()
                 return submission
             end
 
-            session:_dispatch_submission(
-                make_inline_submission("Inline request one")
-            )
-            session:_dispatch_submission(
-                make_inline_submission("Inline request two")
+            session:_dispatch_submission(make_inline_submission("first"))
+            assert.is_not_nil(handlers)
+            local permission_handlers = handlers
+            --- @cast permission_handlers agentic.acp.ClientHandlers
+            permission_handlers.on_request_permission({
+                toolCall = { toolCallId = "tc-1" },
+                options = {
+                    { optionId = "reject_once", kind = "reject_once" },
+                },
+            }, function() end)
+            prompt_callbacks[1]({ stopReason = "end_turn" }, nil)
+
+            assert.spy(cancel_session_spy).was.called(0)
+            assert.is_true(
+                session._inline_sessions["conversation-1"].awaiting_rejected_followup
             )
 
-            assert.same({ "inline-1", "inline-2" }, created_session_ids)
+            session:_dispatch_submission(make_inline_submission("follow-up"))
+
+            assert.equal(1, create_session_spy.call_count)
             assert.equal(2, send_prompt_spy.call_count)
             assert.equal("inline-1", send_prompt_spy.calls[1][2])
-            assert.equal("inline-2", send_prompt_spy.calls[2][2])
-            assert.spy(cancel_session_spy).was.called(2)
-            assert.equal("inline-1", cancel_session_spy.calls[1][2])
-            assert.equal("inline-2", cancel_session_spy.calls[2][2])
-            assert.spy(begin_request_spy).was.called(2)
-            assert.spy(complete_spy).was.called(2)
-            assert.is_nil(session._inline_session_id)
-            assert.is_nil(session.session_id)
+            assert.equal("inline-1", send_prompt_spy.calls[2][2])
 
             save_stub:revert()
             schedule_stub:revert()
-        end)
-    end)
+        end
+    )
 end)

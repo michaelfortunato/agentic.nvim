@@ -156,6 +156,21 @@ function SessionController.initialize_agent(session)
         vim.schedule(function()
             if not session["_restoring"] then
                 call_session_method(session, "_ensure_session_started")
+                for conversation_id, inline_session in
+                    pairs(session["_inline_sessions"] or {})
+                do
+                    if
+                        not inline_session.session_id
+                        and not inline_session.starting
+                        and #(inline_session.pending_callbacks or {}) > 0
+                    then
+                        call_session_method(
+                            session,
+                            "_ensure_inline_session_started",
+                            conversation_id
+                        )
+                    end
+                end
             end
         end)
     end)
@@ -187,20 +202,31 @@ function SessionController.drain_pending_session_callbacks(session)
 end
 
 --- @param session agentic.SessionManager
-function SessionController.drain_pending_inline_session_callbacks(session)
-    if not session["_inline_session_id"] then
+--- @param conversation_id string|nil
+function SessionController.drain_pending_inline_session_callbacks(
+    session,
+    conversation_id
+)
+    if conversation_id == nil then
         return
     end
 
-    local callbacks = session["_pending_inline_session_callbacks"] or {}
+    local inline_session = session["_inline_sessions"]
+            and session["_inline_sessions"][conversation_id]
+        or nil
+    if not inline_session or not inline_session.session_id then
+        return
+    end
+
+    local callbacks = inline_session.pending_callbacks or {}
     if #callbacks == 0 then
         return
     end
 
-    session["_pending_inline_session_callbacks"] = {}
+    inline_session.pending_callbacks = {}
 
     for _, callback in ipairs(callbacks) do
-        callback()
+        callback(inline_session.session_id)
     end
 end
 
@@ -229,13 +255,28 @@ function SessionController.ensure_session_started(session)
 end
 
 --- @param session agentic.SessionManager
-function SessionController.ensure_inline_session_started(session)
-    if session["_inline_session_id"] then
-        call_session_method(session, "_drain_pending_inline_session_callbacks")
+--- @param conversation_id string|nil
+function SessionController.ensure_inline_session_started(
+    session,
+    conversation_id
+)
+    if conversation_id == nil or conversation_id == "" then
         return
     end
 
-    if session["_inline_session_starting"] then
+    local inline_session = session["_inline_sessions"]
+            and session["_inline_sessions"][conversation_id]
+        or nil
+    if inline_session and inline_session.session_id then
+        call_session_method(
+            session,
+            "_drain_pending_inline_session_callbacks",
+            conversation_id
+        )
+        return
+    end
+
+    if inline_session and inline_session.starting then
         return
     end
 
@@ -244,10 +285,12 @@ function SessionController.ensure_inline_session_started(session)
     end
 
     call_session_method(session, "_start_inline_session", {
+        conversation_id = conversation_id,
         on_created = function()
             call_session_method(
                 session,
-                "_drain_pending_inline_session_callbacks"
+                "_drain_pending_inline_session_callbacks",
+                conversation_id
             )
         end,
     })
@@ -269,18 +312,43 @@ function SessionController.with_active_session(session, callback)
 end
 
 --- @param session agentic.SessionManager
---- @param callback fun()
-function SessionController.with_active_inline_session(session, callback)
-    if session["_inline_session_id"] then
-        callback()
+--- @param conversation_id string
+--- @param callback fun(session_id: string)
+function SessionController.with_active_inline_session(
+    session,
+    conversation_id,
+    callback
+)
+    local inline_sessions = session["_inline_sessions"] or {}
+    session["_inline_sessions"] = inline_sessions
+
+    local inline_session = inline_sessions[conversation_id]
+    if inline_session and inline_session.session_id then
+        callback(inline_session.session_id)
         return
     end
 
-    local pending_session_callbacks = session["_pending_inline_session_callbacks"]
-        or {}
-    pending_session_callbacks[#pending_session_callbacks + 1] = callback
-    session["_pending_inline_session_callbacks"] = pending_session_callbacks
-    call_session_method(session, "_ensure_inline_session_started")
+    if inline_session == nil then
+        --- @type agentic.SessionManager.InlineSession
+        inline_session = {
+            session_id = nil,
+            starting = false,
+            is_generating = false,
+            active_turn_id = nil,
+            pending_callbacks = {},
+            awaiting_rejected_followup = false,
+            close_on_complete = false,
+        }
+        inline_sessions[conversation_id] = inline_session
+    end
+
+    inline_session.pending_callbacks[#inline_session.pending_callbacks + 1] =
+        callback
+    call_session_method(
+        session,
+        "_ensure_inline_session_started",
+        conversation_id
+    )
 end
 
 --- @param session agentic.SessionManager
@@ -345,6 +413,51 @@ local function get_route(opts)
     return "chat"
 end
 
+--- @param opts {inline_conversation_id?: string|nil}|nil
+--- @return string|nil
+local function get_inline_conversation_id(opts)
+    return opts and opts.inline_conversation_id or nil
+end
+
+--- @param session agentic.SessionManager
+--- @param conversation_id string|nil
+--- @return agentic.SessionManager.InlineSession|nil
+local function get_inline_session(session, conversation_id)
+    if conversation_id == nil then
+        return nil
+    end
+
+    return session["_inline_sessions"]
+            and session["_inline_sessions"][conversation_id]
+        or nil
+end
+
+--- @param session agentic.SessionManager
+--- @param opts {route?: "chat"|"inline"|nil, inline_conversation_id?: string|nil}|nil
+--- @return string|nil
+local function get_event_turn_id(session, opts)
+    if get_route(opts) == "inline" then
+        local inline_session =
+            get_inline_session(session, get_inline_conversation_id(opts))
+        return inline_session and inline_session.active_turn_id or nil
+    end
+
+    return session["_active_chat_turn_id"]
+end
+
+--- @param session agentic.SessionManager
+--- @param opts {route?: "chat"|"inline"|nil, inline_conversation_id?: string|nil}|nil
+--- @return string|nil
+local function get_event_session_id(session, opts)
+    if get_route(opts) == "inline" then
+        local inline_session =
+            get_inline_session(session, get_inline_conversation_id(opts))
+        return inline_session and inline_session.session_id or nil
+    end
+
+    return session.session_id
+end
+
 --- @param session agentic.SessionManager
 --- @param config_id string
 --- @param value string
@@ -369,13 +482,15 @@ local function get_config_target_session_ids(session)
         target_session_ids[#target_session_ids + 1] = session.session_id
     end
 
-    local inline_session_id = session["_inline_session_id"]
-    if
-        inline_session_id
-        and inline_session_id ~= ""
-        and inline_session_id ~= session.session_id
-    then
-        target_session_ids[#target_session_ids + 1] = inline_session_id
+    for _, inline_session in pairs(session["_inline_sessions"] or {}) do
+        local inline_session_id = inline_session.session_id
+        if
+            inline_session_id
+            and inline_session_id ~= ""
+            and inline_session_id ~= session.session_id
+        then
+            target_session_ids[#target_session_ids + 1] = inline_session_id
+        end
     end
 
     return target_session_ids
@@ -420,37 +535,51 @@ end
 
 --- @param session agentic.SessionManager
 --- @param update agentic.acp.SessionUpdateMessage
---- @param opts {route?: "chat"|"inline"|nil}|nil
+--- @param opts {route?: "chat"|"inline"|nil, inline_conversation_id?: string|nil}|nil
 function SessionController.on_session_update(session, update, opts)
     local route = get_route(opts)
+    local turn_id = get_event_turn_id(session, opts)
+    local conversation_id = get_inline_conversation_id(opts)
 
-    if session.inline_chat and session.inline_chat:is_active() then
-        session.inline_chat:handle_session_update(update)
+    if
+        route == "inline"
+        and session.inline_chat
+        and session.inline_chat:is_active()
+    then
+        session.inline_chat:handle_session_update(update, {
+            conversation_id = conversation_id,
+        })
     end
 
     if update.sessionUpdate == "agent_message_chunk" then
-        session["_agent_phase"] = "generating"
-        refresh_chat_activity(session)
+        if route == "chat" then
+            session["_agent_phase"] = "generating"
+            refresh_chat_activity(session)
+        end
 
         if update.content then
             session.session_state:dispatch(
                 SessionEvents.append_interaction_response(
                     "message",
                     session.agent.provider_config.name,
-                    vim.deepcopy(update.content)
+                    vim.deepcopy(update.content),
+                    { turn_id = turn_id }
                 )
             )
         end
     elseif update.sessionUpdate == "agent_thought_chunk" then
-        session["_agent_phase"] = "thinking"
-        refresh_chat_activity(session)
+        if route == "chat" then
+            session["_agent_phase"] = "thinking"
+            refresh_chat_activity(session)
+        end
 
         if update.content then
             session.session_state:dispatch(
                 SessionEvents.append_interaction_response(
                     "thought",
                     session.agent.provider_config.name,
-                    vim.deepcopy(update.content)
+                    vim.deepcopy(update.content),
+                    { turn_id = turn_id }
                 )
             )
         end
@@ -465,7 +594,8 @@ function SessionController.on_session_update(session, update, opts)
         session.session_state:dispatch(
             SessionEvents.upsert_interaction_plan(
                 session.agent.provider_config.name,
-                vim.deepcopy(update.entries or {})
+                vim.deepcopy(update.entries or {}),
+                { turn_id = turn_id }
             )
         )
         if route == "chat" and Config.windows.todos.display then
@@ -515,8 +645,7 @@ function SessionController.on_session_update(session, update, opts)
     end
 
     invoke_hook("on_session_update", {
-        session_id = route == "inline" and session["_inline_session_id"]
-            or session.session_id,
+        session_id = get_event_session_id(session, opts),
         tab_page_id = session.tab_page_id,
         update = update,
     })
@@ -524,33 +653,57 @@ end
 
 --- @param session agentic.SessionManager
 --- @param tool_call agentic.ui.MessageWriter.ToolCallBlock
---- @param _opts {route?: "chat"|"inline"|nil}|nil
-function SessionController.on_tool_call(session, tool_call, _opts)
-    if session.inline_chat and session.inline_chat:is_active() then
-        session.inline_chat:handle_tool_call(tool_call)
+--- @param opts {route?: "chat"|"inline"|nil, inline_conversation_id?: string|nil}|nil
+function SessionController.on_tool_call(session, tool_call, opts)
+    local route = get_route(opts)
+    local turn_id = get_event_turn_id(session, opts)
+    local conversation_id = get_inline_conversation_id(opts)
+
+    if
+        route == "inline"
+        and session.inline_chat
+        and session.inline_chat:is_active()
+    then
+        session.inline_chat:handle_tool_call(tool_call, {
+            conversation_id = conversation_id,
+        })
     end
 
     session.session_state:dispatch(
         SessionEvents.upsert_interaction_tool_call(
             session.agent.provider_config.name,
-            tool_call
+            tool_call,
+            { turn_id = turn_id }
         )
     )
-    refresh_chat_activity(session)
+    if route == "chat" then
+        refresh_chat_activity(session)
+    end
 end
 
 --- @param session agentic.SessionManager
 --- @param tool_call_update agentic.ui.MessageWriter.ToolCallBlock
---- @param _opts {route?: "chat"|"inline"|nil}|nil
-function SessionController.on_tool_call_update(session, tool_call_update, _opts)
-    if session.inline_chat and session.inline_chat:is_active() then
-        session.inline_chat:handle_tool_call_update(tool_call_update)
+--- @param opts {route?: "chat"|"inline"|nil, inline_conversation_id?: string|nil}|nil
+function SessionController.on_tool_call_update(session, tool_call_update, opts)
+    local route = get_route(opts)
+    local turn_id = get_event_turn_id(session, opts)
+    local conversation_id = get_inline_conversation_id(opts)
+
+    if
+        route == "inline"
+        and session.inline_chat
+        and session.inline_chat:is_active()
+    then
+        session.inline_chat:handle_tool_call_update(tool_call_update, {
+            conversation_id = conversation_id,
+        })
     end
 
     local events = {
         SessionEvents.upsert_interaction_tool_call(
             session.agent.provider_config.name,
-            tool_call_update
+            tool_call_update,
+            { turn_id = turn_id }
         ),
     }
 
@@ -573,7 +726,9 @@ function SessionController.on_tool_call_update(session, tool_call_update, _opts)
         )
     end
 
-    refresh_chat_activity(session)
+    if route == "chat" then
+        refresh_chat_activity(session)
+    end
 
     if tool_call_update.status == "completed" then
         local tracker = nil
@@ -587,12 +742,15 @@ function SessionController.on_tool_call_update(session, tool_call_update, _opts)
         local tool_kind = tracker and tracker.kind or tool_call_update.kind
         if tool_kind and FILE_MUTATING_KINDS[tool_kind] then
             if
-                session.inline_chat
+                route == "inline"
+                and session.inline_chat
                 and session.inline_chat.is_active
                 and session.inline_chat:is_active()
                 and session.inline_chat.handle_applied_edit
             then
-                session.inline_chat:handle_applied_edit()
+                session.inline_chat:handle_applied_edit({
+                    conversation_id = conversation_id,
+                })
             end
             vim.cmd.checktime()
         end
@@ -602,15 +760,24 @@ end
 --- @param session agentic.SessionManager
 --- @param request agentic.acp.RequestPermission
 --- @param callback fun(option_id: string|nil)
---- @param _opts {route?: "chat"|"inline"|nil}|nil
+--- @param opts {route?: "chat"|"inline"|nil, inline_conversation_id?: string|nil}|nil
 function SessionController.handle_permission_request(
     session,
     request,
     callback,
-    _opts
+    opts
 )
-    if session.inline_chat and session.inline_chat:is_active() then
-        session.inline_chat:handle_permission_request()
+    local route = get_route(opts)
+    local conversation_id = get_inline_conversation_id(opts)
+
+    if
+        route == "inline"
+        and session.inline_chat
+        and session.inline_chat:is_active()
+    then
+        session.inline_chat:handle_permission_request({
+            conversation_id = conversation_id,
+        })
     end
 
     local tool_call_id = request.toolCall.toolCallId
@@ -632,18 +799,36 @@ function SessionController.handle_permission_request(
                     or nil
             ),
         })
+
+        if route == "inline" then
+            local inline_session = get_inline_session(session, conversation_id)
+            if inline_session then
+                if permission_state == "rejected" then
+                    inline_session.awaiting_rejected_followup = true
+                    inline_session.close_on_complete = false
+                else
+                    inline_session.awaiting_rejected_followup = false
+                    inline_session.close_on_complete = true
+                end
+            end
+        end
+
         if
-            session.inline_chat
+            route == "inline"
+            and session.inline_chat
             and session.inline_chat.handle_permission_resolution
         then
             session.inline_chat:handle_permission_resolution({
+                conversation_id = conversation_id,
                 option_id = option_id,
                 options = request.options,
             })
         end
         callback(option_id)
         vim.schedule(function()
-            refresh_chat_activity(session)
+            if route == "chat" then
+                refresh_chat_activity(session)
+            end
         end)
     end
 
@@ -655,7 +840,9 @@ function SessionController.handle_permission_request(
         SessionEvents.set_review_target(tool_call_id),
     })
     session.permission_manager:add_request(request, wrapped_callback)
-    refresh_chat_activity(session)
+    if route == "chat" then
+        refresh_chat_activity(session)
+    end
 end
 
 --- @param session agentic.SessionManager
@@ -728,14 +915,15 @@ function SessionController.cancel_session(session)
 end
 
 --- @param session agentic.SessionManager
---- @param opts {on_created: fun()|nil}|nil
+--- @param opts {conversation_id?: string|nil, on_created: fun(session_id: string)|nil}|nil
 function SessionController.start_inline_session(session, opts)
     return SessionLifecycle.start_inline(session, opts)
 end
 
 --- @param session agentic.SessionManager
-function SessionController.cancel_inline_session(session)
-    return SessionLifecycle.cancel_inline(session)
+--- @param conversation_id string|nil
+function SessionController.cancel_inline_session(session, conversation_id)
+    return SessionLifecycle.cancel_inline(session, conversation_id)
 end
 
 --- @param session agentic.SessionManager

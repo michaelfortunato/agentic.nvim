@@ -99,34 +99,48 @@ describe("Open and Close Chat Widget", function()
         assert.equal(1, session_count_after)
     end)
 
-    it("allows multiple independent sessions in the same tabpage", function()
-        child.lua([[ require("agentic").toggle() ]])
-        child.flush()
+    it(
+        "allows multiple independent live sessions in the same tabpage",
+        function()
+            child.lua([[ require("agentic").toggle() ]])
+            child.flush()
 
-        child.lua(
-            [[ require("agentic").new_session({ auto_add_to_context = false }) ]]
-        )
-        child.flush()
+            child.lua(
+                [[ require("agentic").new_session({ auto_add_to_context = false }) ]]
+            )
+            child.flush()
 
-        local tab_sessions = child.lua_get([[
+            local tab_sessions = child.lua_get([[
             #require("agentic.session_registry").get_tab_sessions(vim.api.nvim_get_current_tabpage())
         ]])
-        assert.equal(2, tab_sessions)
+            assert.equal(2, tab_sessions)
 
-        local filetypes = get_tabpage_filetypes(0)
-        local chat_count = 0
-        local input_count = 0
-        for _, filetype in ipairs(filetypes) do
-            if filetype == "AgenticChat" then
-                chat_count = chat_count + 1
-            elseif filetype == "AgenticInput" then
-                input_count = input_count + 1
+            local current_instance_id = child.lua_get([[
+            require("agentic.session_registry").get_current_session().instance_id
+        ]])
+            local newest_instance_id = child.lua_get([[
+            (function()
+            local sessions = require("agentic.session_registry").get_tab_sessions(vim.api.nvim_get_current_tabpage())
+            return sessions[#sessions].instance_id
+            end)()
+        ]])
+            assert.equal(newest_instance_id, current_instance_id)
+
+            local filetypes = get_tabpage_filetypes(0)
+            local chat_count = 0
+            local input_count = 0
+            for _, filetype in ipairs(filetypes) do
+                if filetype == "AgenticChat" then
+                    chat_count = chat_count + 1
+                elseif filetype == "AgenticInput" then
+                    input_count = input_count + 1
+                end
             end
-        end
 
-        assert.equal(2, chat_count)
-        assert.equal(2, input_count)
-    end)
+            assert.equal(1, chat_count)
+            assert.equal(1, input_count)
+        end
+    )
 
     it("loads another live session into the current chat widget", function()
         child.lua(

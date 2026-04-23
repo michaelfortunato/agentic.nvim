@@ -87,6 +87,19 @@ local function is_valid_bufnr(bufnr)
         and vim.api.nvim_buf_is_valid(bufnr)
 end
 
+--- @param winid integer|nil
+--- @return boolean valid
+local function is_valid_winid(winid)
+    return type(winid) == "number"
+        and winid > 0
+        and vim.api.nvim_win_is_valid(winid)
+end
+
+--- @return boolean exiting
+local function is_nvim_exiting()
+    return vim.v.dying ~= 0 or vim.v.exiting ~= vim.NIL
+end
+
 --- @param bufnr integer
 local function setup_review_detach_autocmds(bufnr)
     if not is_valid_bufnr(bufnr) then
@@ -100,13 +113,68 @@ local function setup_review_detach_autocmds(bufnr)
         group = group,
         buffer = bufnr,
         callback = function()
+            if is_nvim_exiting() then
+                return
+            end
+
             vim.schedule(function()
+                if is_nvim_exiting() then
+                    return
+                end
+
                 require("agentic.ui.diff_preview").clear_diff(bufnr, {
                     reason = "buffer_detached",
                 })
             end)
         end,
         desc = "Detach Agentic interactive diff preview when buffer hides",
+    })
+end
+
+--- @param tabpage integer
+--- @param winid integer
+local function setup_review_window_autocmds(tabpage, winid)
+    if not is_valid_winid(winid) then
+        return
+    end
+
+    local group_name = string.format("AgenticDiffPreviewWindow_%d", winid)
+    local group = vim.api.nvim_create_augroup(group_name, { clear = true })
+
+    vim.api.nvim_create_autocmd("WinClosed", {
+        group = group,
+        pattern = tostring(winid),
+        callback = function()
+            if is_nvim_exiting() then
+                return
+            end
+
+            vim.schedule(function()
+                if is_nvim_exiting() then
+                    return
+                end
+
+                if not ReviewState.is_active_review_window(tabpage, winid) then
+                    return
+                end
+
+                local review_key = ReviewState.get_active_review_key(tabpage)
+                local active_bufnr = ReviewState.get_active_diff_buffer(tabpage)
+                ReviewState.set_active_review_window(tabpage, nil)
+
+                if active_bufnr then
+                    require("agentic.ui.diff_preview").clear_diff(
+                        active_bufnr,
+                        {
+                            reason = "window_closed",
+                            review_key = review_key,
+                            tabpage = tabpage,
+                        }
+                    )
+                end
+            end)
+        end,
+        desc = "Detach Agentic interactive diff preview when window closes",
     })
 end
 
@@ -201,7 +269,10 @@ function M.show_diff(opts)
         bufnr = vim.fn.bufadd(opts.file_path)
     end
 
-    local winid = vim.fn.bufwinid(bufnr)
+    local review_winid = wants_interactive_review
+            and ReviewState.get_active_review_window()
+        or nil
+    local winid = review_winid or vim.fn.bufwinid(bufnr)
     local target_winid = winid ~= -1 and winid or nil
     local opened_review_window = target_winid == nil
 
@@ -226,6 +297,16 @@ function M.show_diff(opts)
             review_key = review_key,
             mode = "none",
         }
+    end
+
+    if wants_interactive_review then
+        local active_bufnr = ReviewState.get_active_diff_buffer(tabpage)
+        if active_bufnr and active_bufnr ~= bufnr then
+            M.clear_diff(active_bufnr, {
+                reason = "render_refresh",
+                tabpage = tabpage,
+            })
+        end
     end
 
     M.clear_diff(bufnr, {
@@ -281,6 +362,28 @@ function M.show_diff(opts)
                 mode = "inline",
             }
         end
+    end
+
+    if vim.api.nvim_win_get_buf(target_winid) ~= bufnr then
+        local set_ok, set_err =
+            pcall(vim.api.nvim_win_set_buf, target_winid, bufnr)
+        if not set_ok then
+            Logger.notify(
+                "Failed to set review buffer in window: " .. tostring(set_err),
+                vim.log.levels.WARN
+            )
+            return {
+                interactive = false,
+                bufnr = bufnr,
+                review_key = review_key,
+                mode = "none",
+            }
+        end
+    end
+
+    if wants_interactive_review then
+        ReviewState.set_active_review_window(tabpage, target_winid)
+        setup_review_window_autocmds(tabpage, target_winid)
     end
 
     ReviewState.set_active_diff_buffer(tabpage, bufnr)
@@ -346,7 +449,7 @@ function M.clear_diff(buf, clear_opts)
     local review_key = opts.review_key
     local tabpage = opts.tabpage
 
-    if bufnr == -1 then
+    if bufnr == -1 or not is_valid_bufnr(bufnr) then
         if review_key ~= nil then
             ReviewState.mark_review_detached(review_key, reason, nil, tabpage)
             ReviewState.notify_review_detach(review_key, reason, nil, tabpage)

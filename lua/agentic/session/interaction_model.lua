@@ -76,6 +76,7 @@
 --- | agentic.session.InteractionRequestContentBlockNode
 
 --- @class agentic.session.InteractionRequest
+--- @field turn_id? string
 --- @field kind "user"|"review"
 --- @field surface "chat"|"inline"
 --- @field text string
@@ -161,6 +162,7 @@
 --- @field error_text string|nil
 
 --- @class agentic.session.InteractionTurn
+--- @field turn_id? string
 --- @field index integer
 --- @field request agentic.session.InteractionRequest
 --- @field response agentic.session.InteractionResponse
@@ -387,7 +389,7 @@ local function content_node_to_content(node)
     return nil
 end
 
---- @param request {kind?: "user"|"review"|nil, surface?: "chat"|"inline"|nil, text?: string|nil, timestamp?: integer|nil, content?: agentic.acp.Content[]|agentic.acp.Content|nil, content_nodes?: agentic.session.InteractionContentNode[]|nil, nodes?: agentic.session.InteractionRequestNode[]|nil}
+--- @param request {turn_id?: string|nil, kind?: "user"|"review"|nil, surface?: "chat"|"inline"|nil, text?: string|nil, timestamp?: integer|nil, content?: agentic.acp.Content[]|agentic.acp.Content|nil, content_nodes?: agentic.session.InteractionContentNode[]|nil, nodes?: agentic.session.InteractionRequestNode[]|nil}
 --- @return agentic.session.InteractionRequest
 local function make_request(request)
     local content = normalize_content_list(request.content)
@@ -407,6 +409,7 @@ local function make_request(request)
     local content_nodes = build_content_nodes(content)
 
     return {
+        turn_id = request.turn_id,
         kind = request.kind
             or (is_review_request(request.text or "") and "review" or "user"),
         surface = request.surface or "chat",
@@ -522,8 +525,17 @@ local function build_tool_call_content_nodes(tool_call)
 end
 
 --- @param turns agentic.session.InteractionTurn[]
+--- @param turn_id string|nil
 --- @return agentic.session.InteractionTurn|nil
-local function current_runtime_turn(turns)
+local function current_runtime_turn(turns, turn_id)
+    if turn_id ~= nil then
+        for turn_index = #turns, 1, -1 do
+            if turns[turn_index].turn_id == turn_id then
+                return turns[turn_index]
+            end
+        end
+    end
+
     return turns[#turns]
 end
 
@@ -550,6 +562,9 @@ local function build_interaction_session(opts)
 
     for index, turn in ipairs(opts.turns or {}) do
         turns[index] = {
+            turn_id = turn.turn_id
+                or (turn.request and turn.request.turn_id)
+                or nil,
             index = turn.index or index,
             request = make_request(turn.request or {}),
             response = {
@@ -581,9 +596,10 @@ function InteractionModel.from_persisted_session(opts)
 end
 
 --- @param turns agentic.session.InteractionTurn[]
---- @param request {kind?: "user"|"review"|nil, surface?: "chat"|"inline"|nil, text?: string|nil, timestamp?: integer|nil, content?: agentic.acp.Content[]|agentic.acp.Content|nil}
+--- @param request {turn_id?: string|nil, kind?: "user"|"review"|nil, surface?: "chat"|"inline"|nil, text?: string|nil, timestamp?: integer|nil, content?: agentic.acp.Content[]|agentic.acp.Content|nil}
 function InteractionModel.append_request(turns, request)
     turns[#turns + 1] = {
+        turn_id = request.turn_id,
         index = #turns + 1,
         request = make_request(request),
         response = {
@@ -598,18 +614,20 @@ end
 --- @param kind "message"|"thought"
 --- @param provider_name string|nil
 --- @param content agentic.acp.Content|agentic.acp.Content[]|nil
+--- @param turn_id string|nil
 function InteractionModel.append_response_content(
     turns,
     kind,
     provider_name,
-    content
+    content,
+    turn_id
 )
     local normalized = normalize_content_list(content)
     if vim.tbl_isempty(normalized) then
         return
     end
 
-    local turn = current_runtime_turn(turns)
+    local turn = current_runtime_turn(turns, turn_id)
     if not turn then
         return
     end
@@ -638,8 +656,9 @@ end
 --- @param turns agentic.session.InteractionTurn[]
 --- @param provider_name string|nil
 --- @param entries agentic.acp.PlanEntry[]
-function InteractionModel.upsert_plan(turns, provider_name, entries)
-    local turn = current_runtime_turn(turns)
+--- @param turn_id string|nil
+function InteractionModel.upsert_plan(turns, provider_name, entries, turn_id)
+    local turn = current_runtime_turn(turns, turn_id)
     if not turn then
         return
     end
@@ -661,7 +680,13 @@ end
 --- @param turns agentic.session.InteractionTurn[]
 --- @param provider_name string|nil
 --- @param tool_call agentic.ui.MessageWriter.ToolCallBlock
-function InteractionModel.upsert_tool_call(turns, provider_name, tool_call)
+--- @param turn_id string|nil
+function InteractionModel.upsert_tool_call(
+    turns,
+    provider_name,
+    tool_call,
+    turn_id
+)
     local node = make_tool_call_node(tool_call)
 
     for turn_index = #turns, 1, -1 do
@@ -737,7 +762,7 @@ function InteractionModel.upsert_tool_call(turns, provider_name, tool_call)
         end
     end
 
-    local turn = current_runtime_turn(turns)
+    local turn = current_runtime_turn(turns, turn_id)
     if not turn then
         return
     end
@@ -748,8 +773,9 @@ end
 --- @param turns agentic.session.InteractionTurn[]
 --- @param result {stop_reason?: agentic.acp.StopReason|nil, timestamp?: integer|nil, error_text?: string|nil}
 --- @param provider_name string|nil
-function InteractionModel.set_turn_result(turns, result, provider_name)
-    local turn = current_runtime_turn(turns)
+--- @param turn_id string|nil
+function InteractionModel.set_turn_result(turns, result, provider_name, turn_id)
+    local turn = current_runtime_turn(turns, turn_id)
     if not turn then
         return
     end

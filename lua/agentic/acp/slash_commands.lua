@@ -12,6 +12,68 @@ local States = require("agentic.states")
 --- @class agentic.acp.SlashCommands
 local SlashCommands = {}
 
+--- @param cmd agentic.acp.AvailableCommand
+--- @return boolean
+local function is_valid_command(cmd)
+    return type(cmd.name) == "string"
+        and type(cmd.description) == "string"
+        and cmd.name ~= ""
+        and cmd.description ~= ""
+        and not cmd.name:match("%s")
+        and cmd.name ~= "clear"
+end
+
+--- @param cmd agentic.acp.AvailableCommand
+--- @return agentic.acp.CompletionItem
+local function to_completion_item(cmd)
+    return {
+        word = cmd.name,
+        menu = cmd.description,
+        info = cmd.description,
+        kind = "/",
+        icase = 1,
+    }
+end
+
+--- @param commands agentic.acp.CompletionItem[]
+--- @param base string
+--- @return agentic.acp.CompletionItem[]
+local function filter_commands(commands, base)
+    if base == "" then
+        return vim.deepcopy(commands)
+    end
+
+    local lowered_base = base:lower()
+    --- @type agentic.acp.CompletionItem[]
+    local matches = {}
+    for _, command in ipairs(commands) do
+        if command.word:lower():find(lowered_base, 1, true) == 1 then
+            matches[#matches + 1] = command
+        end
+    end
+
+    return matches
+end
+
+--- @param bufnr integer
+--- @return string|nil base
+local function get_slash_base(bufnr)
+    local cursor = vim.api.nvim_win_get_cursor(0)
+    local lines = vim.api.nvim_buf_get_lines(bufnr, 0, cursor[1], false)
+    if #lines == 0 then
+        return nil
+    end
+
+    local cursor_col = cursor[2]
+    local cursor_line = lines[#lines]
+    if cursor_col == 0 and cursor_line:sub(1, 1) == "/" then
+        cursor_col = 1
+    end
+
+    lines[#lines] = cursor_line:sub(1, cursor_col)
+    return table.concat(lines, "\n"):match("^/(%S*)$")
+end
+
 --- Replace all commands with new list in completion format
 --- Validates each command has required fields, skips invalid commands and commands with spaces
 --- Filters out `clear` command (handled by specific agents internally)
@@ -29,46 +91,19 @@ function SlashCommands.setCommands(bufnr, available_commands, opts)
     local has_new_command = false
 
     for _, cmd in ipairs(available_commands) do
-        if
-            cmd.name
-            and cmd.description
-            and not cmd.name:match("%s")
-            and cmd.name ~= "clear"
-        then
+        if is_valid_command(cmd) then
             if cmd.name == "new" then
                 has_new_command = true
             end
 
-            --- @type agentic.acp.CompletionItem
-            local completion_item = {
-                word = cmd.name,
-                menu = cmd.description,
-                info = cmd.description,
-                kind = "/",
-                icase = 1,
-            }
-            table.insert(commands, completion_item)
+            commands[#commands + 1] = to_completion_item(cmd)
             seen_names[cmd.name] = true
         end
     end
 
     for _, cmd in ipairs(opts.local_commands or {}) do
-        if
-            cmd.name
-            and cmd.description
-            and not cmd.name:match("%s")
-            and cmd.name ~= "clear"
-            and not seen_names[cmd.name]
-        then
-            --- @type agentic.acp.CompletionItem
-            local completion_item = {
-                word = cmd.name,
-                menu = cmd.description,
-                info = cmd.description,
-                kind = "/",
-                icase = 1,
-            }
-            table.insert(commands, completion_item)
+        if is_valid_command(cmd) and not seen_names[cmd.name] then
+            commands[#commands + 1] = to_completion_item(cmd)
             seen_names[cmd.name] = true
         end
     end
@@ -86,68 +121,39 @@ function SlashCommands.setCommands(bufnr, available_commands, opts)
         table.insert(commands, new_command)
     end
 
-    -- must be set at the end, as it gets serialized and loses the reference
     States.setSlashCommands(bufnr, commands)
 end
 
 --- Setup native Neovim completion for slash commands in the input buffer
---- Uses completefunc with <C-x><C-u> trigger
---- Neovim handles fuzzy filtering automatically via completeopt
 --- @param bufnr integer The input buffer number
 function SlashCommands.setup_completion(bufnr)
     vim.bo[bufnr].completeopt = "menu,menuone,noinsert,popup,fuzzy"
 
-    -- Include `-` as keyword character so completion doesn't close when typing it
-    vim.bo[bufnr].iskeyword = vim.bo[bufnr].iskeyword .. ",-"
-
-    -- Set completefunc to return our commands
-    -- CRITICAL: v:lua syntax does NOT support parens in require call
-    vim.bo[bufnr].completefunc =
-        "v:lua.require'agentic.acp.slash_commands'.complete_func"
-
     vim.api.nvim_create_autocmd("TextChangedI", {
         buffer = bufnr,
         callback = function()
-            local commands = States.getSlashCommands()
-            if #commands == 0 then
-                return
-            end
-
-            local cursor = vim.api.nvim_win_get_cursor(0)
-            local row = cursor[1]
-            local col = cursor[2]
-
-            if row ~= 1 or col < 1 then
-                return
-            end
-
-            local line = vim.api.nvim_get_current_line()
-
-            if not line:match("^/") or line:match("%s") then
-                return
-            end
-
-            -- Feed <C-x><C-u> to trigger completefunc
-            vim.api.nvim_feedkeys(
-                vim.api.nvim_replace_termcodes("<C-x><C-u>", true, false, true),
-                "n",
-                false
-            )
+            SlashCommands.trigger_completion(bufnr)
         end,
     })
 end
 
---- Completion function for completefunc
---- @param findstart number 1 to find start of completion, 0 to return matches
---- @param _base string The text to match when findstart=0
---- @return number|table Start column when findstart=1, completion items when findstart=0
-function SlashCommands.complete_func(findstart, _base)
-    if findstart == 1 then
-        -- Return the column where the completion starts (after the "/")
-        return 1
+--- @param bufnr integer|nil
+--- @return boolean triggered
+function SlashCommands.trigger_completion(bufnr)
+    local target_bufnr = bufnr or vim.api.nvim_get_current_buf()
+    local base = get_slash_base(target_bufnr)
+    if not base then
+        return false
     end
 
-    return States.getSlashCommands()
+    local commands =
+        filter_commands(States.getSlashCommands(target_bufnr), base)
+    if #commands == 0 then
+        return false
+    end
+
+    local ok = pcall(vim.fn.complete, 2, commands)
+    return ok
 end
 
 return SlashCommands

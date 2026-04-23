@@ -14,6 +14,16 @@ local Config = require("agentic.config")
 local Theme = require("agentic.theme")
 
 local NS_ANIMATION = vim.api.nvim_create_namespace("agentic_animation")
+local PROGRESS_TITLE = "Agentic Chat"
+
+--- @type table<agentic.Theme.SpinnerState, number>
+local PROGRESS_PERCENT = {
+    busy = 5,
+    thinking = 20,
+    generating = 55,
+    searching = 72,
+    waiting = 85,
+}
 
 --- @type table<agentic.Theme.SpinnerState, number>
 local TIMING = {
@@ -32,6 +42,23 @@ local STATE_LABELS = {
     waiting = "Waiting for approval",
 }
 
+--- @return boolean
+local function supports_progress_messages()
+    return vim.fn.has("nvim-0.12") == 1
+end
+
+--- @param state agentic.Theme.SpinnerState
+--- @param detail string|nil
+--- @return string
+local function format_activity_label(state, detail)
+    local label = STATE_LABELS[state] or state
+    if detail and detail ~= "" then
+        return string.format("%s · %s", label, detail)
+    end
+
+    return label
+end
+
 --- @class agentic.ui.StatusAnimation
 --- @field _bufnr number Buffer number where animation is rendered
 --- @field _state? agentic.Theme.SpinnerState Current animation state
@@ -41,6 +68,9 @@ local STATE_LABELS = {
 --- @field _extmark_id? number Current extmark ID
 --- @field _attached boolean
 --- @field _render_scheduled boolean
+--- @field _progress_id? number Native progress message id
+--- @field _progress_reported boolean
+--- @field _use_native_progress boolean
 local StatusAnimation = {}
 StatusAnimation.__index = StatusAnimation
 
@@ -56,9 +86,15 @@ function StatusAnimation:new(bufnr)
         _extmark_id = nil,
         _attached = false,
         _render_scheduled = false,
+        _progress_id = nil,
+        _progress_reported = false,
+        _use_native_progress = supports_progress_messages(),
     }, StatusAnimation)
 
-    instance:_attach()
+    if not instance._use_native_progress then
+        instance:_attach()
+    end
+
     return instance
 end
 
@@ -76,12 +112,26 @@ function StatusAnimation:start(state, opts)
         self._spinner_idx = 1
     end
 
+    if self._use_native_progress then
+        if not changed then
+            return
+        end
+
+        self:_update_progress()
+        return
+    end
+
     self:_render_frame()
 end
 
 function StatusAnimation:stop()
     self._state = nil
     self._detail = nil
+
+    if self._use_native_progress then
+        self:_dismiss_progress()
+        return
+    end
 
     self:_stop_timer()
 
@@ -95,6 +145,64 @@ function StatusAnimation:stop()
     end
 
     self._extmark_id = nil
+end
+
+function StatusAnimation:_dismiss_progress()
+    if not self._progress_id and not self._progress_reported then
+        return
+    end
+
+    pcall(
+        vim.api.nvim_echo,
+        { { "dismissed", Theme.HL_GROUPS.ACTIVITY_TEXT } },
+        true,
+        {
+            id = self._progress_id,
+            kind = "progress",
+            status = "success",
+            percent = 100,
+            title = PROGRESS_TITLE,
+        }
+    )
+
+    self._progress_id = nil
+    self._progress_reported = false
+end
+
+function StatusAnimation:_update_progress()
+    if not self._state then
+        return
+    end
+
+    local ok, progress_id = pcall(
+        vim.api.nvim_echo,
+        {
+            {
+                format_activity_label(self._state, self._detail),
+                Theme.HL_GROUPS.ACTIVITY_TEXT,
+            },
+        },
+        true,
+        {
+            id = self._progress_id,
+            kind = "progress",
+            status = "running",
+            percent = PROGRESS_PERCENT[self._state]
+                or PROGRESS_PERCENT.generating,
+            title = PROGRESS_TITLE,
+        }
+    )
+
+    if ok then
+        self._progress_reported = true
+    end
+
+    if ok and self._progress_id == nil then
+        local numeric_progress_id = tonumber(progress_id)
+        if numeric_progress_id ~= nil then
+            self._progress_id = numeric_progress_id
+        end
+    end
 end
 
 function StatusAnimation:_attach()
@@ -156,11 +264,6 @@ function StatusAnimation:_render_frame()
 
     self._spinner_idx = (self._spinner_idx % #spinner_chars) + 1
 
-    local label = STATE_LABELS[self._state] or self._state
-    if self._detail and self._detail ~= "" then
-        label = string.format("%s · %s", label, self._detail)
-    end
-
     local hl_group = Theme.get_spinner_hl_group(self._state)
     local text_hl_group = Theme.get_activity_text_hl_group()
     local lines = vim.api.nvim_buf_get_lines(self._bufnr, 0, -1, false)
@@ -168,7 +271,10 @@ function StatusAnimation:_render_frame()
 
     local virt_text = {
         { char, hl_group },
-        { " " .. label, text_hl_group },
+        {
+            " " .. format_activity_label(self._state, self._detail),
+            text_hl_group,
+        },
     }
 
     local delay = TIMING[self._state] or TIMING.generating

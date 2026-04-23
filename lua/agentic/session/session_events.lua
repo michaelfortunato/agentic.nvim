@@ -68,21 +68,25 @@ function SessionEvents.load_persisted_session(persisted_session, opts)
     }
 end
 
---- @param request {kind?: "user"|"review"|nil, surface?: "chat"|"inline"|nil, text?: string|nil, timestamp?: integer|nil, content?: agentic.acp.Content[]|agentic.acp.Content|nil}
+--- @param request {turn_id?: string|nil, kind?: "user"|"review"|nil, surface?: "chat"|"inline"|nil, text?: string|nil, timestamp?: integer|nil, content?: agentic.acp.Content[]|agentic.acp.Content|nil}
 --- @return table
 function SessionEvents.append_interaction_request(request)
     return {
         type = "interaction/append_request",
+        turn_id = request.turn_id,
         request = request,
     }
 end
 
 --- @param provider_name string|nil
 --- @param entries agentic.acp.PlanEntry[]
+--- @param opts {turn_id?: string|nil}|nil
 --- @return table
-function SessionEvents.upsert_interaction_plan(provider_name, entries)
+function SessionEvents.upsert_interaction_plan(provider_name, entries, opts)
+    opts = opts or {}
     return {
         type = "interaction/upsert_plan",
+        turn_id = opts.turn_id,
         provider_name = provider_name,
         entries = entries,
     }
@@ -91,10 +95,18 @@ end
 --- @param kind "message"|"thought"
 --- @param provider_name string|nil
 --- @param content agentic.acp.Content|agentic.acp.Content[]
+--- @param opts {turn_id?: string|nil}|nil
 --- @return table
-function SessionEvents.append_interaction_response(kind, provider_name, content)
+function SessionEvents.append_interaction_response(
+    kind,
+    provider_name,
+    content,
+    opts
+)
+    opts = opts or {}
     return {
         type = "interaction/append_response",
+        turn_id = opts.turn_id,
         kind = kind,
         provider_name = provider_name,
         content = content,
@@ -103,10 +115,17 @@ end
 
 --- @param provider_name string|nil
 --- @param tool_call agentic.ui.MessageWriter.ToolCallBlock
+--- @param opts {turn_id?: string|nil}|nil
 --- @return table
-function SessionEvents.upsert_interaction_tool_call(provider_name, tool_call)
+function SessionEvents.upsert_interaction_tool_call(
+    provider_name,
+    tool_call,
+    opts
+)
+    opts = opts or {}
     return {
         type = "interaction/upsert_tool_call",
+        turn_id = opts.turn_id,
         provider_name = provider_name,
         tool_call = tool_call,
     }
@@ -114,10 +133,13 @@ end
 
 --- @param result {stop_reason?: agentic.acp.StopReason|nil, timestamp?: integer|nil, error_text?: string|nil}
 --- @param provider_name string|nil
+--- @param opts {turn_id?: string|nil}|nil
 --- @return table
-function SessionEvents.set_interaction_turn_result(result, provider_name)
+function SessionEvents.set_interaction_turn_result(result, provider_name, opts)
+    opts = opts or {}
     return {
         type = "interaction/set_turn_result",
+        turn_id = opts.turn_id,
         result = result,
         provider_name = provider_name,
     }

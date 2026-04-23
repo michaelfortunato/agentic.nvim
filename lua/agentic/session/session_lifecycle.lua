@@ -48,7 +48,7 @@ local function call_session_method(session, method_name, ...)
 end
 
 --- @param session agentic.SessionManager
---- @param opts {route?: "chat"|"inline"|nil}|nil
+--- @param opts {route?: "chat"|"inline"|nil, inline_conversation_id?: string|nil}|nil
 --- @return agentic.acp.ClientHandlers
 local function build_handlers(session, opts)
     local handler_opts = opts or {}
@@ -297,11 +297,38 @@ local function restore_config_changes(
 end
 
 --- @param session agentic.SessionManager
-function SessionLifecycle.cancel_inline(session)
-    if session._inline_session_id then
-        session.agent:cancel_session(session._inline_session_id)
+--- @param conversation_id string|nil
+function SessionLifecycle.cancel_inline(session, conversation_id)
+    local inline_sessions = session._inline_sessions or {}
+
+    local function cancel_entry(target_conversation_id, inline_session)
+        if
+            inline_session
+            and inline_session.session_id
+            and session.agent
+            and session.agent.cancel_session
+        then
+            session.agent:cancel_session(inline_session.session_id)
+        end
+
+        inline_sessions[target_conversation_id] = nil
+        if
+            session._inline_submission_queues
+            and target_conversation_id ~= nil
+        then
+            session._inline_submission_queues[target_conversation_id] = nil
+        end
     end
 
+    if conversation_id ~= nil then
+        cancel_entry(conversation_id, inline_sessions[conversation_id])
+    else
+        for target_conversation_id, inline_session in pairs(inline_sessions) do
+            cancel_entry(target_conversation_id, inline_session)
+        end
+    end
+
+    session._inline_sessions = inline_sessions
     session._inline_session_id = nil
     session._inline_session_starting = false
     session._pending_inline_session_callbacks = {}
@@ -478,32 +505,80 @@ function SessionLifecycle.start(session, opts)
 end
 
 --- @param session agentic.SessionManager
---- @param opts {on_created: fun()|nil}|nil
+--- @param opts {conversation_id?: string|nil, on_created: fun(session_id: string)|nil}|nil
 function SessionLifecycle.start_inline(session, opts)
     opts = opts or {}
-    local on_created = opts.on_created
-    local pending_callbacks = session._pending_inline_session_callbacks or {}
+    local conversation_id = opts.conversation_id
+    if conversation_id == nil or conversation_id == "" then
+        return
+    end
 
-    SessionLifecycle.cancel_inline(session)
-    session._pending_inline_session_callbacks = pending_callbacks
+    local on_created = opts.on_created
+    local inline_sessions = session._inline_sessions or {}
+    local inline_session = inline_sessions[conversation_id]
+
+    if inline_session == nil then
+        --- @type agentic.SessionManager.InlineSession
+        inline_session = {
+            session_id = nil,
+            starting = false,
+            is_generating = false,
+            active_turn_id = nil,
+            pending_callbacks = {},
+            awaiting_rejected_followup = false,
+            close_on_complete = false,
+        }
+        inline_sessions[conversation_id] = inline_session
+        session._inline_sessions = inline_sessions
+    end
+
+    if inline_session.session_id then
+        if on_created then
+            vim.schedule(function()
+                on_created(inline_session.session_id)
+            end)
+        end
+        return
+    end
+
+    if on_created then
+        inline_session.pending_callbacks[#inline_session.pending_callbacks + 1] =
+            on_created
+    end
+
+    if inline_session.starting then
+        return
+    end
+
+    inline_session.starting = true
     session._inline_session_starting = true
 
     session.agent:create_session(
-        build_handlers(session, { route = "inline" }),
+        build_handlers(session, {
+            route = "inline",
+            inline_conversation_id = conversation_id,
+        }),
         function(response, err)
-            session._inline_session_starting = false
+            inline_session.starting = false
 
             if err or not response then
-                session._inline_session_id = nil
+                inline_sessions[conversation_id] = nil
+                session._inline_sessions = inline_sessions
+                session._inline_session_starting = false
                 return
             end
 
+            inline_session.session_id = response.sessionId
             session._inline_session_id = response.sessionId
+            session._inline_session_starting = false
 
             local function finish_inline_setup()
+                local callbacks = inline_session.pending_callbacks or {}
+                inline_session.pending_callbacks = {}
+
                 vim.schedule(function()
-                    if on_created then
-                        on_created()
+                    for _, callback in ipairs(callbacks) do
+                        callback(response.sessionId)
                     end
                 end)
             end
@@ -514,7 +589,7 @@ function SessionLifecycle.start_inline(session, opts)
             if #changes > 0 then
                 restore_config_changes(
                     session,
-                    session._inline_session_id,
+                    inline_session.session_id,
                     changes,
                     finish_inline_setup
                 )
@@ -528,7 +603,15 @@ end
 
 --- @param session agentic.SessionManager
 function SessionLifecycle.switch_provider(session)
-    if session.is_generating then
+    local inline_generating = false
+    for _, inline_session in pairs(session._inline_sessions or {}) do
+        if inline_session.is_generating then
+            inline_generating = true
+            break
+        end
+    end
+
+    if session.is_generating or inline_generating then
         Logger.notify(
             "Cannot switch provider while generating. Stop generation first.",
             vim.log.levels.WARN
