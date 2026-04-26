@@ -261,6 +261,11 @@ local ConfigDefault = {
             command = "codex-acp",
             default_model = "gpt-5.5",
             args = {
+                -- Equivalent to Codex CLI `/fast on`.
+                "-c",
+                'service_tier="fast"',
+                "-c",
+                "features.fast_mode=true",
                 -- "-c",
                 -- "features.web_search_request=true", -- disabled as it doesn't send proper tool call messages
             },
