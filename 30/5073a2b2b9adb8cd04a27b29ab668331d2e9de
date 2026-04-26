@@ -1,0 +1,38 @@
+lua/agentic/theme.test.lua
+  23541f57170ab486 14-16,126,139,182
+lua/agentic/theme.lua
+  736f5e0b94187670 176
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "305073a2b2b9adb8cd04a27b29ab668331d2e9de",
+  "prompts": {
+    "23541f57170ab486": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019dcb25-ccd5-70c2-a7e8-4521cb02d6eb",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Michael Fortunato",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 36,
+      "overriden_lines": 0
+    },
+    "736f5e0b94187670": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019dcb6b-ddfd-7081-a4a1-4be0529e9029",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Michael Fortunato",
+      "messages": [],
+      "total_additions": 9,
+      "total_deletions": 5,
+      "accepted_lines": 9,
+      "overriden_lines": 0
+    }
+  }
+}
