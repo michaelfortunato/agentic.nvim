@@ -1,0 +1,101 @@
+lua/agentic/config_default.lua
+  31284a4b52c886c4 264-268
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "dc8b17cb655650237a8e7dcecb485c2c0f10a279",
+  "prompts": {
+    "0beec48e0a908a0a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019dcb42-fb6e-76d2-baee-90f56c1cc20e",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Michael Fortunato",
+      "messages": [],
+      "total_additions": 232,
+      "total_deletions": 40,
+      "accepted_lines": 217,
+      "overriden_lines": 0
+    },
+    "23541f57170ab486": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019dcb25-ccd5-70c2-a7e8-4521cb02d6eb",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Michael Fortunato",
+      "messages": [],
+      "total_additions": 38,
+      "total_deletions": 17,
+      "accepted_lines": 36,
+      "overriden_lines": 0
+    },
+    "2b399bf6ca4f3aa1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019dcb54-896b-7cd0-a1f4-f517da489761",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Michael Fortunato",
+      "messages": [],
+      "total_additions": 160,
+      "total_deletions": 27,
+      "accepted_lines": 151,
+      "overriden_lines": 0
+    },
+    "31284a4b52c886c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019dcb56-7379-71d1-a350-6f907a159f9e",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Michael Fortunato",
+      "messages": [],
+      "total_additions": 6,
+      "total_deletions": 1,
+      "accepted_lines": 6,
+      "overriden_lines": 0
+    },
+    "a684b68e54851b94": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019dcafd-0440-79f2-821d-01b874b233f3",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Michael Fortunato",
+      "messages": [],
+      "total_additions": 164,
+      "total_deletions": 24,
+      "accepted_lines": 71,
+      "overriden_lines": 0
+    },
+    "b65a517e66d8c9e1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019dcb41-f3ec-74c0-87d0-fc5bfb2e9d13",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Michael Fortunato",
+      "messages": [],
+      "total_additions": 223,
+      "total_deletions": 61,
+      "accepted_lines": 212,
+      "overriden_lines": 0
+    },
+    "d9bd56f5922a7d6f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019dca97-eeeb-7d03-bdb2-523760e2e3de",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Michael Fortunato",
+      "messages": [],
+      "total_additions": 3147,
+      "total_deletions": 241,
+      "accepted_lines": 3011,
+      "overriden_lines": 2
+    }
+  }
+}
