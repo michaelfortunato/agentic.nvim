@@ -241,6 +241,21 @@ tools like `nvm`, `fnm`, etc...
 {
   "carlos-algms/agentic.nvim",
 
+  -- Optional lazy.nvim command stubs. Include every Ex command you want to use
+  -- before the plugin has already loaded.
+  cmd = {
+    "AgenticChat",
+    "AgenticInline",
+    "AgenticInlineClear",
+    "AgenticProvider",
+    "AgenticConfig",
+    "AgenticMode",
+    "AgenticModel",
+    "AgenticReasoning",
+    "AgenticApproval",
+    "AgenticPermissions",
+  },
+
   opts = {
     -- Any ACP-compatible provider works. Built-in: "claude-agent-acp" | "gemini-acp" | "codex-acp" | "opencode-acp" | "cursor-acp" | "copilot-acp" | "auggie-acp" | "mistral-vibe-acp" | "cline-acp" | "goose-acp"
     provider = "claude-agent-acp", -- setting the name here is all you need to get started
@@ -545,6 +560,10 @@ header parts:
 Provider config commands apply to the current chat or inline session when one
 is active. If no Agentic session is active in the current context, the selected
 value becomes the provider default for the next session.
+
+If you lazy-load Agentic.nvim with lazy.nvim, list these Ex commands in the
+plugin spec's `cmd` field. Lazy.nvim only creates startup stubs for commands
+listed there; Agentic still registers the commands itself once loaded.
 
 `:'<,'>AgenticChat` and `:'<,'>AgenticChat new` use the selected line range to prefill the
 prompt input buffer. This is useful when you want to turn an existing note,
