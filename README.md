@@ -1032,7 +1032,7 @@ vim.api.nvim_set_hl(0, "AgenticChunkBoundary", { underline = true })
 | `AgenticCodeBlockFence`  | The left border decoration on tool calls | Links to `Directory`                |
 | `AgenticTitle`           | Window titles in sidebar                 | `bg=#2787b0, fg=#000000, bold=true` |
 | `AgenticChunkBoundary`   | Debug-only merged chunk edge marker      | Links to `DiagnosticHint` + underline |
-| `AgenticInlineFade`      | Fade layer applied to inline extmark UI  | Comment-derived fg + italic/blend   |
+| `AgenticInlineFade`      | Fade layer applied to inline extmark UI  | Folded/nontext-derived fg + italic/blend |
 
 If any of these highlight exists, Agentic will use it instead of creating new
 ones.

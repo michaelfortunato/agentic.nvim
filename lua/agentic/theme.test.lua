@@ -11,6 +11,9 @@ describe("agentic.Theme", function()
         "DiagnosticHint",
         "Comment",
         "Directory",
+        "Folded",
+        "NonText",
+        "LineNr",
         Theme.HL_GROUPS.DIFF_ADD_WORD,
         Theme.HL_GROUPS.DIFF_DELETE_WORD,
         Theme.HL_GROUPS.STATUS_PENDING,
@@ -120,7 +123,7 @@ describe("agentic.Theme", function()
     end)
 
     it(
-        "derives semantic transcript groups from comment and directory highlights",
+        "derives semantic transcript groups from comment and inline UI highlights",
         function()
             vim.api.nvim_set_hl(0, "Comment", { fg = 0x111111, italic = false })
             vim.api.nvim_set_hl(
@@ -133,6 +136,7 @@ describe("agentic.Theme", function()
                 "Directory",
                 { fg = 0x222222, italic = false }
             )
+            vim.api.nvim_set_hl(0, "Folded", { fg = 0x444444, italic = false })
 
             Theme.setup()
 
@@ -175,7 +179,7 @@ describe("agentic.Theme", function()
             assert.is_true(resource_link.underline)
             assert.equal(0x111111, fold_hint.fg)
             assert.is_true(fold_hint.italic)
-            assert.equal(0x111111, inline_fade.fg)
+            assert.equal(0x444444, inline_fade.fg)
             assert.is_true(inline_fade.italic)
             assert.equal(1, vim.fn.hlexists(Theme.HL_GROUPS.INLINE_FADE))
         end
