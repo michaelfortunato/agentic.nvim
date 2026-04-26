@@ -4,6 +4,7 @@ local spy = require("tests.helpers.spy")
 local Config = require("agentic.config")
 local Theme = require("agentic.theme")
 local InlineChat = require("agentic.ui.inline_chat")
+local PromptController = require("agentic.ui.inline_chat.prompt_controller")
 
 describe("agentic.ui.InlineChat", function()
     --- @type integer
@@ -604,6 +605,39 @@ describe("agentic.ui.InlineChat", function()
         inline:_close_prompt(true)
     end)
 
+    it("clears the prompt footer without dropping footer_pos", function()
+        local inline = InlineChat:new({
+            tab_page_id = vim.api.nvim_get_current_tabpage(),
+            on_submit = function()
+                return true
+            end,
+        })
+
+        inline:open({
+            lines = { "local value = 1" },
+            start_line = 1,
+            end_line = 1,
+            file_path = "/tmp/inline_chat_test.lua",
+            file_type = "lua",
+        })
+
+        --- @diagnostic disable-next-line: invisible
+        local prompt = inline._prompt
+        assert.is_not_nil(prompt)
+        --- @cast prompt agentic.ui.InlineChat.PromptState
+
+        local footer_config = PromptController._build_prompt_footer_config("c")
+        assert.equal("", footer_config.footer)
+        assert.equal("right", footer_config.footer_pos)
+
+        assert.has_no_errors(function()
+            vim.api.nvim_win_set_config(prompt.prompt_winid, footer_config)
+        end)
+
+        --- @diagnostic disable-next-line: invisible
+        inline:_close_prompt(true)
+    end)
+
     it(
         "ends a rejected inline conversation when its follow-up prompt closes",
         function()
@@ -1196,6 +1230,50 @@ describe("agentic.ui.InlineChat", function()
             assert.equal(0, #get_overlay_extmarks())
         end
     )
+
+    it("emits failed native progress when an inline request fails", function()
+        local inline = InlineChat:new({
+            tab_page_id = vim.api.nvim_get_current_tabpage(),
+            on_submit = function()
+                return true
+            end,
+        })
+
+        inline:begin_request({
+            prompt = "Change this",
+            selection = {
+                lines = { "local value = 1" },
+                start_line = 1,
+                end_line = 1,
+                file_path = "/tmp/inline_chat_test.lua",
+                file_type = "lua",
+            },
+            source_bufnr = bufnr,
+            source_winid = winid,
+        })
+
+        inline:complete(nil, { message = "boom" })
+
+        local saw_failed_progress = false
+        for _, call in ipairs(progress_spy.calls) do
+            local chunks = call[1]
+            local opts = call[3]
+            local message = chunks and chunks[1] and chunks[1][1] or nil
+
+            if
+                message == "Inline request failed"
+                and opts
+                and opts.kind == "progress"
+                and opts.source == "agentic.nvim.inline"
+                and opts.status == "failed"
+            then
+                saw_failed_progress = true
+                break
+            end
+        end
+
+        assert.is_true(saw_failed_progress)
+    end)
 
     it(
         "hides the ghost preview after an applied edit and keeps progress live",

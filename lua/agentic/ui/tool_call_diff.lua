@@ -29,11 +29,8 @@ local TextMatcher = require("agentic.utils.text_matcher")
 local FileSystem = require("agentic.utils.file_system")
 local Logger = require("agentic.utils.logger")
 
--- vim.diff was renamed to vim.text.diff (identical signature, just namespace move)
--- Fallback needed for backward compatibility with Neovim < 0.12
 --- @type fun(a: string, b: string, opts: table): integer[][]
---- @diagnostic disable-next-line: deprecated
-local diff_fn = vim.text and vim.text.diff or vim.diff
+local diff_fn = vim.text.diff
 
 --- @param lines string[]
 --- @return boolean is_empty
@@ -139,7 +136,7 @@ local function hunk_to_block(diff_block, hunk)
     return result
 end
 
---- Minimize diff blocks by removing unchanged lines using vim.diff
+--- Minimize diff blocks by removing unchanged lines using vim.text.diff
 --- @param diff_blocks agentic.ui.ToolCallDiff.DiffBlock[]
 --- @return agentic.ui.ToolCallDiff.DiffBlock[]
 function M.minimize_diff_blocks(diff_blocks)
@@ -167,7 +164,7 @@ function M.minimize_diff_blocks(diff_blocks)
                         table.insert(minimized, hunk_to_block(diff_block, hunk))
                     end
                 else
-                    -- Edge case: vim.diff returns empty patch but strings differ
+                    -- Edge case: vim.text.diff returns empty patch but strings differ
                     table.insert(minimized, diff_block)
                 end
             end

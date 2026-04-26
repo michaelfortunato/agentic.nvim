@@ -116,11 +116,20 @@ local function refresh_prompt_footer(prompt, mode)
         return
     end
 
-    local footer = M.build_prompt_footer(mode)
-    vim.api.nvim_win_set_config(prompt.prompt_winid, {
-        footer = footer ~= "" and footer or nil,
+    vim.api.nvim_win_set_config(
+        prompt.prompt_winid,
+        M._build_prompt_footer_config(mode)
+    )
+end
+
+--- @private
+--- @param mode string|nil
+--- @return vim.api.keyset.win_config config
+function M._build_prompt_footer_config(mode)
+    return {
+        footer = M.build_prompt_footer(mode),
         footer_pos = "right",
-    })
+    }
 end
 
 --- @param self agentic.ui.InlineChat
@@ -145,7 +154,7 @@ function M.open(self, selection, opts)
     local win_width = vim.api.nvim_win_get_width(source_winid)
     local width = math.min(prompt_width, math.max(24, win_width - 6))
     local height = get_prompt_min_height()
-    local footer = M.build_prompt_footer(vim.fn.mode())
+    local footer_config = M._build_prompt_footer_config(vim.fn.mode())
 
     vim.bo[prompt_bufnr].buftype = "nofile"
     vim.bo[prompt_bufnr].bufhidden = "wipe"
@@ -167,8 +176,8 @@ function M.open(self, selection, opts)
         border = "rounded",
         title = " Inline " .. Utils.format_range(normalized_selection) .. " ",
         title_pos = "left",
-        footer = footer ~= "" and footer or nil,
-        footer_pos = "right",
+        footer = footer_config.footer,
+        footer_pos = footer_config.footer_pos,
         zindex = 250,
     })
 

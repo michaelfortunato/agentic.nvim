@@ -297,8 +297,9 @@ end
 
 ### Agentic.nvim Plugin Requirements
 
-- Neovim v0.11.0+ (make sure settings, functions, and APIs, specially around
-  `vim.*` are for this version or newer)
+- Neovim v0.12.0+ (make sure settings, functions, and APIs, especially around
+  `vim.*` use 0.12+ behavior; do not keep compatibility fallbacks for older
+  Neovim versions)
 - LuaJIT 2.1 (bundled with Neovim, based on Lua 5.1)
   - Be ultra careful with lua features and neovim APIs based on version
 - Optional: https://github.com/hakonharnes/img-clip.nvim for Screenshot pasting

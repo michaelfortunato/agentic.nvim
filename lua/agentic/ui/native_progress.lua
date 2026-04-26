@@ -18,11 +18,6 @@ local M = {}
 --- @field hl_group? string
 --- @field data? table
 
---- @return boolean supported
-function M.is_supported()
-    return vim.fn.has("nvim-0.12") == 1
-end
-
 --- @param percent integer
 --- @return integer clamped_percent
 local function clamp_percent(percent)
@@ -34,15 +29,9 @@ end
 --- Nvim turns progress messages into Progress events; the TUI renders those
 --- Progress events as native terminal progress bars through OSC 9;4.
 --- @param opts agentic.ui.NativeProgress.Update
---- @return integer|string|nil id
---- @return boolean ok
+--- @return integer|string id
 function M.update(opts)
-    if not M.is_supported() then
-        return nil, false
-    end
-
-    local ok, progress_id = pcall(
-        vim.api.nvim_echo,
+    local progress_id = vim.api.nvim_echo(
         {
             {
                 opts.message,
@@ -61,20 +50,7 @@ function M.update(opts)
         }
     )
 
-    if not ok then
-        return nil, false
-    end
-
-    local numeric_progress_id = tonumber(progress_id)
-    if numeric_progress_id ~= nil then
-        return numeric_progress_id, true
-    end
-
-    if progress_id ~= nil then
-        return tostring(progress_id), true
-    end
-
-    return opts.id, true
+    return progress_id
 end
 
 return M

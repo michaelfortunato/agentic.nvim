@@ -15,14 +15,10 @@ describe("agentic.ui.NativeProgress", function()
     end)
 
     it("emits Nvim progress messages with a source", function()
-        if not NativeProgress.is_supported() then
-            return
-        end
-
         echo_stub = spy.stub(vim.api, "nvim_echo")
         echo_stub:returns(27)
 
-        local progress_id, ok = NativeProgress.update({
+        local progress_id = NativeProgress.update({
             title = "Agentic Test",
             source = "agentic.nvim.test",
             message = "Working",
@@ -30,7 +26,6 @@ describe("agentic.ui.NativeProgress", function()
             percent = 140,
         })
 
-        assert.is_true(ok)
         assert.equal(27, progress_id)
         assert.equal(1, echo_stub.call_count)
 

@@ -422,18 +422,20 @@ function M.update_progress(_self, request, is_terminal)
         message = tool_label
     end
 
-    local progress_id, ok = NativeProgress.update({
+    local progress_id = NativeProgress.update({
         id = request.progress_id,
         title = PROGRESS_TITLE,
         source = PROGRESS_SOURCE,
         message = message,
-        status = is_terminal and "success" or "running",
+        status = is_terminal and request.phase == "failed" and "failed"
+            or is_terminal and "success"
+            or "running",
         percent = PROGRESS_PERCENT[request.phase]
             or PROGRESS_PERCENT.generating,
         hl_group = Theme.HL_GROUPS.ACTIVITY_TEXT,
     })
 
-    if ok and request.progress_id == nil and progress_id ~= nil then
+    if request.progress_id == nil then
         request.progress_id = progress_id
     end
 end

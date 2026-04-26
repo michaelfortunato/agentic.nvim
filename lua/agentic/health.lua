@@ -5,6 +5,17 @@
 local M = {}
 local vim_health = vim.health
 
+--- @param version vim.Version
+--- @return string version_text
+local function format_version(version)
+    local version_text =
+        string.format("%d.%d.%d", version.major, version.minor, version.patch)
+    if version.prerelease and version.prerelease ~= "" then
+        version_text = version_text .. "-" .. version.prerelease
+    end
+    return version_text
+end
+
 function M.check()
     local ACPHealth = require("agentic.acp.acp_health")
     local Config = require("agentic.config")
@@ -12,32 +23,14 @@ function M.check()
     vim_health.start("agentic.nvim")
     -- Check Neovim version
     local nvim_version = vim.version()
-    local required_version = { 0, 11, 0 }
-    if
-        nvim_version.major > required_version[1]
-        or (
-            nvim_version.major == required_version[1]
-            and nvim_version.minor >= required_version[2]
-        )
-    then
-        vim_health.ok(
-            string.format(
-                "Neovim version %d.%d.%d",
-                nvim_version.major,
-                nvim_version.minor,
-                nvim_version.patch
-            )
-        )
+    local required_version = { 0, 12, 0 }
+    if vim.version.ge(nvim_version, required_version) then
+        vim_health.ok("Neovim version " .. format_version(nvim_version))
     else
         vim_health.error(
             string.format(
-                "Neovim >= %d.%d.%d required (current: %d.%d.%d)",
-                required_version[1],
-                required_version[2],
-                required_version[3],
-                nvim_version.major,
-                nvim_version.minor,
-                nvim_version.patch
+                "Neovim >= 0.12.0 required (current: %s)",
+                format_version(nvim_version)
             )
         )
     end
