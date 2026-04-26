@@ -1,0 +1,205 @@
+lua/agentic/acp/agent_config_options.lua
+  418800ae43d7ef3d 319-325,329-336
+  8477d56956ceacb0 151-186,301-315
+  ae05b85ac4446111 231-233,235-237
+  905c5feb7aa5ebf0 187-213,239,248
+lua/agentic/session_manager.lua
+  905c5feb7aa5ebf0 120
+lua/agentic/ui/file_picker.lua
+  f3275a717834bd74 60-95,238,240,291,293-295,299-300,307-308,378,397,489,491-493,567-570,604,686,1029,1094-1095,1111-1112
+lua/agentic/ui/native_progress.test.lua
+  d9bd56f5922a7d6f 1-51
+lua/agentic/ui/inline_chat/runtime_store.lua
+  d9bd56f5922a7d6f 336-337
+lua/agentic/acp/codex_local_commands.lua
+  d9bd56f5922a7d6f 2,149
+lua/agentic/ui/inline_chat/overlay_renderer.lua
+  d9bd56f5922a7d6f 5,20-29,101-102,131-175,283,285,294-295,301,394,398-406,414,418-422,425-437,445-451,476,523,529,537,554-560,573-574
+lua/agentic/session_registry.test.lua
+  905c5feb7aa5ebf0 362-376
+lua/agentic/acp/agent_config_options.test.lua
+  418800ae43d7ef3d 6,10,128-129,141,146-158,286-338
+lua/agentic/ui/chat_widget.test.lua
+  d9bd56f5922a7d6f 150-189
+lua/agentic/init.lua
+  418800ae43d7ef3d 3,231-241,243,245-248,250,257-370,372,379-457,514,521,528,535,542,549
+  905c5feb7aa5ebf0 242,244,249,251-256,371,373-378,458-459,464-470,502-513,515-520,522-527,529-534,536-541,543-548,775-802
+  f3275a717834bd74 744-745,747-751,761-762,764,770
+lua/agentic/config_default.lua
+  418800ae43d7ef3d 262
+  905c5feb7aa5ebf0 361-363
+  f3275a717834bd74 144-152,202,223,444-447
+lua/agentic/session_registry.lua
+  ae05b85ac4446111 134-137
+  905c5feb7aa5ebf0 13,132-133,138-139
+lua/agentic/ui/inline_chat/facade.lua
+  905c5feb7aa5ebf0 90,101,126
+  1ec4396251ed5e0c 42
+  f32d29a0f35517e9 85-86
+lua/agentic/ui/file_picker.test.lua
+  ae05b85ac4446111 407,423,438,584-619
+lua/agentic/session/submission_controller.lua
+  f3275a717834bd74 6,429-435,451-452
+lua/agentic/ui/skill_picker.lua
+  d9bd56f5922a7d6f 525
+lua/agentic/acp/slash_commands.lua
+  ae05b85ac4446111 20-24,195,215
+  f3275a717834bd74 2,4,6,15-19,25-49,68,76,109-115,121-194,196-214,216-256,259,273-274,278,282-302
+lua/agentic/acp/acp_client_types.lua
+  d9bd56f5922a7d6f 523-524
+lua/agentic/init.test.lua
+  f32d29a0f35517e9 51-57,60,83,86,426-427,432,434-435,477,481,488
+  418800ae43d7ef3d 8-10,28-35,97-99,115-124,164-168,171-175,188-257,494-556,559-617
+  905c5feb7aa5ebf0 436-438,449,453,457,461,465,467-469,475-476,478-480,482-487,557-558
+  f3275a717834bd74 27,161-163,416-425,428-431,433
+  ae05b85ac4446111 26,169-170,439-448,450-452,454-456,458-460,462-464,466,470-474,489-493
+lua/agentic/session/prompt_builder.test.lua
+  d9bd56f5922a7d6f 59-63
+lua/agentic/ui/inline_chat/prompt_controller.lua
+  905c5feb7aa5ebf0 109-125,148,156,203,304-328,399,401,403-410,416-418
+lua/agentic/acp/slash_commands_blink_source.lua
+  f3275a717834bd74 1-108
+lua/agentic/ui/status_animation.test.lua
+  d9bd56f5922a7d6f 82,160,211
+lua/agentic/session/session_lifecycle.lua
+  8477d56956ceacb0 154,170,187-188,207,459,467-471,474-481,502,518
+  418800ae43d7ef3d 155,161,171,183,190-195,200,208,460,465,473,482-491
+lua/agentic/session/prompt_builder.lua
+  d9bd56f5922a7d6f 23-25
+lua/agentic/ui/status_animation.lua
+  d9bd56f5922a7d6f 1,14,19,68,88,152-160,171-179,185-186
+README.md
+  d9bd56f5922a7d6f 122,124,138,354-355,380-405,467,521-525,537-547,650-652,741-743,806-818,822,827,1126-1127,1129-1132
+lua/agentic/session/session_lifecycle.test.lua
+  8477d56956ceacb0 235,246-249,275,294,298-342
+  f32d29a0f35517e9 295-297
+  418800ae43d7ef3d 53-72,343-449
+lua/agentic/acp/slash_commands.test.lua
+  f3275a717834bd74 4,8-9,13-59,62-66,76-77,227-254,264,276-280,283,292,303,309,324-328,340,357,374,399,404-448
+lua/agentic/ui/file_picker_blink_source.lua
+  d9bd56f5922a7d6f 25,64
+lua/agentic/ui/floating_message.lua
+  f32d29a0f35517e9 13-14,54-74,76,79,82-83,85,87-98
+lua/agentic/ui/inline_chat.test.lua
+  f32d29a0f35517e9 75
+  ae05b85ac4446111 442-468
+  1ec4396251ed5e0c 15,67-74,76-82,114-115,121-125,202-249,797-798,800,846-847,849,1091-1092,1094,1155-1156,1158,1253,1429-1430,1432
+  905c5feb7aa5ebf0 500-606
+lua/agentic/ui/chat_widget/input_controller.lua
+  f3275a717834bd74 142-173,179-182
+lua/agentic/ui/keymap_help.lua
+  d9bd56f5922a7d6f 142-145,152-165
+lua/agentic/ui/native_progress.lua
+  d9bd56f5922a7d6f 1-80
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.3.4",
+  "base_commit_sha": "6ec3e2243c33f0c0f834c3014e982f722b1add6d",
+  "prompts": {
+    "1ec4396251ed5e0c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019dc054-39d2-7e83-9702-22afb1051871",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Michael Fortunato",
+      "messages": [],
+      "total_additions": 195,
+      "total_deletions": 236,
+      "accepted_lines": 191,
+      "overriden_lines": 0
+    },
+    "418800ae43d7ef3d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019dc0f1-149a-7e53-8657-7c8fac1b951d",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Michael Fortunato",
+      "messages": [],
+      "total_additions": 730,
+      "total_deletions": 66,
+      "accepted_lines": 694,
+      "overriden_lines": 0
+    },
+    "8477d56956ceacb0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019dc0f2-1f7a-7ab2-97e1-7e8a3c7eea22",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Michael Fortunato",
+      "messages": [],
+      "total_additions": 176,
+      "total_deletions": 141,
+      "accepted_lines": 130,
+      "overriden_lines": 0
+    },
+    "905c5feb7aa5ebf0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019dba8f-9c1a-7191-8010-60fe900ba5dc",
+        "model": "gpt-5.4"
+      },
+      "human_author": "Michael Fortunato",
+      "messages": [],
+      "total_additions": 393,
+      "total_deletions": 72,
+      "accepted_lines": 346,
+      "overriden_lines": 0
+    },
+    "ae05b85ac4446111": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019dc045-ce9c-7a03-bbdf-cb2079fa6805",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Michael Fortunato",
+      "messages": [],
+      "total_additions": 143,
+      "total_deletions": 60,
+      "accepted_lines": 119,
+      "overriden_lines": 0
+    },
+    "d9bd56f5922a7d6f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019dca97-eeeb-7d03-bdb2-523760e2e3de",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Michael Fortunato",
+      "messages": [],
+      "total_additions": 423,
+      "total_deletions": 334,
+      "accepted_lines": 423,
+      "overriden_lines": 0
+    },
+    "f3275a717834bd74": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019dc045-0ad4-71f1-ac42-447dbcc0494e",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Michael Fortunato",
+      "messages": [],
+      "total_additions": 624,
+      "total_deletions": 148,
+      "accepted_lines": 619,
+      "overriden_lines": 0
+    },
+    "f32d29a0f35517e9": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019dc040-41f0-7b43-bb56-2c633714e1fe",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Michael Fortunato",
+      "messages": [],
+      "total_additions": 862,
+      "total_deletions": 382,
+      "accepted_lines": 70,
+      "overriden_lines": 0
+    }
+  }
+}
