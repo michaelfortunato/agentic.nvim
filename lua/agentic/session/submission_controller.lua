@@ -241,7 +241,7 @@ end
 
 --- @param session agentic.SessionManager
 --- @param input_text string
---- @param opts {code_selection?: agentic.ui.CodeSelection|nil, file_list?: agentic.ui.FileList|nil, diagnostics_list?: agentic.ui.DiagnosticsList|nil, chat_winid?: integer|nil, selections?: agentic.Selection[]|nil, inline_instructions?: string|nil, surface?: "chat"|"inline"|nil, include_system_info?: boolean|nil, use_session_context?: boolean|nil}
+--- @param opts {code_selection?: agentic.ui.CodeSelection|nil, file_list?: agentic.ui.FileList|nil, diagnostics_list?: agentic.ui.DiagnosticsList|nil, chat_winid?: integer|nil, selections?: agentic.Selection[]|nil, inline_instructions?: string|nil, include_full_files?: boolean|nil, embed_full_files?: boolean|nil, surface?: "chat"|"inline"|nil, include_system_info?: boolean|nil, use_session_context?: boolean|nil}
 --- @return agentic.SessionManager.QueuedSubmission
 function SubmissionController.prepare_submission(session, input_text, opts)
     opts = opts or {}
@@ -279,6 +279,8 @@ function SubmissionController.prepare_submission(session, input_text, opts)
         chat_winid = opts.chat_winid,
         selections = opts.selections,
         inline_instructions = opts.inline_instructions,
+        include_full_files = opts.include_full_files,
+        embed_full_files = opts.embed_full_files,
         surface = opts.surface,
     })
 
@@ -709,6 +711,7 @@ function SubmissionController.submit_inline_request(session, request)
         call_session_method(session, "_prepare_submission", request.prompt, {
             selections = { request.selection },
             inline_instructions = PromptBuilder.build_inline_instructions(),
+            include_full_files = true,
             surface = "inline",
             include_system_info = true,
             use_session_context = false,

@@ -309,7 +309,7 @@ function SessionManager:_render_window_headers()
 end
 
 --- @param input_text string
---- @param opts {code_selection?: agentic.ui.CodeSelection|nil, file_list?: agentic.ui.FileList|nil, diagnostics_list?: agentic.ui.DiagnosticsList|nil, chat_winid?: integer|nil, selections?: agentic.Selection[]|nil, inline_instructions?: string|nil, surface?: "chat"|"inline"|nil, include_system_info?: boolean|nil, use_session_context?: boolean|nil}
+--- @param opts {code_selection?: agentic.ui.CodeSelection|nil, file_list?: agentic.ui.FileList|nil, diagnostics_list?: agentic.ui.DiagnosticsList|nil, chat_winid?: integer|nil, selections?: agentic.Selection[]|nil, inline_instructions?: string|nil, include_full_files?: boolean|nil, embed_full_files?: boolean|nil, surface?: "chat"|"inline"|nil, include_system_info?: boolean|nil, use_session_context?: boolean|nil}
 --- @return agentic.SessionManager.QueuedSubmission
 function SessionManager:_prepare_submission(input_text, opts)
     return SubmissionController.prepare_submission(self, input_text, opts)

@@ -167,6 +167,29 @@ describe("agentic.ui.CodeSelection", function()
         end)
     end)
 
+    describe("get_selected_text", function()
+        it("omits column bounds for linewise visual selections", function()
+            vim.api.nvim_win_set_buf(0, bufnr)
+            vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, {
+                "local value = 1",
+                "return value",
+                "print(value)",
+            })
+
+            vim.cmd("normal! 1GV2G")
+
+            local selection = CodeSelection.get_selected_text()
+
+            assert.is_not_nil(selection)
+            --- @cast selection agentic.Selection
+            assert.equal(1, selection.start_line)
+            assert.equal(2, selection.end_line)
+            assert.same({ "local value = 1", "return value" }, selection.lines)
+            assert.is_nil(selection.start_col)
+            assert.is_nil(selection.end_col)
+        end)
+    end)
+
     --- Helper to create two distinct test selections
     --- @return agentic.Selection, agentic.Selection
     local function create_two_selections()

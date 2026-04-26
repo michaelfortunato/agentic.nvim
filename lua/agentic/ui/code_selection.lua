@@ -222,8 +222,14 @@ function CodeSelection.get_selected_text()
         local end_pos = vim.fn.getpos(".")
         local start_line = start_pos[2]
         local end_line = end_pos[2]
+        --- @type integer|nil
         local start_col = start_pos[3]
+        --- @type integer|nil
         local end_col = end_pos[3]
+        if mode == "V" then
+            start_col = nil
+            end_col = nil
+        end
 
         -- exit visual mode to avoid issues with the input buffer
         BufHelpers.feed_ESC_key()

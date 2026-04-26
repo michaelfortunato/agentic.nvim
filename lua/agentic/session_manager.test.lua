@@ -1704,6 +1704,13 @@ describe("agentic.SessionManager", function()
         it("builds inline submissions with explicit selections", function()
             local begin_request_spy = spy.new(function() end)
             local dispatch_spy = spy.new(function() end)
+            local source_bufnr = vim.api.nvim_create_buf(false, true)
+            local file_path = vim.fn.tempname() .. ".lua"
+            vim.api.nvim_buf_set_name(source_bufnr, file_path)
+            vim.api.nvim_buf_set_lines(source_bufnr, 0, -1, false, {
+                "local value = 1",
+                "return value",
+            })
 
             local session = {
                 session_id = "sess-inline-1",
@@ -1728,14 +1735,14 @@ describe("agentic.SessionManager", function()
                 prompt = "Refactor the selection",
                 selection = {
                     lines = { "local value = 1", "return value" },
-                    start_line = 4,
-                    end_line = 5,
+                    start_line = 1,
+                    end_line = 2,
                     start_col = 7,
                     end_col = 12,
-                    file_path = "/tmp/example.lua",
+                    file_path = file_path,
                     file_type = "lua",
                 },
-                source_bufnr = 10,
+                source_bufnr = source_bufnr,
                 source_winid = 11,
             })
 
@@ -1761,6 +1768,24 @@ describe("agentic.SessionManager", function()
             assert.truthy(combined_prompt:match("<selected_code>"))
             assert.truthy(combined_prompt:match("<col_start>7</col_start>"))
             assert.truthy(combined_prompt:match("<col_end>12</col_end>"))
+            assert.truthy(combined_prompt:match("ACP file resources"))
+            assert.is_nil(combined_prompt:match("<file_context>"))
+
+            --- @type agentic.acp.ResourceLinkContent|nil
+            local resource_link = nil
+            for _, item in ipairs(submission.prompt) do
+                if item.type == "resource_link" then
+                    resource_link = item
+                    break
+                end
+            end
+            assert.is_not_nil(resource_link)
+            if resource_link == nil then
+                error("expected inline prompt resource link")
+            end
+            assert.equal("file://" .. file_path, resource_link.uri)
+
+            vim.api.nvim_buf_delete(source_bufnr, { force = true })
         end)
 
         it("dispatches new inline conversations while chat is busy", function()
