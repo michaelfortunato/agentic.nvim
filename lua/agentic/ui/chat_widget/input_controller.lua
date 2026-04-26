@@ -139,11 +139,47 @@ function InputController:get_input_text()
     return table.concat(lines, "\n")
 end
 
+--- @return boolean accepted
+local function accept_visible_completion()
+    local completion_config = Config.completion or {}
+    local accept_command = completion_config.accept
+    if accept_command == false then
+        return false
+    end
+
+    local ok, cmp = pcall(require, "blink.cmp")
+    if
+        not ok
+        or type(cmp) ~= "table"
+        or type(cmp.is_visible) ~= "function"
+        or not cmp.is_visible()
+    then
+        return false
+    end
+
+    if type(accept_command) == "function" then
+        return accept_command(cmp) == true
+    end
+
+    if
+        type(accept_command) ~= "string"
+        or type(cmp[accept_command]) ~= "function"
+    then
+        accept_command = "select_and_accept"
+    end
+
+    return cmp[accept_command]() == true
+end
+
 function InputController:bind_keymaps()
     BufHelpers.multi_keymap_set(
         Config.keymaps.prompt.submit,
         self.widget.buf_nrs.input,
         function()
+            if accept_visible_completion() then
+                return
+            end
+
             self:submit_input()
         end,
         { desc = "Agentic: Submit prompt" }

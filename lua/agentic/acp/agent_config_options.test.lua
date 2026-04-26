@@ -3,9 +3,11 @@ local spy = require("tests.helpers.spy")
 
 describe("agentic.acp.AgentConfigOptions", function()
     local AgentConfigOptions
+    local Config
     local config_options
     local multi_keymap_stub
     local test_bufnr
+    local original_widget_keymaps
 
     local mode_option = {
         id = "mode-1",
@@ -123,6 +125,8 @@ describe("agentic.acp.AgentConfigOptions", function()
 
     before_each(function()
         local BufHelpers = require("agentic.utils.buf_helpers")
+        Config = require("agentic.config")
+        original_widget_keymaps = vim.deepcopy(Config.keymaps.widget)
         multi_keymap_stub = spy.stub(BufHelpers, "multi_keymap_set")
 
         AgentConfigOptions = require("agentic.acp.agent_config_options")
@@ -134,13 +138,24 @@ describe("agentic.acp.AgentConfigOptions", function()
     end)
 
     after_each(function()
+        Config.keymaps.widget = original_widget_keymaps
         multi_keymap_stub:revert()
         vim.api.nvim_buf_delete(test_bufnr, { force = true })
     end)
 
-    it("registers config keymaps on construction", function()
-        assert.stub(multi_keymap_stub).was.called(4)
-        assert.equal("<localLeader>p", multi_keymap_stub.calls[4][1])
+    it("does not register service keymaps by default", function()
+        assert.stub(multi_keymap_stub).was.called(0)
+    end)
+
+    it("registers explicitly configured service keymaps", function()
+        Config.keymaps.widget.switch_model = "<localLeader>m"
+        Config.keymaps.widget.switch_approval_preset = "<localLeader>p"
+
+        AgentConfigOptions:new({ chat = test_bufnr }, function() end)
+
+        assert.stub(multi_keymap_stub).was.called(2)
+        assert.equal("<localLeader>m", multi_keymap_stub.calls[1][1])
+        assert.equal("<localLeader>p", multi_keymap_stub.calls[2][1])
     end)
 
     it("assigns known config categories from provider options", function()
@@ -266,6 +281,61 @@ describe("agentic.acp.AgentConfigOptions", function()
         fresh:set_initial_mode("plan")
 
         assert.spy(generic_change).was.called_with("mode-1", "plan")
+    end)
+
+    it("warns when configured default_model is not available", function()
+        local Logger = require("agentic.utils.logger")
+        local notify_stub = spy.stub(Logger, "notify")
+        local generic_change = spy.new(function() end)
+        local fresh =
+            AgentConfigOptions:new({ chat = test_bufnr }, generic_change)
+
+        fresh:set_options({ model_option })
+        fresh:set_initial_model("missing-model")
+
+        assert.spy(generic_change).was.called(0)
+        assert.stub(notify_stub).was.called(1)
+
+        notify_stub:revert()
+    end)
+
+    it("switches to a configured default model when available", function()
+        local generic_change = spy.new(function() end)
+        local fresh =
+            AgentConfigOptions:new({ chat = test_bufnr }, generic_change)
+
+        fresh:set_options({ model_option })
+        fresh:set_initial_model("gpt-5.5")
+
+        assert.spy(generic_change).was.called_with("model-1", "gpt-5.5")
+    end)
+
+    it(
+        "switches to configured default config options when available",
+        function()
+            local generic_change = spy.new(function() end)
+            local fresh =
+                AgentConfigOptions:new({ chat = test_bufnr }, generic_change)
+
+            fresh:set_options({ thought_option })
+            fresh:set_initial_config_options({ ["thought-1"] = "xhigh" })
+
+            assert.spy(generic_change).was.called_with("thought-1", "xhigh")
+        end
+    )
+
+    it("does not override restored config option defaults", function()
+        local generic_change = spy.new(function() end)
+        local fresh =
+            AgentConfigOptions:new({ chat = test_bufnr }, generic_change)
+
+        fresh:set_options({ thought_option })
+        fresh:set_initial_config_options(
+            { ["thought-1"] = "xhigh" },
+            { ["thought-1"] = true }
+        )
+
+        assert.spy(generic_change).was.called(0)
     end)
 
     describe("selectors", function()

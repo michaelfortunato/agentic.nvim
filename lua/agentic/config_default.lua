@@ -141,6 +141,15 @@
 --- @field enabled boolean
 --- @field hidden boolean Include dotfiles and files inside hidden directories
 
+--- @alias agentic.UserConfig.CompletionAcceptCommand
+--- | "accept"
+--- | "select_and_accept"
+
+--- @class agentic.UserConfig.Completion
+--- @field slash_trigger string Single-character trigger for slash command completions
+--- @field file_trigger string Single-character trigger for file mention completions
+--- @field accept string|fun(cmp: table): boolean|nil|boolean Blink accept command used by prompt submit keys while the menu is visible. Set false to disable.
+
 --- @class agentic.UserConfig.ImagePaste
 --- @field enabled boolean Enable image drag-and-drop to add images to referenced files
 
@@ -170,7 +179,6 @@
 --- @field max_thought_lines integer
 --- @field overlay_width integer
 --- @field result_ttl_ms integer
---- @field progress boolean
 
 --- Control various behaviors and features of the plugin
 --- @class agentic.UserConfig.Settings
@@ -191,6 +199,7 @@
 --- @field diagnostic_icons? agentic.UserConfig.DiagnosticIcons
 --- @field permission_icons? agentic.UserConfig.PermissionIcons
 --- @field file_picker? agentic.UserConfig.FilePicker
+--- @field completion? agentic.UserConfig.Completion
 --- @field image_paste? agentic.UserConfig.ImagePaste
 --- @field auto_scroll? agentic.UserConfig.AutoScroll
 --- @field diff_preview? agentic.UserConfig.DiffPreview
@@ -211,6 +220,7 @@
 --- @field diagnostic_icons agentic.UserConfig.DiagnosticIcons
 --- @field permission_icons agentic.UserConfig.PermissionIcons
 --- @field file_picker agentic.UserConfig.FilePicker
+--- @field completion agentic.UserConfig.Completion
 --- @field image_paste agentic.UserConfig.ImagePaste
 --- @field auto_scroll agentic.UserConfig.AutoScroll
 --- @field diff_preview agentic.UserConfig.DiffPreview
@@ -249,6 +259,7 @@ local ConfigDefault = {
             -- https://github.com/zed-industries/codex-acp/releases
             -- xattr -dr com.apple.quarantine ~/.local/bin/codex-acp
             command = "codex-acp",
+            default_model = "gpt-5.5",
             args = {
                 -- "-c",
                 -- "features.web_search_request=true", -- disabled as it doesn't send proper tool call messages
@@ -347,9 +358,9 @@ local ConfigDefault = {
             close = "q",
             change_mode = {},
             switch_provider = "<localLeader>s",
-            switch_model = "<localLeader>m",
-            switch_thought_level = "<localLeader>e",
-            switch_approval_preset = "<localLeader>p",
+            switch_model = {},
+            switch_thought_level = {},
+            switch_approval_preset = {},
             manage_queue = "<localLeader>q",
         },
 
@@ -430,6 +441,12 @@ local ConfigDefault = {
         hidden = false,
     },
 
+    completion = {
+        slash_trigger = "/",
+        file_trigger = "@",
+        accept = "select_and_accept",
+    },
+
     image_paste = {
         enabled = true,
     },
@@ -456,7 +473,6 @@ local ConfigDefault = {
         max_thought_lines = 6,
         overlay_width = 80,
         result_ttl_ms = 2500,
-        progress = true,
     },
 
     hooks = {

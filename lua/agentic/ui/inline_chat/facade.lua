@@ -39,7 +39,7 @@ local Utils = require("agentic.ui.inline_chat.utils")
 --- @field tool_detail? string
 --- @field tool_failed boolean
 --- @field overlay_hidden boolean
---- @field progress_id? integer
+--- @field progress_id? integer|string
 
 --- @class agentic.ui.InlineChat.RequestInput
 --- @field conversation_id? string|nil
@@ -82,9 +82,12 @@ local Utils = require("agentic.ui.inline_chat.utils")
 --- @field range_extmark_id integer
 --- @field overlay_extmark_id? integer
 --- @field close_timer? uv.uv_timer_t
+--- @field sparkle_timer? uv.uv_timer_t
+--- @field sparkle_frame? integer
 
 --- @class agentic.ui.InlineChat.NewOpts
 --- @field tab_page_id integer
+--- @field instance_id? integer
 --- @field on_submit fun(request: {conversation_id?: string|nil, prompt: string, selection: agentic.Selection, source_bufnr: integer, source_winid: integer}): boolean
 --- @field on_conversation_exit? fun(conversation_id: string): nil
 --- @field on_change_mode? fun(): nil
@@ -95,6 +98,7 @@ local Utils = require("agentic.ui.inline_chat.utils")
 
 --- @class agentic.ui.InlineChat
 --- @field tab_page_id integer
+--- @field instance_id? integer
 --- @field _on_submit fun(request: {conversation_id?: string|nil, prompt: string, selection: agentic.Selection, source_bufnr: integer, source_winid: integer}): boolean
 --- @field _on_conversation_exit fun(conversation_id: string): nil
 --- @field _on_change_mode fun(): nil
@@ -119,6 +123,7 @@ InlineChat.THREAD_STORE_KEY = "_agentic_inline_threads"
 function InlineChat:new(opts)
     local instance = setmetatable({
         tab_page_id = opts.tab_page_id,
+        instance_id = opts.instance_id,
         _on_submit = opts.on_submit,
         _on_conversation_exit = opts.on_conversation_exit or function() end,
         _on_change_mode = opts.on_change_mode or function() end,

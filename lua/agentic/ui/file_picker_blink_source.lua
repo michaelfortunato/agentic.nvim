@@ -22,7 +22,7 @@ end
 --- @param mention_start_col integer
 --- @return table completion_item
 local function to_completion_item(item, index, context, mention_start_col)
-    local path = item.word:sub(2)
+    local path = FilePicker.strip_trigger(item.word)
 
     --- @type table
     local completion_item = {
@@ -61,7 +61,7 @@ function Source:enabled()
 end
 
 function Source:get_trigger_characters()
-    return { "@" }
+    return { FilePicker.get_trigger() }
 end
 
 --- @param context agentic.ui.FilePickerBlinkSource.Context

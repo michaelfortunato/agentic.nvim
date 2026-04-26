@@ -1,5 +1,6 @@
 local Config = require("agentic.config")
 local AgentInstance = require("agentic.acp.agent_instance")
+local AgentConfigOptions = require("agentic.acp.agent_config_options")
 local Theme = require("agentic.theme")
 local SessionRegistry = require("agentic.session_registry")
 local SessionRestore = require("agentic.session_restore")
@@ -227,10 +228,246 @@ local function complete_chat_subcommand(arg_lead)
     return matches
 end
 
+--- @param value any
+--- @return boolean callable
+local function is_callable(value)
+    return type(value) == "function"
+        or (
+            type(value) == "table"
+            and getmetatable(value)
+            and type(getmetatable(value).__call) == "function"
+        )
+end
+
+--- @param method_name string
+--- @param session agentic.SessionManager
+--- @return boolean shown
+local function show_live_session_config_service(method_name, session)
+    local config_options = session.config_options
+    local method = config_options and config_options[method_name] or nil
+    if type(method) ~= "function" then
+        Logger.notify(
+            "The current Agentic session has no configurable services.",
+            vim.log.levels.WARN,
+            { title = "Agentic" }
+        )
+        return false
+    end
+
+    return method(config_options) == true
+end
+
+--- @param session agentic.SessionManager
+--- @return boolean active
+local function has_live_agent_session(session)
+    if session.session_id then
+        return true
+    end
+
+    for _, inline_session in pairs(rawget(session, "_inline_sessions") or {}) do
+        local inline_session_id = inline_session and inline_session.session_id
+        if inline_session_id and inline_session_id ~= "" then
+            return true
+        end
+    end
+
+    return false
+end
+
+--- @param provider_config agentic.acp.ACPProviderConfig
+--- @param option agentic.acp.ConfigOption
+--- @return string|nil
+local function get_provider_default_value(provider_config, option)
+    local default_config_options = provider_config.default_config_options
+    if
+        type(default_config_options) == "table"
+        and type(default_config_options[option.id]) == "string"
+    then
+        return default_config_options[option.id]
+    end
+
+    if option.category == "model" then
+        return provider_config.default_model
+    end
+
+    if option.category == "mode" then
+        return provider_config.default_mode
+    end
+
+    return nil
+end
+
+--- @param provider_config agentic.acp.ACPProviderConfig
+--- @param option agentic.acp.ConfigOption
+--- @param value string
+local function set_provider_default_value(provider_config, option, value)
+    if option.category == "model" then
+        provider_config.default_model = value
+        return
+    end
+
+    if option.category == "mode" then
+        provider_config.default_mode = value
+        return
+    end
+
+    provider_config.default_config_options = provider_config.default_config_options
+        or {}
+    provider_config.default_config_options[option.id] = value
+end
+
+--- @param provider_config agentic.acp.ACPProviderConfig
+--- @param config_options agentic.acp.ConfigOption[]|nil
+--- @return agentic.acp.ConfigOption[]
+local function apply_provider_defaults(provider_config, config_options)
+    local options = vim.deepcopy(config_options or {})
+
+    for _, option in ipairs(options) do
+        local default_value =
+            get_provider_default_value(provider_config, option)
+        if default_value and default_value ~= "" then
+            option.currentValue = default_value
+        end
+    end
+
+    return options
+end
+
+--- @param provider_config agentic.acp.ACPProviderConfig
+--- @param config_options agentic.acp.AgentConfigOptions
+--- @param config_id string
+--- @param value string
+local function handle_provider_default_change(
+    provider_config,
+    config_options,
+    config_id,
+    value
+)
+    local option = config_options:get_config_option(config_id)
+    if not option then
+        return
+    end
+
+    set_provider_default_value(provider_config, option, value)
+
+    local option_name = config_options:get_config_option_name(config_id)
+        or config_id
+    local value_name = config_options:get_config_value_name(config_id, value)
+        or value
+
+    Logger.notify(
+        string.format("Default %s changed to: %s", option_name, value_name),
+        vim.log.levels.INFO,
+        { title = "Agentic" }
+    )
+end
+
+--- @param method_name string
+--- @return boolean shown
+local function show_provider_default_config_service(method_name)
+    local provider_name = Config.provider
+    local provider_config = Config.acp_providers[provider_name]
+    if not provider_config then
+        Logger.notify(
+            "No ACP provider configuration found for: " .. provider_name,
+            vim.log.levels.WARN,
+            { title = "Agentic" }
+        )
+        return false
+    end
+
+    local client = AgentInstance.get_instance(provider_name, function(agent)
+        agent:create_session({
+            on_error = function() end,
+            on_session_update = function() end,
+            on_request_permission = function(_, callback)
+                callback(nil)
+            end,
+            on_tool_call = function() end,
+            on_tool_call_update = function() end,
+        }, function(response, err)
+            if err or not response then
+                Logger.notify(
+                    "Failed to read provider config options: "
+                        .. (err and err.message or "missing response"),
+                    vim.log.levels.ERROR,
+                    { title = "Agentic" }
+                )
+                return
+            end
+
+            if response.sessionId then
+                agent:cancel_session(response.sessionId)
+            end
+
+            local default_config_options
+            default_config_options = AgentConfigOptions:new(
+                {},
+                function(config_id, value)
+                    handle_provider_default_change(
+                        provider_config,
+                        default_config_options,
+                        config_id,
+                        value
+                    )
+                end
+            )
+            default_config_options:set_options(
+                apply_provider_defaults(provider_config, response.configOptions),
+                provider_config
+            )
+
+            local method = default_config_options[method_name]
+            if type(method) ~= "function" then
+                Logger.notify(
+                    "The current provider has no configurable services.",
+                    vim.log.levels.WARN,
+                    { title = "Agentic" }
+                )
+                return
+            end
+
+            method(default_config_options)
+        end)
+    end)
+
+    return client ~= nil
+end
+
+--- @param method_name string
+--- @return boolean shown
+local function show_session_config_service(method_name)
+    local session = SessionRegistry.get_current_session()
+    if not session then
+        return show_provider_default_config_service(method_name)
+    end
+
+    if has_live_agent_session(session) then
+        return show_live_session_config_service(method_name, session)
+    end
+
+    local with_active_session = rawget(session, "_with_active_session")
+    if is_callable(with_active_session) then
+        with_active_session(session, function()
+            show_live_session_config_service(method_name, session)
+        end)
+        return true
+    end
+
+    return show_live_session_config_service(method_name, session)
+end
+
 local function register_user_commands()
     pcall(vim.api.nvim_del_user_command, "AgenticChat")
     pcall(vim.api.nvim_del_user_command, "AgenticInline")
     pcall(vim.api.nvim_del_user_command, "AgenticInlineClear")
+    pcall(vim.api.nvim_del_user_command, "AgenticProvider")
+    pcall(vim.api.nvim_del_user_command, "AgenticConfig")
+    pcall(vim.api.nvim_del_user_command, "AgenticMode")
+    pcall(vim.api.nvim_del_user_command, "AgenticModel")
+    pcall(vim.api.nvim_del_user_command, "AgenticReasoning")
+    pcall(vim.api.nvim_del_user_command, "AgenticApproval")
+    pcall(vim.api.nvim_del_user_command, "AgenticPermissions")
 
     vim.api.nvim_create_user_command("AgenticChat", function(command_opts)
         handle_chat_command(
@@ -261,6 +498,55 @@ local function register_user_commands()
     end, {
         nargs = 0,
         desc = "Clear Agentic inline artifacts for the current buffer",
+    })
+
+    vim.api.nvim_create_user_command("AgenticProvider", function()
+        Agentic.switch_provider()
+    end, {
+        nargs = 0,
+        desc = "Switch the current Agentic ACP provider",
+    })
+
+    vim.api.nvim_create_user_command("AgenticConfig", function()
+        Agentic.show_config()
+    end, {
+        nargs = 0,
+        desc = "Open Agentic config for the current session or next-session defaults",
+    })
+
+    vim.api.nvim_create_user_command("AgenticMode", function()
+        Agentic.switch_mode()
+    end, {
+        nargs = 0,
+        desc = "Open Agentic mode for the current session or next-session default",
+    })
+
+    vim.api.nvim_create_user_command("AgenticModel", function()
+        Agentic.switch_model()
+    end, {
+        nargs = 0,
+        desc = "Open Agentic model for the current session or next-session default",
+    })
+
+    vim.api.nvim_create_user_command("AgenticReasoning", function()
+        Agentic.switch_reasoning()
+    end, {
+        nargs = 0,
+        desc = "Open Agentic reasoning for the current session or next-session default",
+    })
+
+    vim.api.nvim_create_user_command("AgenticApproval", function()
+        Agentic.switch_approval()
+    end, {
+        nargs = 0,
+        desc = "Open Agentic approval for the current session or next-session default",
+    })
+
+    vim.api.nvim_create_user_command("AgenticPermissions", function()
+        Agentic.switch_approval()
+    end, {
+        nargs = 0,
+        desc = "Open Agentic permissions for the current session or next-session default",
     })
 end
 
@@ -455,8 +741,14 @@ end
 --- @field provider? agentic.UserConfig.ProviderName
 
 --- @param provider_name agentic.UserConfig.ProviderName
-local function apply_provider_switch(provider_name)
+--- @param target_session agentic.SessionManager|nil
+local function apply_provider_switch(provider_name, target_session)
     Config.provider = provider_name
+    if target_session then
+        target_session:switch_provider()
+        return
+    end
+
     SessionRegistry.get_current_session(function(session)
         session:switch_provider()
     end)
@@ -466,16 +758,48 @@ end
 --- If opts.provider is set, switches directly. Otherwise shows a picker.
 --- @param opts agentic.ui.SwitchProviderOpts|nil
 function Agentic.switch_provider(opts)
+    local current_session = SessionRegistry.get_current_session()
+
     if opts and opts.provider then
-        apply_provider_switch(opts.provider)
+        apply_provider_switch(opts.provider, current_session)
         return
     end
 
     SessionRegistry.select_provider(function(provider_name)
         if provider_name then
-            apply_provider_switch(provider_name)
+            apply_provider_switch(provider_name, current_session)
         end
     end)
+end
+
+--- Show the generic ACP session config selector for the current Agentic session.
+--- @return boolean shown
+function Agentic.show_config()
+    return show_session_config_service("show_config_selector")
+end
+
+--- Show the mode selector for the current Agentic session.
+--- @return boolean shown
+function Agentic.switch_mode()
+    return show_session_config_service("show_mode_selector")
+end
+
+--- Show the model selector for the current Agentic session.
+--- @return boolean shown
+function Agentic.switch_model()
+    return show_session_config_service("show_model_selector")
+end
+
+--- Show the reasoning effort selector for the current Agentic session.
+--- @return boolean shown
+function Agentic.switch_reasoning()
+    return show_session_config_service("show_thought_level_selector")
+end
+
+--- Show the approval preset selector for the current Agentic session.
+--- @return boolean shown
+function Agentic.switch_approval()
+    return show_session_config_service("show_approval_preset_selector")
 end
 
 --- Stops the agent's current generation or tool execution

@@ -520,3 +520,5 @@
 --- @field max_reconnect_attempts? number Maximum reconnection attempts
 --- @field auth_method? string Authentication method
 --- @field default_mode? string Default mode ID to set on session creation
+--- @field default_model? string Default model ID to set on session creation
+--- @field default_config_options? table<string, string> Default config option values keyed by provider config option ID

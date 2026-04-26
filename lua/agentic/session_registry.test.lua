@@ -359,6 +359,21 @@ describe("agentic.SessionRegistry", function()
             )
         end)
 
+        it(
+            "returns the owning session for a tagged inline prompt buffer",
+            function()
+                local session = SessionRegistry.new_session()
+                local bufnr = vim.api.nvim_create_buf(false, true)
+                created_bufnrs[#created_bufnrs + 1] = bufnr
+                vim.b[bufnr]._agentic_session_instance_id = session.instance_id
+
+                assert.equal(
+                    session,
+                    SessionRegistry.find_session_by_buf(bufnr)
+                )
+            end
+        )
+
         it("returns nil for unrelated buffers", function()
             local bufnr = vim.api.nvim_create_buf(false, true)
             created_bufnrs[#created_bufnrs + 1] = bufnr

@@ -333,6 +333,8 @@ local function ensure_thread_runtime(
             range_extmark_id = range_extmark_id,
             overlay_extmark_id = nil,
             close_timer = nil,
+            sparkle_timer = nil,
+            sparkle_frame = 1,
         }
         runtime = new_runtime
         self._thread_runtimes[runtime_id] = runtime

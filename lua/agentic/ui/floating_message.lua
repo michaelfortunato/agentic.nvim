@@ -10,6 +10,8 @@ local M = {}
 --- @field footer? string Window footer (default: " q or <Esc> to close ")
 --- @field width_ratio? number Window width as ratio of screen width (default: 0.5)
 --- @field filetype? string Buffer filetype (default: "markdown")
+--- @field close_on_buf_leave? boolean Close the float when focus leaves the buffer
+--- @field on_close? fun() Callback after the window closes
 
 --- Show a floating window with markdown content
 --- @param opts agentic.ui.FloatingMessage.ShowOpts
@@ -49,24 +51,51 @@ function M.show(opts)
     vim.wo[win].wrap = true
     vim.wo[win].linebreak = true
 
+    local did_close = false
+    local function handle_close()
+        if did_close then
+            return
+        end
+
+        did_close = true
+        if opts.on_close then
+            vim.schedule(opts.on_close)
+        end
+    end
+
+    local function close_window()
+        if vim.api.nvim_win_is_valid(win) then
+            vim.api.nvim_win_close(win, true)
+            return
+        end
+
+        handle_close()
+    end
+
     BufHelpers.keymap_set(buf, "n", "q", function()
-        vim.cmd.close()
+        close_window()
     end)
     BufHelpers.keymap_set(buf, "n", "<Esc>", function()
-        vim.cmd.close()
+        close_window()
     end)
 
-    vim.api.nvim_create_autocmd("BufLeave", {
-        buffer = buf,
+    vim.api.nvim_create_autocmd("WinClosed", {
+        pattern = tostring(win),
         once = true,
-        callback = function()
-            vim.schedule(function()
-                if vim.api.nvim_win_is_valid(win) then
-                    vim.api.nvim_win_close(win, true)
-                end
-            end)
-        end,
+        callback = handle_close,
     })
+
+    if opts.close_on_buf_leave ~= false then
+        vim.api.nvim_create_autocmd("BufLeave", {
+            buffer = buf,
+            once = true,
+            callback = function()
+                vim.schedule(function()
+                    close_window()
+                end)
+            end,
+        })
+    end
 end
 
 return M

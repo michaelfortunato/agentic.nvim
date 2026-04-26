@@ -50,6 +50,26 @@ describe("agentic.session.SessionLifecycle", function()
         }
     end
 
+    local function make_reasoning_option(current_value, values)
+        local select_values = {}
+        for _, value in ipairs(values) do
+            select_values[#select_values + 1] = {
+                value = value,
+                name = value,
+                description = value,
+            }
+        end
+
+        return {
+            id = "reasoning_effort",
+            category = "thought_level",
+            currentValue = current_value,
+            description = "Reasoning Effort",
+            name = "Reasoning Effort",
+            options = select_values,
+        }
+    end
+
     local function make_session_state(config_options)
         return SessionState:new({
             persisted_session = {
@@ -212,6 +232,7 @@ describe("agentic.session.SessionLifecycle", function()
         "restores non-mode config options without suppressing default mode",
         function()
             local set_initial_mode_spy = spy.new(function() end)
+            local set_initial_model_spy = spy.new(function() end)
             local set_config_option_spy = spy.new(
                 function(_agent, _session_id, _config_id, _value, callback)
                     callback({}, nil)
@@ -222,7 +243,10 @@ describe("agentic.session.SessionLifecycle", function()
             local session = {
                 session_id = nil,
                 agent = {
-                    provider_config = { default_mode = "full-access" },
+                    provider_config = {
+                        default_mode = "full-access",
+                        default_model = "gpt-5.4",
+                    },
                     create_session = function(_self, _handlers, callback)
                         callback({
                             sessionId = "session-3",
@@ -248,6 +272,7 @@ describe("agentic.session.SessionLifecycle", function()
                 }),
                 config_options = {
                     set_initial_mode = set_initial_mode_spy,
+                    set_initial_model = set_initial_model_spy,
                     get_config_option = function()
                         return nil
                     end,
@@ -266,6 +291,162 @@ describe("agentic.session.SessionLifecycle", function()
             assert.equal("gpt-5.5", set_config_option_spy.calls[1][4])
             assert.spy(set_initial_mode_spy).was.called(1)
             assert.equal("full-access", set_initial_mode_spy.calls[1][2])
+            assert.spy(set_initial_model_spy).was.called(0)
+            assert.spy(on_created_spy).was.called(1)
+        end
+    )
+
+    it(
+        "sets configured default model when no persisted model is restored",
+        function()
+            local set_initial_mode_spy = spy.new(function() end)
+            local set_initial_model_spy = spy.new(function() end)
+            local set_config_option_spy = spy.new(function() end)
+            local on_created_spy = spy.new(function() end)
+
+            local session = {
+                session_id = nil,
+                agent = {
+                    provider_config = { default_model = "gpt-5.4" },
+                    create_session = function(_self, _handlers, callback)
+                        callback({
+                            sessionId = "session-4",
+                            configOptions = {
+                                make_model_option("gpt-5.5", {
+                                    "gpt-5.4",
+                                    "gpt-5.5",
+                                }),
+                            },
+                        }, nil)
+                    end,
+                    set_config_option = set_config_option_spy,
+                },
+                session_state = make_session_state(),
+                config_options = {
+                    set_initial_mode = set_initial_mode_spy,
+                    set_initial_model = set_initial_model_spy,
+                },
+                _handle_new_config_options = function() end,
+                _render_window_headers = function() end,
+            } --[[@as agentic.SessionManager]]
+
+            SessionLifecycle.start(session, {
+                restore_mode = true,
+                on_created = on_created_spy,
+            })
+
+            assert.spy(set_config_option_spy).was.called(0)
+            assert.spy(set_initial_mode_spy).was.called(1)
+            assert.is_nil(set_initial_mode_spy.calls[1][2])
+            assert.spy(set_initial_model_spy).was.called(1)
+            assert.equal("gpt-5.4", set_initial_model_spy.calls[1][2])
+            assert.spy(on_created_spy).was.called(1)
+        end
+    )
+
+    it("sets configured default config options on session creation", function()
+        local default_config_options = { reasoning_effort = "xhigh" }
+        local set_initial_config_options_spy = spy.new(function() end)
+        local set_config_option_spy = spy.new(function() end)
+        local on_created_spy = spy.new(function() end)
+        --- @type agentic.acp.AgentConfigOptions
+        local config_options = {
+            set_initial_config_options = set_initial_config_options_spy,
+            _options = {},
+            _options_by_id = {},
+            _set_config_option_callback = function() end,
+        }
+
+        local session = {
+            session_id = nil,
+            agent = {
+                provider_config = {
+                    default_config_options = default_config_options,
+                },
+                create_session = function(_self, _handlers, callback)
+                    callback({
+                        sessionId = "session-5",
+                        configOptions = {
+                            make_reasoning_option("medium", {
+                                "medium",
+                                "xhigh",
+                            }),
+                        },
+                    }, nil)
+                end,
+                set_config_option = set_config_option_spy,
+            },
+            session_state = make_session_state(),
+            config_options = config_options,
+            _handle_new_config_options = function() end,
+            _render_window_headers = function() end,
+        } --[[@as agentic.SessionManager]]
+
+        SessionLifecycle.start(session, {
+            restore_mode = true,
+            on_created = on_created_spy,
+        })
+
+        assert.spy(set_config_option_spy).was.called(0)
+        assert.spy(set_initial_config_options_spy).was.called(1)
+        assert.equal(config_options, set_initial_config_options_spy.calls[1][1])
+        assert.equal(
+            default_config_options,
+            set_initial_config_options_spy.calls[1][2]
+        )
+        assert.same({}, set_initial_config_options_spy.calls[1][3])
+        assert.spy(on_created_spy).was.called(1)
+    end)
+
+    it(
+        "does not override restored config options with provider defaults",
+        function()
+            local default_config_options = { reasoning_effort = "medium" }
+            local set_initial_config_options_spy = spy.new(function() end)
+            local set_config_option_spy = spy.new(function() end)
+            local on_created_spy = spy.new(function() end)
+
+            local session = {
+                session_id = nil,
+                agent = {
+                    provider_config = {
+                        default_config_options = default_config_options,
+                    },
+                    create_session = function(_self, _handlers, callback)
+                        callback({
+                            sessionId = "session-6",
+                            configOptions = {
+                                make_reasoning_option("xhigh", {
+                                    "medium",
+                                    "xhigh",
+                                }),
+                            },
+                        }, nil)
+                    end,
+                    set_config_option = set_config_option_spy,
+                },
+                session_state = make_session_state({
+                    make_reasoning_option("xhigh", {
+                        "medium",
+                        "xhigh",
+                    }),
+                }),
+                config_options = {
+                    set_initial_config_options = set_initial_config_options_spy,
+                },
+                _handle_new_config_options = function() end,
+                _render_window_headers = function() end,
+            } --[[@as agentic.SessionManager]]
+
+            SessionLifecycle.start(session, {
+                restore_mode = true,
+                on_created = on_created_spy,
+            })
+
+            assert.spy(set_config_option_spy).was.called(0)
+            assert.spy(set_initial_config_options_spy).was.called(1)
+            local restored_ids = set_initial_config_options_spy.calls[1][3]
+            assert.is_true(restored_ids.reasoning_effort)
             assert.spy(on_created_spy).was.called(1)
         end
     )

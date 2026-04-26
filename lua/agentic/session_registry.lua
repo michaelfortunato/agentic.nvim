@@ -10,6 +10,7 @@ local Chooser = require("agentic.ui.chooser")
 --- - Tab-local: widget inventory is derived from widget bindings, not session identity
 
 local ACTIVE_SESSION_WINDOW_KEY = "_agentic_active_session_instance_id"
+local BUFFER_SESSION_KEY = "_agentic_session_instance_id"
 
 --- @class agentic.SessionRegistry
 --- @field sessions table<integer, agentic.SessionManager|nil> Weak map: instance id -> SessionManager instance
@@ -126,6 +127,16 @@ end
 function SessionRegistry.find_session_by_buf(bufnr)
     if bufnr == nil then
         return nil
+    end
+
+    if vim.api.nvim_buf_is_valid(bufnr) then
+        local instance_id = vim.b[bufnr][BUFFER_SESSION_KEY]
+        if
+            type(instance_id) == "number"
+            and SessionRegistry.sessions[instance_id]
+        then
+            return SessionRegistry.sessions[instance_id]
+        end
     end
 
     for _, session in pairs(SessionRegistry.sessions) do

@@ -2,6 +2,7 @@
 local Config = require("agentic.config")
 local Theme = require("agentic.theme")
 
+local NativeProgress = require("agentic.ui.native_progress")
 local Utils = require("agentic.ui.inline_chat.utils")
 
 local M = {}
@@ -15,6 +16,16 @@ local PROGRESS_PERCENT = {
     completed = 100,
     failed = 100,
 }
+
+local INLINE_SPARKLE_FRAMES = {
+    "✦ ",
+    "✧ ",
+    "✶ ",
+    "✧ ",
+}
+local INLINE_SPARKLE_DELAY_MS = 180
+local PROGRESS_TITLE = "Agentic Inline"
+local PROGRESS_SOURCE = "agentic.nvim.inline"
 
 --- @param self agentic.ui.InlineChat
 --- @param bufnr integer
@@ -87,6 +98,8 @@ local function ensure_thread_runtime(
             range_extmark_id = range_extmark_id,
             overlay_extmark_id = nil,
             close_timer = nil,
+            sparkle_timer = nil,
+            sparkle_frame = 1,
         }
         runtime = new_runtime
         self._thread_runtimes[runtime_id] = runtime
@@ -113,6 +126,51 @@ local function stop_thread_close_timer(_self, runtime)
         runtime.close_timer:close()
     end)
     runtime.close_timer = nil
+end
+
+--- @param _self agentic.ui.InlineChat
+--- @param runtime agentic.ui.InlineChat.ThreadRuntime
+local function stop_thread_animation(_self, runtime)
+    if not runtime.sparkle_timer then
+        return
+    end
+
+    pcall(function()
+        runtime.sparkle_timer:stop()
+    end)
+    pcall(function()
+        runtime.sparkle_timer:close()
+    end)
+    runtime.sparkle_timer = nil
+end
+
+--- @param self agentic.ui.InlineChat
+--- @param runtime_id string
+--- @param runtime agentic.ui.InlineChat.ThreadRuntime
+--- @param turn agentic.ui.InlineChat.ThreadTurn
+local function schedule_thread_animation(self, runtime_id, runtime, turn)
+    if turn.overlay_hidden or Utils.is_terminal_phase(turn.phase) then
+        stop_thread_animation(self, runtime)
+        return
+    end
+
+    if runtime.sparkle_timer then
+        return
+    end
+
+    runtime.sparkle_timer = vim.defer_fn(function()
+        runtime.sparkle_timer = nil
+
+        local current_runtime = self._thread_runtimes[runtime_id]
+        if current_runtime ~= runtime then
+            return
+        end
+
+        runtime.sparkle_frame = (
+            (runtime.sparkle_frame or 1) % #INLINE_SPARKLE_FRAMES
+        ) + 1
+        M.render_thread(self, runtime_id)
+    end, INLINE_SPARKLE_DELAY_MS)
 end
 
 --- @param _self agentic.ui.InlineChat
@@ -222,8 +280,9 @@ end
 --- @param entry agentic.ui.InlineChat.ActiveRequest|agentic.ui.InlineChat.ThreadTurn
 --- @param selection agentic.Selection
 --- @param max_width integer
+--- @param sparkle_frame integer|nil
 --- @return table[]
-function M.build_virtual_lines(self, entry, selection, max_width)
+function M.build_virtual_lines(self, entry, selection, max_width, sparkle_frame)
     local config_context = entry.config_context
     local status_hl = is_tool_notice(entry) and Theme.HL_GROUPS.ACTIVITY_TEXT
         or Theme.get_spinner_hl_group(Utils.phase_to_spinner_state(entry.phase))
@@ -232,11 +291,14 @@ function M.build_virtual_lines(self, entry, selection, max_width)
         or nil
     local latest_response = Utils.latest_line(entry.message_text)
     local latest_tool_detail = Utils.latest_line(entry.tool_detail)
+    local sparkle_text = INLINE_SPARKLE_FRAMES[sparkle_frame or 1]
+        or INLINE_SPARKLE_FRAMES[1]
 
     --- @type table[]
     local lines = {
         {
             faded_segment("  ", Theme.HL_GROUPS.REVIEW_BANNER),
+            faded_segment(sparkle_text, Theme.HL_GROUPS.REVIEW_BANNER_ACCENT),
             faded_segment(
                 "[Agentic Inline] ",
                 Theme.HL_GROUPS.REVIEW_BANNER_ACCENT
@@ -329,27 +391,19 @@ end
 --- @param _self agentic.ui.InlineChat
 --- @param request agentic.ui.InlineChat.ActiveRequest|nil
 function M.dismiss_progress(_self, request)
-    if
-        not request
-        or not request.progress_id
-        or not Config.inline.progress
-        or not Utils.supports_progress_messages()
-    then
+    if not request or not request.progress_id then
         return
     end
 
-    pcall(
-        vim.api.nvim_echo,
-        { { "dismissed", Theme.HL_GROUPS.ACTIVITY_TEXT } },
-        true,
-        {
-            id = request.progress_id,
-            kind = "progress",
-            status = "success",
-            percent = 100,
-            title = "Agentic Inline",
-        }
-    )
+    NativeProgress.update({
+        id = request.progress_id,
+        title = PROGRESS_TITLE,
+        source = PROGRESS_SOURCE,
+        message = "dismissed",
+        status = "success",
+        percent = 100,
+        hl_group = Theme.HL_GROUPS.ACTIVITY_TEXT,
+    })
     request.progress_id = nil
 end
 
@@ -357,40 +411,30 @@ end
 --- @param request agentic.ui.InlineChat.ActiveRequest|nil
 --- @param is_terminal boolean|nil
 function M.update_progress(_self, request, is_terminal)
-    if
-        not request
-        or not Config.inline.progress
-        or not Utils.supports_progress_messages()
-    then
+    if not request then
         return
     end
 
-    local message = request.status_text
-    if request.tool_label and request.phase == "tool" then
-        message = request.tool_label
+    --- @type string
+    local message = request.status_text or "Working"
+    local tool_label = request.tool_label or ""
+    if tool_label ~= "" and request.phase == "tool" then
+        message = tool_label
     end
 
-    local ok, progress_id = pcall(
-        vim.api.nvim_echo,
-        {
-            { message, Theme.HL_GROUPS.ACTIVITY_TEXT },
-        },
-        true,
-        {
-            id = request.progress_id,
-            kind = "progress",
-            status = is_terminal and "success" or "running",
-            percent = PROGRESS_PERCENT[request.phase]
-                or PROGRESS_PERCENT.generating,
-            title = "Agentic Inline",
-        }
-    )
+    local progress_id, ok = NativeProgress.update({
+        id = request.progress_id,
+        title = PROGRESS_TITLE,
+        source = PROGRESS_SOURCE,
+        message = message,
+        status = is_terminal and "success" or "running",
+        percent = PROGRESS_PERCENT[request.phase]
+            or PROGRESS_PERCENT.generating,
+        hl_group = Theme.HL_GROUPS.ACTIVITY_TEXT,
+    })
 
-    if ok and request.progress_id == nil then
-        local numeric_progress_id = tonumber(progress_id)
-        if numeric_progress_id ~= nil then
-            request.progress_id = numeric_progress_id
-        end
+    if ok and request.progress_id == nil and progress_id ~= nil then
+        request.progress_id = progress_id
     end
 end
 
@@ -398,7 +442,13 @@ end
 --- @param runtime_id string
 function M.clear_thread_overlay(self, runtime_id)
     local runtime = self._thread_runtimes[runtime_id]
-    if not runtime or not runtime.overlay_extmark_id then
+    if not runtime then
+        return
+    end
+
+    stop_thread_animation(self, runtime)
+
+    if not runtime.overlay_extmark_id then
         return
     end
 
@@ -423,6 +473,7 @@ function M.clear_thread_runtime(self, runtime_id)
     end
 
     stop_thread_close_timer(self, runtime)
+    stop_thread_animation(self, runtime)
     M.clear_thread_overlay(self, runtime_id)
 
     for conversation_id, active_request in pairs(self._active_requests or {}) do
@@ -469,11 +520,13 @@ function M.render_thread(self, runtime_id)
     local turn = thread and thread.turns[#thread.turns] or nil
 
     if not turn then
+        stop_thread_animation(self, runtime)
         M.clear_thread_overlay(self, runtime_id)
         return
     end
 
     if turn.overlay_hidden then
+        stop_thread_animation(self, runtime)
         M.clear_thread_overlay(self, runtime_id)
         return
     end
@@ -481,6 +534,7 @@ function M.render_thread(self, runtime_id)
     local range =
         get_thread_range(self, runtime.source_bufnr, runtime.range_extmark_id)
     if not range or range.invalid then
+        stop_thread_animation(self, runtime)
         M.clear_thread_overlay(self, runtime_id)
         return
     end
@@ -497,7 +551,13 @@ function M.render_thread(self, runtime_id)
     )
     local max_width = M.get_max_width(self, runtime)
 
-    local lines = M.build_virtual_lines(self, turn, selection, max_width)
+    local lines = M.build_virtual_lines(
+        self,
+        turn,
+        selection,
+        max_width,
+        runtime.sparkle_frame
+    )
 
     runtime.overlay_extmark_id = vim.api.nvim_buf_set_extmark(
         runtime.source_bufnr,
@@ -510,6 +570,8 @@ function M.render_thread(self, runtime_id)
             virt_lines_above = false,
         }
     )
+
+    schedule_thread_animation(self, runtime_id, runtime, turn)
 end
 
 --- @param self agentic.ui.InlineChat

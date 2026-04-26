@@ -12,6 +12,7 @@ describe("agentic.ui.InlineChat", function()
     local winid
     --- @type agentic.UserConfig.Inline
     local saved_inline_config
+    local progress_spy
 
     --- @param predicate fun(): boolean
     local function wait_for(predicate)
@@ -63,6 +64,22 @@ describe("agentic.ui.InlineChat", function()
         return overlays
     end
 
+    --- @param lines string[]
+    --- @param suffix string
+    --- @return boolean
+    local function has_inline_header_line(lines, suffix)
+        local marker = "[Agentic Inline] "
+
+        for _, line in ipairs(lines) do
+            local marker_start = line:find(marker, 1, true)
+            if marker_start and line:sub(marker_start + #marker) == suffix then
+                return true
+            end
+        end
+
+        return false
+    end
+
     local function get_thread_extmarks()
         return vim.api.nvim_buf_get_extmarks(
             bufnr,
@@ -91,14 +108,20 @@ describe("agentic.ui.InlineChat", function()
         vim.api.nvim_win_set_buf(winid, bufnr)
 
         saved_inline_config = vim.deepcopy(Config.inline)
-        Config.inline.progress = false
         Config.inline.result_ttl_ms = 0
         Config.inline.max_thought_lines = 4
         Config.inline.show_thoughts = true
+        progress_spy = spy.stub(vim.api, "nvim_echo")
+        progress_spy:returns(101)
     end)
 
     after_each(function()
         Config.inline = saved_inline_config
+
+        if progress_spy then
+            progress_spy:revert()
+            progress_spy = nil
+        end
 
         if vim.api.nvim_buf_is_valid(bufnr) then
             vim.api.nvim_buf_delete(bufnr, { force = true })
@@ -174,6 +197,56 @@ describe("agentic.ui.InlineChat", function()
             Theme.HL_GROUPS.REVIEW_BANNER_ACCENT,
             Theme.HL_GROUPS.INLINE_FADE,
         }, second_segment[2])
+    end)
+
+    it("animates the inline badge while a request is active", function()
+        local inline = InlineChat:new({
+            tab_page_id = vim.api.nvim_get_current_tabpage(),
+            on_submit = function()
+                return true
+            end,
+        })
+
+        inline:begin_request({
+            prompt = "Make this dynamic",
+            selection = {
+                lines = { "local value = 1" },
+                start_line = 1,
+                end_line = 1,
+                file_path = "/tmp/inline_chat_test.lua",
+                file_type = "lua",
+            },
+            source_bufnr = bufnr,
+            source_winid = winid,
+        })
+
+        local first_header = get_rendered_lines()[1]
+        assert.is_true(
+            has_inline_header_line(
+                get_rendered_lines(),
+                "inline_chat_test.lua:1-1 Starting inline request"
+            )
+        )
+
+        assert.is_true(vim.wait(700, function()
+            local header = get_rendered_lines()[1]
+            return header ~= nil
+                and header ~= first_header
+                and header:find("[Agentic Inline]", 1, true) ~= nil
+        end))
+
+        inline:complete({ stopReason = "end_turn" }, nil)
+        local completed_header = get_rendered_lines()[1]
+        assert.is_true(
+            has_inline_header_line(
+                get_rendered_lines(),
+                "inline_chat_test.lua:1-1 Inline request complete"
+            )
+        )
+
+        assert.is_false(vim.wait(350, function()
+            return get_rendered_lines()[1] ~= completed_header
+        end))
     end)
 
     it("renders independent inline conversations in the same buffer", function()
@@ -366,6 +439,33 @@ describe("agentic.ui.InlineChat", function()
         set_current_win_spy:revert()
     end)
 
+    it("tags the prompt buffer with the owning session instance", function()
+        local inline = InlineChat:new({
+            tab_page_id = vim.api.nvim_get_current_tabpage(),
+            instance_id = 42,
+            on_submit = function()
+                return true
+            end,
+        })
+
+        inline:open({
+            lines = { "local value = 1" },
+            start_line = 1,
+            end_line = 1,
+            file_path = "/tmp/inline_chat_test.lua",
+            file_type = "lua",
+        })
+
+        --- @diagnostic disable-next-line: invisible
+        local prompt = inline._prompt
+        assert.is_not_nil(prompt)
+        --- @cast prompt agentic.ui.InlineChat.PromptState
+        assert.equal(
+            42,
+            vim.b[prompt.prompt_bufnr]._agentic_session_instance_id
+        )
+    end)
+
     it("closes the prompt and restores focus without submitting", function()
         local inline = InlineChat:new({
             tab_page_id = vim.api.nvim_get_current_tabpage(),
@@ -394,6 +494,114 @@ describe("agentic.ui.InlineChat", function()
         assert.is_false(vim.api.nvim_win_is_valid(prompt.prompt_winid))
         assert.equal(winid, vim.api.nvim_get_current_win())
         assert.is_false(inline:is_prompt_open())
+    end)
+
+    it(
+        "restores the inline prompt focus and cursor after closing keymap help",
+        function()
+            local inline = InlineChat:new({
+                tab_page_id = vim.api.nvim_get_current_tabpage(),
+                on_submit = function()
+                    return true
+                end,
+            })
+
+            inline:open({
+                lines = { "local value = 1" },
+                start_line = 1,
+                end_line = 1,
+                file_path = "/tmp/inline_chat_test.lua",
+                file_type = "lua",
+            })
+
+            --- @diagnostic disable-next-line: invisible
+            local prompt = inline._prompt
+            assert.is_not_nil(prompt)
+            --- @cast prompt agentic.ui.InlineChat.PromptState
+
+            vim.api.nvim_set_current_win(prompt.prompt_winid)
+            vim.api.nvim_win_set_cursor(prompt.prompt_winid, { 1, 0 })
+            vim.cmd.stopinsert()
+            wait_for(function()
+                return vim.fn.mode():sub(1, 1) == "n"
+            end)
+
+            local help_map = vim.api.nvim_buf_call(
+                prompt.prompt_bufnr,
+                function()
+                    return vim.fn.maparg("?", "n", false, true)
+                end
+            )
+            help_map.callback()
+
+            local help_winid = vim.api.nvim_get_current_win()
+            assert.are_not.equal(prompt.prompt_winid, help_winid)
+
+            local close_map = vim.api.nvim_buf_call(
+                vim.api.nvim_win_get_buf(help_winid),
+                function()
+                    return vim.fn.maparg("q", "n", false, true)
+                end
+            )
+            close_map.callback()
+
+            wait_for(function()
+                return vim.api.nvim_get_current_win() == prompt.prompt_winid
+            end)
+            assert.equal(
+                { 1, 0 },
+                vim.api.nvim_win_get_cursor(prompt.prompt_winid)
+            )
+
+            --- @diagnostic disable-next-line: invisible
+            inline:_close_prompt(true)
+        end
+    )
+
+    it("shows the keymap hint in the footer only in normal mode", function()
+        local inline = InlineChat:new({
+            tab_page_id = vim.api.nvim_get_current_tabpage(),
+            on_submit = function()
+                return true
+            end,
+        })
+
+        inline:open({
+            lines = { "local value = 1" },
+            start_line = 1,
+            end_line = 1,
+            file_path = "/tmp/inline_chat_test.lua",
+            file_type = "lua",
+        })
+
+        --- @diagnostic disable-next-line: invisible
+        local prompt = inline._prompt
+        assert.is_not_nil(prompt)
+        --- @cast prompt agentic.ui.InlineChat.PromptState
+
+        wait_for(function()
+            return vim.fn.mode():sub(1, 1) == "i"
+        end)
+        wait_for(function()
+            local footer = vim.api.nvim_win_get_config(prompt.prompt_winid).footer
+                or {}
+            local footer_text = footer[1] and footer[1][1] or ""
+            return footer_text ~= "" and not footer_text:find("?", 1, true)
+        end)
+
+        vim.cmd.stopinsert()
+        wait_for(function()
+            return vim.fn.mode():sub(1, 1) == "n"
+        end)
+        wait_for(function()
+            local footer = vim.api.nvim_win_get_config(prompt.prompt_winid).footer
+                or {}
+            local footer_text = footer[1] and footer[1][1] or ""
+            return footer_text:find("? keymaps", 1, true) ~= nil
+        end)
+
+        --- @diagnostic disable-next-line: invisible
+        inline:_close_prompt(true)
     end)
 
     it(
@@ -586,10 +794,10 @@ describe("agentic.ui.InlineChat", function()
         })
 
         local lines = get_rendered_lines()
-        assert.truthy(
-            vim.tbl_contains(
+        assert.is_true(
+            has_inline_header_line(
                 lines,
-                "  [Agentic Inline] inline_chat_test.lua:1:7-1:11 Starting inline request"
+                "inline_chat_test.lua:1:7-1:11 Starting inline request"
             )
         )
     end)
@@ -635,10 +843,10 @@ describe("agentic.ui.InlineChat", function()
             end)
 
             local lines = get_rendered_lines()
-            assert.truthy(
-                vim.tbl_contains(
+            assert.is_true(
+                has_inline_header_line(
                     lines,
-                    "  [Agentic Inline] inline_chat_test.lua:1:5-1:5 Starting inline request"
+                    "inline_chat_test.lua:1:5-1:5 Starting inline request"
                 )
             )
         end
@@ -880,10 +1088,10 @@ describe("agentic.ui.InlineChat", function()
         inline:handle_permission_request()
 
         local lines = get_rendered_lines()
-        assert.truthy(
-            vim.tbl_contains(
+        assert.is_true(
+            has_inline_header_line(
                 lines,
-                "  [Agentic Inline] inline_chat_test.lua:1-1 Waiting for approval"
+                "inline_chat_test.lua:1-1 Waiting for approval"
             )
         )
         assert.truthy(vim.tbl_contains(lines, "  Tool: edit replace value"))
@@ -944,10 +1152,10 @@ describe("agentic.ui.InlineChat", function()
 
             assert.is_true(inline:is_active())
             local failed_lines = get_rendered_lines()
-            assert.truthy(
-                vim.tbl_contains(
+            assert.is_true(
+                has_inline_header_line(
                     failed_lines,
-                    "  [Agentic Inline] inline_chat_test.lua:1-1 Tool issue: tool skill-neovim-research"
+                    "inline_chat_test.lua:1-1 Tool issue: tool skill-neovim-research"
                 )
             )
             assert.truthy(
@@ -992,9 +1200,6 @@ describe("agentic.ui.InlineChat", function()
     it(
         "hides the ghost preview after an applied edit and keeps progress live",
         function()
-            Config.inline.progress = true
-
-            local progress_spy = spy.on(vim.api, "nvim_echo")
             local inline = InlineChat:new({
                 tab_page_id = vim.api.nvim_get_current_tabpage(),
                 on_submit = function()
@@ -1045,6 +1250,7 @@ describe("agentic.ui.InlineChat", function()
                     message == "Generating response"
                     and opts
                     and opts.kind == "progress"
+                    and opts.source == "agentic.nvim.inline"
                     and opts.status == "running"
                 then
                     saw_generating_progress = true
@@ -1052,7 +1258,6 @@ describe("agentic.ui.InlineChat", function()
                 end
             end
 
-            progress_spy:revert()
             assert.equal(0, overlay_count_after_apply)
             assert.equal(0, overlay_count_after_refresh)
             assert.equal(0, overlay_count_after_message)
@@ -1221,10 +1426,10 @@ describe("agentic.ui.InlineChat", function()
             assert.equal(2, overlay_extmarks[1][2])
 
             local lines = get_rendered_lines()
-            assert.truthy(
-                vim.tbl_contains(
+            assert.is_true(
+                has_inline_header_line(
                     lines,
-                    "  [Agentic Inline] inline_chat_test.lua:3-3 Starting inline request"
+                    "inline_chat_test.lua:3-3 Starting inline request"
                 )
             )
         end

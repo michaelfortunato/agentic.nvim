@@ -57,6 +57,42 @@ local BLINK_SOURCE_ID = "agentic_files"
 local blink_provider_registered = false
 local blink_filetype_registered = false
 
+--- @param value any
+--- @param fallback string
+--- @return string trigger
+local function single_character_trigger(value, fallback)
+    if type(value) == "string" and #value == 1 and not value:match("%s") then
+        return value
+    end
+
+    return fallback
+end
+
+--- @return string trigger
+local function get_trigger()
+    return single_character_trigger(
+        Config.completion and Config.completion.file_trigger,
+        "@"
+    )
+end
+
+--- @param text string
+--- @return string pattern
+local function escape_pattern(text)
+    return (text:gsub("([^%w])", "%%%1"))
+end
+
+--- @param text string
+--- @return string stripped
+local function strip_trigger(text)
+    local trigger = get_trigger()
+    if vim.startswith(text, trigger) then
+        return text:sub(#trigger + 1)
+    end
+
+    return text
+end
+
 --- @class agentic.ui.FilePicker.Opts
 --- @field resolve_root? fun(): string|nil
 --- @field resolve_cwd? fun(): string|nil
@@ -199,9 +235,9 @@ local function make_file_item(root, abs_path)
 
     --- @type table
     local item = {
-        word = "@" .. relative_path,
+        word = get_trigger() .. relative_path,
         menu = "File",
-        kind = "@",
+        kind = get_trigger(),
         icase = 1,
         _abs_path = abs_path,
         _path_lc = relative_path_lc,
@@ -252,22 +288,24 @@ end
 --- @param cursor_col integer
 --- @return { start_col: integer, query: string }|nil
 local function get_active_mention(line, cursor_col)
+    local trigger = get_trigger()
     local before_cursor = line:sub(1, cursor_col)
-    local at_col = before_cursor:match(".*()@[^%s]*$")
-    if not at_col then
+    local trigger_col =
+        before_cursor:match(".*()" .. escape_pattern(trigger) .. "[^%s]*$")
+    if not trigger_col then
         return nil
     end
 
-    if at_col > 1 then
-        local prefix = before_cursor:sub(at_col - 1, at_col - 1)
+    if trigger_col > 1 then
+        local prefix = before_cursor:sub(trigger_col - 1, trigger_col - 1)
         if not prefix:match("%s") then
             return nil
         end
     end
 
     return {
-        start_col = at_col - 1,
-        query = before_cursor:sub(at_col),
+        start_col = trigger_col - 1,
+        query = before_cursor:sub(trigger_col),
     }
 end
 
@@ -337,7 +375,7 @@ function FilePicker:_show_mention_completion_if_needed(line, cursor_col)
         return
     end
 
-    local blink = self:_get_blink()
+    local blink = self:_ensure_blink_registered()
     if not blink then
         return
     end
@@ -356,7 +394,7 @@ function FilePicker:skip_next_auto_show()
     end)
 end
 
---- Sets up blink-triggered completion for @ file mentions
+--- Sets up blink-triggered completion for file mentions
 --- @param bufnr number
 function FilePicker:_setup_blink_completion(bufnr)
     instances_by_buffer[bufnr] = self
@@ -448,8 +486,11 @@ end
 function FilePicker:resolve_mentioned_file_paths(input_text)
     local file_paths = {}
     local seen = {}
+    local trigger_pattern = escape_pattern(get_trigger())
 
-    for path in (" " .. input_text):gmatch("%s@([^%s]+)") do
+    for path in
+        (" " .. input_text):gmatch("%s" .. trigger_pattern .. "([^%s]+)")
+    do
         local abs_path = self:resolve_path(path)
         local stat = vim.uv.fs_stat(abs_path)
 
@@ -523,7 +564,10 @@ end
 --- @param query string
 --- @return string
 local function normalize_query(query)
-    return vim.trim((query or ""):gsub("^@", "")):lower()
+    return vim.trim(
+        (query or ""):gsub("^" .. escape_pattern(get_trigger()), "")
+    )
+        :lower()
 end
 
 --- @param query string
@@ -557,7 +601,7 @@ function FilePicker:_filter_completion_items(query)
         local search_entries = item._search_entries
             or {
                 {
-                    path_lc = item._path_lc or item.word:sub(2):lower(),
+                    path_lc = item._path_lc or strip_trigger(item.word):lower(),
                     basename_lc = item._basename_lc,
                 },
             }
@@ -639,7 +683,7 @@ function FilePicker:_merge_cached_files_for_roots(roots)
                     elseif root_index < (item._root_priority or math.huge) then
                         local relative_path =
                             to_root_relative_path(root, abs_path)
-                        item.word = "@" .. relative_path
+                        item.word = get_trigger() .. relative_path
                         item._path_lc = relative_path:lower()
                         item._basename_lc = item._path_lc:match("([^/]+)$")
                             or item._path_lc
@@ -982,7 +1026,7 @@ function FilePicker:_get_gitignored_relative_paths(root, files)
 
     local relative_paths = {}
     for _, item in ipairs(files) do
-        relative_paths[#relative_paths + 1] = item.word:sub(2)
+        relative_paths[#relative_paths + 1] = strip_trigger(item.word)
     end
 
     local output = vim.fn.system({
@@ -1047,7 +1091,8 @@ function FilePicker:_scan_files_glob(root)
 
     local gitignored_paths = self:_get_gitignored_relative_paths(root, files)
     for _, item in ipairs(files) do
-        item._gitignored_priority = gitignored_paths[item.word:sub(2)] and 1
+        item._gitignored_priority = gitignored_paths[strip_trigger(item.word)]
+                and 1
             or 0
     end
 
@@ -1063,5 +1108,7 @@ function FilePicker.get_instance(bufnr)
 end
 
 FilePicker.get_active_mention = get_active_mention
+FilePicker.get_trigger = get_trigger
+FilePicker.strip_trigger = strip_trigger
 
 return FilePicker

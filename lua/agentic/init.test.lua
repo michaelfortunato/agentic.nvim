@@ -5,6 +5,9 @@ describe("agentic", function()
     local Agentic
     local SessionRegistry
     local SessionRestore
+    local AgentInstance
+    local Chooser
+    local Config
 
     --- @type TestStub|nil
     local new_signal_stub
@@ -20,6 +23,16 @@ describe("agentic", function()
     local clear_inline_buffer_stub
     --- @type TestStub|nil
     local get_widget_sessions_stub
+    --- @type TestStub|nil
+    local select_provider_stub
+    --- @type TestStub|nil
+    local agent_instance_stub
+    --- @type TestStub|nil
+    local chooser_show_stub
+    --- @type string|nil
+    local saved_provider
+    --- @type agentic.acp.ACPProviderConfig|nil
+    local saved_codex_provider_config
     --- @type integer
     local test_bufnr
 
@@ -35,9 +48,16 @@ describe("agentic", function()
         pcall(vim.api.nvim_del_user_command, "AgenticChat")
         pcall(vim.api.nvim_del_user_command, "AgenticInline")
         pcall(vim.api.nvim_del_user_command, "AgenticInlineClear")
+        pcall(vim.api.nvim_del_user_command, "AgenticProvider")
+        pcall(vim.api.nvim_del_user_command, "AgenticConfig")
+        pcall(vim.api.nvim_del_user_command, "AgenticMode")
+        pcall(vim.api.nvim_del_user_command, "AgenticModel")
+        pcall(vim.api.nvim_del_user_command, "AgenticReasoning")
+        pcall(vim.api.nvim_del_user_command, "AgenticApproval")
+        pcall(vim.api.nvim_del_user_command, "AgenticPermissions")
     end
 
-    --- @param opts {is_open?: boolean, tab_page_id?: integer}|nil
+    --- @param opts {is_open?: boolean, tab_page_id?: integer, config_options?: table|nil}|nil
     local function create_session(opts)
         opts = opts or {}
 
@@ -60,8 +80,10 @@ describe("agentic", function()
 
         return {
             widget = widget,
+            config_options = opts.config_options,
             add_selection_or_file_to_session = spy.new(function() end),
             open_inline_chat = spy.new(function() end),
+            switch_provider = spy.new(function() end),
         }
     end
 
@@ -72,6 +94,9 @@ describe("agentic", function()
         Agentic = require("agentic")
         SessionRegistry = require("agentic.session_registry")
         SessionRestore = require("agentic.session_restore")
+        AgentInstance = require("agentic.acp.agent_instance")
+        Chooser = require("agentic.ui.chooser")
+        Config = require("agentic.config")
 
         new_signal_stub = spy.stub(vim.uv, "new_signal")
         Agentic.setup({})
@@ -87,6 +112,16 @@ describe("agentic", function()
     end)
 
     after_each(function()
+        if saved_provider ~= nil then
+            Config.provider = saved_provider
+            saved_provider = nil
+        end
+
+        if saved_codex_provider_config ~= nil then
+            Config.acp_providers["codex-acp"] = saved_codex_provider_config
+            saved_codex_provider_config = nil
+        end
+
         for key in pairs(SessionRegistry.sessions) do
             SessionRegistry.sessions[key] = nil
         end
@@ -123,6 +158,21 @@ describe("agentic", function()
             get_widget_sessions_stub = nil
         end
 
+        if select_provider_stub then
+            select_provider_stub:revert()
+            select_provider_stub = nil
+        end
+
+        if agent_instance_stub then
+            agent_instance_stub:revert()
+            agent_instance_stub = nil
+        end
+
+        if chooser_show_stub then
+            chooser_show_stub:revert()
+            chooser_show_stub = nil
+        end
+
         if new_signal_stub then
             new_signal_stub:revert()
             new_signal_stub = nil
@@ -134,6 +184,77 @@ describe("agentic", function()
 
         delete_commands()
     end)
+
+    local function use_codex_provider_config(provider_config)
+        saved_provider = Config.provider
+        saved_codex_provider_config =
+            vim.deepcopy(Config.acp_providers["codex-acp"])
+        Config.provider = "codex-acp"
+        Config.acp_providers["codex-acp"] = provider_config
+    end
+
+    local function make_provider_config_response()
+        return {
+            sessionId = "defaults-session",
+            configOptions = {
+                {
+                    id = "model",
+                    category = "model",
+                    currentValue = "gpt-5.4",
+                    description = "Model selection",
+                    name = "Model",
+                    options = {
+                        {
+                            value = "gpt-5.4",
+                            name = "GPT-5.4",
+                            description = "Stable",
+                        },
+                        {
+                            value = "gpt-5.5",
+                            name = "GPT-5.5",
+                            description = "Newer",
+                        },
+                    },
+                },
+                {
+                    id = "reasoning_effort",
+                    category = "thought_level",
+                    currentValue = "medium",
+                    description = "Reasoning Effort",
+                    name = "Reasoning Effort",
+                    options = {
+                        {
+                            value = "medium",
+                            name = "Medium",
+                            description = "Balanced",
+                        },
+                        {
+                            value = "xhigh",
+                            name = "Xhigh",
+                            description = "Max",
+                        },
+                    },
+                },
+            },
+        }
+    end
+
+    local function stub_provider_config_session(response)
+        local fake_client = {
+            create_session = spy.new(function(_self, _handlers, callback)
+                callback(response, nil)
+            end),
+            cancel_session = spy.new(function() end),
+        }
+
+        agent_instance_stub = spy.stub(AgentInstance, "get_instance")
+        agent_instance_stub:invokes(function(_provider_name, on_ready)
+            on_ready(fake_client)
+            return fake_client
+        end)
+
+        return fake_client
+    end
 
     it("toggles the chat closed when no range is provided", function()
         local session = create_session({ is_open = true })
@@ -289,6 +410,209 @@ describe("agentic", function()
             vim.cmd("AgenticInlineClear")
 
             assert.spy(clear_inline_buffer_stub).was.called_with(test_bufnr)
+        end
+    )
+
+    it("routes AgenticProvider through the current session", function()
+        local original_provider = Config.provider
+        local session = create_session()
+
+        current_session_stub = spy.stub(SessionRegistry, "get_current_session")
+        current_session_stub:returns(session)
+        select_provider_stub = spy.stub(SessionRegistry, "select_provider")
+        select_provider_stub:invokes(function(on_selected)
+            on_selected("codex-acp")
+        end)
+
+        vim.cmd("AgenticProvider")
+
+        assert.stub(select_provider_stub).was.called(1)
+        assert.spy(session.switch_provider).was.called(1)
+        assert.equal("codex-acp", Config.provider)
+
+        Config.provider = original_provider
+    end)
+
+    it(
+        "routes Agentic service commands through current config options",
+        function()
+            local service_calls = {
+                config = 0,
+                mode = 0,
+                model = 0,
+                reasoning = 0,
+                approval = 0,
+            }
+            local service_functions = {
+                config = function()
+                    service_calls.config = service_calls.config + 1
+                    return true
+                end,
+                mode = function()
+                    service_calls.mode = service_calls.mode + 1
+                    return true
+                end,
+                model = function()
+                    service_calls.model = service_calls.model + 1
+                    return true
+                end,
+                reasoning = function()
+                    service_calls.reasoning = service_calls.reasoning + 1
+                    return true
+                end,
+                approval = function()
+                    service_calls.approval = service_calls.approval + 1
+                    return true
+                end,
+            }
+            local session = create_session({
+                config_options = {
+                    show_config_selector = service_functions.config,
+                    show_mode_selector = service_functions.mode,
+                    show_model_selector = service_functions.model,
+                    show_thought_level_selector = service_functions.reasoning,
+                    show_approval_preset_selector = service_functions.approval,
+                },
+            })
+
+            current_session_stub =
+                spy.stub(SessionRegistry, "get_current_session")
+            current_session_stub:returns(session)
+
+            vim.cmd("AgenticConfig")
+            vim.cmd("AgenticMode")
+            vim.cmd("AgenticModel")
+            vim.cmd("AgenticReasoning")
+            vim.cmd("AgenticApproval")
+            vim.cmd("AgenticPermissions")
+
+            assert.equal(1, service_calls.config)
+            assert.equal(1, service_calls.mode)
+            assert.equal(1, service_calls.model)
+            assert.equal(1, service_calls.reasoning)
+            assert.equal(2, service_calls.approval)
+        end
+    )
+
+    it(
+        "sets the next-session model default when no session is active",
+        function()
+            use_codex_provider_config({
+                name = "Codex ACP",
+                command = "codex-acp",
+                default_model = "gpt-5.4",
+            })
+
+            current_session_stub =
+                spy.stub(SessionRegistry, "get_current_session")
+            current_session_stub:returns(nil)
+
+            local fake_client =
+                stub_provider_config_session(make_provider_config_response())
+
+            chooser_show_stub = spy.stub(Chooser, "show")
+            chooser_show_stub:invokes(function(items, _opts, on_choice)
+                on_choice(items[2])
+            end)
+
+            vim.cmd("AgenticModel")
+
+            assert.equal(
+                "gpt-5.5",
+                Config.acp_providers["codex-acp"].default_model
+            )
+            assert.spy(fake_client.create_session).was.called(1)
+            assert
+                .spy(fake_client.cancel_session).was
+                .called_with(fake_client, "defaults-session")
+        end
+    )
+
+    it(
+        "sets next-session generic config defaults when no session is active",
+        function()
+            use_codex_provider_config({
+                name = "Codex ACP",
+                command = "codex-acp",
+            })
+
+            current_session_stub =
+                spy.stub(SessionRegistry, "get_current_session")
+            current_session_stub:returns(nil)
+
+            stub_provider_config_session(make_provider_config_response())
+
+            chooser_show_stub = spy.stub(Chooser, "show")
+            chooser_show_stub:invokes(function(items, _opts, on_choice)
+                on_choice(items[2])
+            end)
+
+            vim.cmd("AgenticReasoning")
+
+            local provider_config = Config.acp_providers["codex-acp"]
+            assert.equal(
+                "xhigh",
+                provider_config.default_config_options.reasoning_effort
+            )
+        end
+    )
+
+    it("shows live config for an active inline session", function()
+        local service_calls = 0
+        local session = create_session({
+            config_options = {
+                show_model_selector = function()
+                    service_calls = service_calls + 1
+                    return true
+                end,
+            },
+        })
+        session._inline_sessions = {
+            ["conversation-1"] = {
+                session_id = "inline-session",
+            },
+        }
+        session._with_active_session = spy.new(function(_self, callback)
+            callback()
+        end)
+
+        current_session_stub = spy.stub(SessionRegistry, "get_current_session")
+        current_session_stub:returns(session)
+        agent_instance_stub = spy.stub(AgentInstance, "get_instance")
+
+        vim.cmd("AgenticModel")
+
+        assert.equal(1, service_calls)
+        assert.spy(session._with_active_session).was.called(0)
+        assert.stub(agent_instance_stub).was.called(0)
+    end)
+
+    it(
+        "starts the current session before showing live config options",
+        function()
+            local service_calls = 0
+            local session = create_session({
+                config_options = {
+                    show_model_selector = function()
+                        service_calls = service_calls + 1
+                        return true
+                    end,
+                },
+            })
+            session._with_active_session = spy.new(function(_self, callback)
+                callback()
+            end)
+
+            current_session_stub =
+                spy.stub(SessionRegistry, "get_current_session")
+            current_session_stub:returns(session)
+            agent_instance_stub = spy.stub(AgentInstance, "get_instance")
+
+            vim.cmd("AgenticModel")
+
+            assert.spy(session._with_active_session).was.called(1)
+            assert.equal(1, service_calls)
+            assert.stub(agent_instance_stub).was.called(0)
         end
     )
 

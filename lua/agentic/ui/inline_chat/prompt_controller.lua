@@ -106,6 +106,23 @@ function M.is_prompt_open(self)
         and vim.api.nvim_win_is_valid(self._prompt.prompt_winid)
 end
 
+--- @param prompt agentic.ui.InlineChat.PromptState
+--- @param mode string|nil
+local function refresh_prompt_footer(prompt, mode)
+    if
+        not prompt.prompt_winid
+        or not vim.api.nvim_win_is_valid(prompt.prompt_winid)
+    then
+        return
+    end
+
+    local footer = M.build_prompt_footer(mode)
+    vim.api.nvim_win_set_config(prompt.prompt_winid, {
+        footer = footer ~= "" and footer or nil,
+        footer_pos = "right",
+    })
+end
+
 --- @param self agentic.ui.InlineChat
 --- @param selection agentic.Selection
 --- @param opts {conversation_id?: string|nil, close_cancels_conversation?: boolean|nil, source_bufnr?: integer|nil, source_winid?: integer|nil}|nil
@@ -128,7 +145,7 @@ function M.open(self, selection, opts)
     local win_width = vim.api.nvim_win_get_width(source_winid)
     local width = math.min(prompt_width, math.max(24, win_width - 6))
     local height = get_prompt_min_height()
-    local footer = M.build_prompt_footer()
+    local footer = M.build_prompt_footer(vim.fn.mode())
 
     vim.bo[prompt_bufnr].buftype = "nofile"
     vim.bo[prompt_bufnr].bufhidden = "wipe"
@@ -136,6 +153,7 @@ function M.open(self, selection, opts)
     vim.bo[prompt_bufnr].swapfile = false
     vim.bo[prompt_bufnr].modifiable = true
     vim.bo[prompt_bufnr].filetype = "AgenticInput"
+    vim.b[prompt_bufnr]._agentic_session_instance_id = self.instance_id
 
     vim.api.nvim_buf_set_lines(prompt_bufnr, 0, -1, false, { "" })
 
@@ -182,6 +200,7 @@ function M.open(self, selection, opts)
     M.bind_autocmds(self)
     refresh_prompt_height(self._prompt)
     vim.cmd("startinsert")
+    refresh_prompt_footer(self._prompt, vim.fn.mode())
     return true
 end
 
@@ -282,6 +301,31 @@ function M.bind_autocmds(self)
             refresh_prompt_height(current_prompt)
         end,
     })
+
+    vim.api.nvim_create_autocmd("ModeChanged", {
+        buffer = prompt.prompt_bufnr,
+        callback = function()
+            local current_prompt = self._prompt
+            if
+                not current_prompt
+                or current_prompt.prompt_bufnr ~= prompt.prompt_bufnr
+            then
+                return
+            end
+
+            vim.schedule(function()
+                local active_prompt = self._prompt
+                if
+                    not active_prompt
+                    or active_prompt.prompt_bufnr ~= prompt.prompt_bufnr
+                then
+                    return
+                end
+
+                refresh_prompt_footer(active_prompt, vim.fn.mode())
+            end)
+        end,
+    })
 end
 
 --- @param self agentic.ui.InlineChat
@@ -352,17 +396,26 @@ function M.close_prompt(self, restore_focus, opts)
     end
 end
 
+--- @param mode string|nil
 --- @return string
-function M.build_prompt_footer()
+function M.build_prompt_footer(mode)
     local parts = {}
-    local submit_key = BufHelpers.find_keymap(Config.keymaps.prompt.submit, "i")
-        or "<CR>"
+    local current_mode = type(mode) == "string" and mode:sub(1, 1)
+        or vim.fn.mode():sub(1, 1)
+    local submit_key =
+        BufHelpers.find_keymap(Config.keymaps.prompt.submit, current_mode)
+
+    if submit_key == nil and current_mode == "i" then
+        submit_key = "<CR>"
+    end
 
     if submit_key then
         parts[#parts + 1] = submit_key .. " submit"
     end
 
-    parts[#parts + 1] = "? keymaps"
+    if current_mode == "n" then
+        parts[#parts + 1] = "? keymaps"
+    end
 
     return table.concat(parts, "  ")
 end

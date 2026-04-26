@@ -1,4 +1,5 @@
 local ProviderUtils = require("agentic.acp.provider_utils")
+local SlashCommands = require("agentic.acp.slash_commands")
 
 --- @class agentic.acp.CodexLocalCommands
 local CodexLocalCommands = {}
@@ -145,7 +146,7 @@ function CodexLocalCommands.handle_input(session, input_text)
         return false
     end
 
-    local command_name = input_text:match("^/([^%s]+)")
+    local command_name = SlashCommands.get_input_command_name(input_text)
     if
         not command_name
         or not is_available_local_command(session, command_name)

@@ -1,4 +1,4 @@
---- StatusAnimation renders the session activity line in AgenticChat.
+--- StatusAnimation reports AgenticChat activity.
 ---
 --- ## Usage
 --- ```lua
@@ -11,10 +11,12 @@
 ---
 
 local Config = require("agentic.config")
+local NativeProgress = require("agentic.ui.native_progress")
 local Theme = require("agentic.theme")
 
 local NS_ANIMATION = vim.api.nvim_create_namespace("agentic_animation")
 local PROGRESS_TITLE = "Agentic Chat"
+local PROGRESS_SOURCE = "agentic.nvim.chat"
 
 --- @type table<agentic.Theme.SpinnerState, number>
 local PROGRESS_PERCENT = {
@@ -42,11 +44,6 @@ local STATE_LABELS = {
     waiting = "Waiting for approval",
 }
 
---- @return boolean
-local function supports_progress_messages()
-    return vim.fn.has("nvim-0.12") == 1
-end
-
 --- @param state agentic.Theme.SpinnerState
 --- @param detail string|nil
 --- @return string
@@ -68,7 +65,7 @@ end
 --- @field _extmark_id? number Current extmark ID
 --- @field _attached boolean
 --- @field _render_scheduled boolean
---- @field _progress_id? number Native progress message id
+--- @field _progress_id? integer|string Native progress message id
 --- @field _progress_reported boolean
 --- @field _use_native_progress boolean
 local StatusAnimation = {}
@@ -88,7 +85,7 @@ function StatusAnimation:new(bufnr)
         _render_scheduled = false,
         _progress_id = nil,
         _progress_reported = false,
-        _use_native_progress = supports_progress_messages(),
+        _use_native_progress = NativeProgress.is_supported(),
     }, StatusAnimation)
 
     if not instance._use_native_progress then
@@ -152,18 +149,15 @@ function StatusAnimation:_dismiss_progress()
         return
     end
 
-    pcall(
-        vim.api.nvim_echo,
-        { { "dismissed", Theme.HL_GROUPS.ACTIVITY_TEXT } },
-        true,
-        {
-            id = self._progress_id,
-            kind = "progress",
-            status = "success",
-            percent = 100,
-            title = PROGRESS_TITLE,
-        }
-    )
+    NativeProgress.update({
+        id = self._progress_id,
+        title = PROGRESS_TITLE,
+        source = PROGRESS_SOURCE,
+        message = "dismissed",
+        status = "success",
+        percent = 100,
+        hl_group = Theme.HL_GROUPS.ACTIVITY_TEXT,
+    })
 
     self._progress_id = nil
     self._progress_reported = false
@@ -174,34 +168,22 @@ function StatusAnimation:_update_progress()
         return
     end
 
-    local ok, progress_id = pcall(
-        vim.api.nvim_echo,
-        {
-            {
-                format_activity_label(self._state, self._detail),
-                Theme.HL_GROUPS.ACTIVITY_TEXT,
-            },
-        },
-        true,
-        {
-            id = self._progress_id,
-            kind = "progress",
-            status = "running",
-            percent = PROGRESS_PERCENT[self._state]
-                or PROGRESS_PERCENT.generating,
-            title = PROGRESS_TITLE,
-        }
-    )
+    local progress_id, ok = NativeProgress.update({
+        id = self._progress_id,
+        title = PROGRESS_TITLE,
+        source = PROGRESS_SOURCE,
+        message = format_activity_label(self._state, self._detail),
+        status = "running",
+        percent = PROGRESS_PERCENT[self._state] or PROGRESS_PERCENT.generating,
+        hl_group = Theme.HL_GROUPS.ACTIVITY_TEXT,
+    })
 
     if ok then
         self._progress_reported = true
     end
 
-    if ok and self._progress_id == nil then
-        local numeric_progress_id = tonumber(progress_id)
-        if numeric_progress_id ~= nil then
-            self._progress_id = numeric_progress_id
-        end
+    if ok and self._progress_id == nil and progress_id ~= nil then
+        self._progress_id = progress_id
     end
 end
 

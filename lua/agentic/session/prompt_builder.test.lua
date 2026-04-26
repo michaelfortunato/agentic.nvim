@@ -56,6 +56,11 @@ describe("agentic.session.PromptBuilder", function()
             PromptBuilder.build_inline_instructions(),
             submission.prompt[2].text
         )
+        assert.truthy(
+            submission.prompt[2].text:match(
+                "answer by adding a language%-appropriate inline or block comment"
+            )
+        )
         assert.truthy(submission.prompt[3].text:match("IMPORTANT: Focus"))
         assert.truthy(submission.prompt[4].text:match("<selected_code>"))
         assert.truthy(submission.prompt[4].text:match("/tmp/example.lua"))

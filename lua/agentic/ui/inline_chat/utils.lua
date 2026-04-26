@@ -30,11 +30,6 @@ function M.is_terminal_phase(phase)
     return phase == "completed" or phase == "failed"
 end
 
---- @return boolean
-function M.supports_progress_messages()
-    return vim.fn.has("nvim-0.12") == 1
-end
-
 --- @param text string|nil
 --- @return string
 function M.sanitize_text(text)

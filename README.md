@@ -119,9 +119,9 @@ _...and any future ACP-compatible provider._
     once and, if they're working on your Terminal, they will work automatically
     on Agentic.
 - **🧠 Model Switcher** - Switch between available models mid-session
-  (`<localLeader>m` in the chat widget)
+  (`:AgenticModel`)
 - **🔀 Switch Providers** - Switch between ACP providers mid-conversation
-  without losing the current session transcript (`<localLeader>s` in the chat widget)
+  without losing the current session transcript (`:AgenticProvider`)
 - **♻️ Session Restore** - Restore your session and transcript at any time,
   for all providers
 - **📝 Context Control** - Add files and text selections to conversation context
@@ -135,7 +135,7 @@ _...and any future ACP-compatible provider._
   you have multiple agents working simultaneously on different tasks
 - **🎯 Clean UI** - Sidebar interface with markdown rendering and syntax
   highlighting
-- **⌨️ Slash Commands** - Native Neovim completion for ACP slash commands with
+- **⌨️ Slash Commands** - Blink completion for ACP slash commands with
   fuzzy filtering
   - Every slash command your provider has access too will apear when you type
     `/` in the prompt as the first character
@@ -351,6 +351,8 @@ by configuring the `acp_providers` property:
 - `env` (table, optional) - Environment variables to set for the process
 - `default_mode` (string, optional) - Default mode ID to set on session creation
   (e.g., `"bypassPermissions"`, `"plan"`)
+- `default_model` (string, optional) - Default model ID to set on session
+  creation when the provider exposes a model selector
 
 > [!NOTE]  
 > Customizing a provider only requires specifying the fields you want to
@@ -375,9 +377,32 @@ configure it per provider:
 }
 ```
 
-The mode will only be set if it's available from the provider. Agentic no
-longer binds a default key for the generic session-config picker; if you want
-one, set `keymaps.widget.change_mode` yourself.
+The mode will only be set if it's available from the provider. Agentic uses Ex
+commands for provider session services by default. If you want local keymaps for
+those selectors, set `keymaps.widget.change_mode`, `keymaps.widget.switch_model`,
+`keymaps.widget.switch_thought_level`, or
+`keymaps.widget.switch_approval_preset` yourself.
+
+#### Setting a Default Agent Model
+
+The built-in Codex provider defaults new sessions to GPT-5.5. You can override
+that, or set a default for any provider that exposes a `model` config option:
+
+```lua
+{
+  "carlos-algms/agentic.nvim",
+  opts = {
+    acp_providers = {
+      ["codex-acp"] = {
+        default_model = "gpt-5.5",
+      },
+    },
+  },
+}
+```
+
+The model is only set when the provider advertises that value, and a restored
+session's persisted model choice takes precedence over the provider default.
 
 ### Window Layout
 
@@ -439,7 +464,7 @@ a table configuration or a custom render function.
     headers = {
       chat = {
         title = "󰻞 My Custom Chat Title",
-        suffix = "<localLeader>m: model",
+        suffix = ":AgenticModel",
       },
       -- ...
     },
@@ -493,6 +518,11 @@ header parts:
 | `:lua require("agentic").stop_generation()`                  | Stop current generation or tool execution (session stays active)  |
 | `:lua require("agentic").restore_session()`                  | Show session picker to restore a previous session and continue    |
 | `:lua require("agentic").switch_provider()`                  | Switch ACP provider mid-session (shows picker, preserves history) |
+| `:lua require("agentic").show_config()`                      | Open the generic session config selector                          |
+| `:lua require("agentic").switch_mode()`                      | Open the provider mode selector                                   |
+| `:lua require("agentic").switch_model()`                     | Open the model selector                                           |
+| `:lua require("agentic").switch_reasoning()`                 | Open the reasoning effort selector                                |
+| `:lua require("agentic").switch_approval()`                  | Open the approval preset selector                                 |
 | `:lua require("agentic").rotate_layout()`                    | Rotate window position through layouts (right → bottom → left)    |
 
 ### Ex Commands
@@ -504,6 +534,17 @@ header parts:
 | `:AgenticChat restore`   | Open the saved-session picker and restore a previous chat                                  |
 | `:AgenticInline`         | Open inline chat for the current visual selection or an explicit command range             |
 | `:AgenticInlineClear`    | Clear Agentic inline ghost text, thread markers, and diff preview state for the buffer     |
+| `:AgenticProvider`       | Switch ACP provider for the current session                                                |
+| `:AgenticConfig`         | Open the generic session config selector                                                   |
+| `:AgenticMode`           | Open the provider mode selector                                                            |
+| `:AgenticModel`          | Open the model selector                                                                    |
+| `:AgenticReasoning`      | Open the reasoning effort selector                                                         |
+| `:AgenticApproval`       | Open the approval preset selector                                                          |
+| `:AgenticPermissions`    | Alias for `:AgenticApproval`                                                               |
+
+Provider config commands apply to the current chat or inline session when one
+is active. If no Agentic session is active in the current context, the selected
+value becomes the provider default for the next session.
 
 `:'<,'>AgenticChat` and `:'<,'>AgenticChat new` use the selected line range to prefill the
 prompt input buffer. This is useful when you want to turn an existing note,
@@ -575,11 +616,8 @@ mapping is also added to regular editable file buffers:
 | `?`              | n     | Show available keymaps for the current Agentic window           |
 | `<CR>`           | n/i   | Submit prompt                                                   |
 | `<C-s>`          | n/v/i | Submit prompt                                                   |
-| `<localLeader>p` | n     | Switch approval preset when the provider exposes it             |
 | `<C-v>`          | i     | Paste image from clipboard (same as Claude-code)                |
 | `<localLeader>s` | n     | Switch ACP provider (preserves current session transcript)      |
-| `<localLeader>m` | n     | Switch model without (preserves current session transcript)     |
-| `<localLeader>e` | n     | Switch reasoning effort when the provider exposes it            |
 | `<localLeader>q` | n     | Open the queued-message manager                                 |
 | `<C-S-k>`        | x     | Open inline chat for the current visual selection               |
 | `q`              | n     | Close chat widget                                               |
@@ -609,9 +647,9 @@ binding explicitly if you want one:
           },
         },
         switch_provider = "<localLeader>s",  -- Switch ACP provider
-        switch_model = "<localLeader>m",     -- Switch model
-        switch_thought_level = "<localLeader>e",
-        switch_approval_preset = "<localLeader>p",
+        switch_model = {},                   -- Unbound by default; see :AgenticModel
+        switch_thought_level = {},           -- Unbound by default; see :AgenticReasoning
+        switch_approval_preset = {},         -- Unbound by default; see :AgenticApproval
         manage_queue = "<localLeader>q",
       },
 
@@ -700,8 +738,9 @@ range to a fresh ACP session for that inline conversation.
 - Accepting or rejecting an inline review clears the ghost text immediately.
   Rejecting also reopens the inline prompt on the same tracked range so you can
   add a follow-up note in a fresh inline turn.
-- On Neovim 0.12+, Agentic also emits native progress messages for inline
-  requests via `nvim_echo(..., { kind = "progress", ... })`.
+- On Neovim 0.12+, Agentic emits native progress messages for chat and inline
+  requests via `nvim_echo(..., { kind = "progress", ... })`, which lets the TUI
+  surface terminal-native progress bars for `Progress` events.
 
 ```lua
 {
@@ -715,7 +754,6 @@ range to a fresh ACP session for that inline conversation.
       max_thought_lines = 6,
       overlay_width = 80,
       result_ttl_ms = 2500,
-      progress = true,
     },
   },
 }
@@ -765,15 +803,28 @@ auto-completion.
 The `/new` command is always available to start a new session, other commands
 are provided by your ACP provider.
 
+The trigger and blink accept command used by prompt submit keys are
+configurable:
+
+```lua
+require("agentic").setup({
+  completion = {
+    slash_trigger = "/",
+    file_trigger = "@",
+    accept = "select_and_accept",
+  },
+})
+```
+
 ### File Picker
 
 You can reference and add files to the context by typing `@` in the Prompt.  
-It will trigger the native Neovim completion menu with a list of all files in
+It will trigger the blink completion menu with a list of all files in
 the current workspace.
 
 - **Automatic scanning**: Uses `rg`, `fd`, `git ls-files`, or lua globs as
   fallback
-- **Fuzzy filtering**: uses Neovim's native completion to filter results as you
+- **Fuzzy filtering**: uses blink to filter results as you
   type
 - **Multiple files**: You can reference multiple files in one prompt:
   `@file1.lua @file2.lua`
@@ -1072,11 +1123,13 @@ setup.
 
 ### Blink.cmp
 
-Agentic registers a native `blink.cmp` source for `@` file mentions inside
-`AgenticInput` automatically. No omnifunc setup is required.
+Agentic registers native `blink.cmp` sources for slash commands and file
+mentions inside `AgenticInput` automatically. No omnifunc setup is required.
 
-Typing `@` in `AgenticInput` will open Agentic's file source even when your
-global Blink setup uses manual completion menus.
+Typing `/` or `@` in `AgenticInput` will open Agentic's sources even when your
+global Blink setup uses manual completion menus. If you change
+`completion.slash_trigger` or `completion.file_trigger`, the blink source
+trigger changes with it.
 
 If you use another completion plugin alongside `blink.cmp`, disable the other
 plugin on `AgenticInput` so the prompt only has one completion menu.

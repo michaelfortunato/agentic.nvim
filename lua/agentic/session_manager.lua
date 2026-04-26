@@ -117,6 +117,7 @@ function SessionManager:new(opts)
 
     self.inline_chat = InlineChat:new({
         tab_page_id = widget_tab_page_id,
+        instance_id = self.instance_id,
         on_submit = function(request)
             return self:_submit_inline_request(request)
         end,

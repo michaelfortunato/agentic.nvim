@@ -20,7 +20,9 @@ local INLINE_REQUEST_INSTRUCTIONS = table.concat({
     "Keep changes tightly scoped to the selected range unless nearby context must also change to make the edit correct.",
     "When the current approval settings allow edits, prefer using ACP file-edit tools directly.",
     "When edits require review, make the smallest precise edit possible so the diff is easy to inspect and approve.",
-    "If no file change is appropriate, answer briefly with the result for the selected code.",
+    "If the user's inline request is a question or asks for explanation, answer by adding a language-appropriate inline or block comment about the selected region near that region.",
+    "Do not answer inline questions as plain chat text unless the selected buffer cannot safely be edited.",
+    "If no file change is appropriate and the request is not a question, answer briefly with the result for the selected code.",
 }, "\n")
 
 --- @return string

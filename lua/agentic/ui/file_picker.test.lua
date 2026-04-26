@@ -404,7 +404,7 @@ describe("FilePicker mention helpers", function()
     it("manually shows the blink source for active @ mentions", function()
         local show_spy = spy.new(function() end)
 
-        picker._get_blink = function()
+        picker._ensure_blink_registered = function()
             return { show = show_spy }
         end
         picker._is_blink_menu_open = function()
@@ -420,7 +420,7 @@ describe("FilePicker mention helpers", function()
     it("does not manually show blink outside an @ mention", function()
         local show_spy = spy.new(function() end)
 
-        picker._get_blink = function()
+        picker._ensure_blink_registered = function()
             return { show = show_spy }
         end
         picker._is_blink_menu_open = function()
@@ -435,7 +435,7 @@ describe("FilePicker mention helpers", function()
     it("skips auto-show once after a completion accept", function()
         local show_spy = spy.new(function() end)
 
-        picker._get_blink = function()
+        picker._ensure_blink_registered = function()
             return { show = show_spy }
         end
         picker._is_blink_menu_open = function()
@@ -579,6 +579,42 @@ describe("Blink file picker source", function()
         assert.equal("@src/main.lua", response.items[1].textEdit.newText)
         assert.equal(7, response.items[1].textEdit.range.start.character)
         assert.is_nil(response.items[1].score_offset)
+    end)
+
+    it("honors a custom file mention trigger", function()
+        local original_file_trigger = Config.completion.file_trigger
+        local ok, err = pcall(function()
+            Config.completion.file_trigger = "#"
+            picker:_store_files(
+                picker:_resolve_scan_root(),
+                picker:_build_file_items(
+                    "src/custom.lua",
+                    picker:_resolve_scan_root()
+                )
+            )
+
+            local response
+            source:get_completions({
+                bufnr = bufnr,
+                line = "review #custom",
+                cursor = { 1, 14 },
+            }, function(items)
+                response = items
+            end)
+
+            assert.same({ "#" }, source:get_trigger_characters())
+            assert.equal("src/custom.lua", response.items[1].label)
+            assert.equal("#src/custom.lua", response.items[1].textEdit.newText)
+            local mention = FilePicker.get_active_mention("review #custom", 14)
+            assert.is_not_nil(mention)
+            if mention then
+                assert.equal("#custom", mention.query)
+            end
+        end)
+        Config.completion.file_trigger = original_file_trigger
+        if not ok then
+            error(err)
+        end
     end)
 
     it("returns no completions outside an @ mention", function()

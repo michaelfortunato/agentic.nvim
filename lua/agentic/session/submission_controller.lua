@@ -3,6 +3,7 @@ local Config = require("agentic.config")
 local Logger = require("agentic.utils.logger")
 local PromptBuilder = require("agentic.session.prompt_builder")
 local SessionEvents = require("agentic.session.session_events")
+local SlashCommands = require("agentic.acp.slash_commands")
 
 --- UI Sync Scopes
 --- - Session-local: submission preparation, queue ordering, request dispatch
@@ -425,7 +426,13 @@ end
 function SubmissionController.handle_input_submit(session, input_text)
     session.todo_list:close_if_all_completed()
 
-    if input_text:match("^/new%s*") then
+    local prompt_bufnr = session.widget
+            and session.widget.buf_nrs
+            and session.widget.buf_nrs.input
+        or nil
+    local command_name = SlashCommands.get_input_command_name(input_text)
+
+    if command_name == "new" then
         session:new_session()
         return
     end
@@ -439,6 +446,10 @@ function SubmissionController.handle_input_submit(session, input_text)
         if handled then
             return
         end
+    end
+
+    if prompt_bufnr then
+        input_text = SlashCommands.normalize_input(prompt_bufnr, input_text)
     end
 
     if not session.session_id then

@@ -139,12 +139,30 @@ function KeymapHelp.show_for_buffer(bufnr, opts)
     end
 
     opts = opts or {}
+    local origin_winid = vim.api.nvim_get_current_win()
+    local origin_cursor = vim.api.nvim_win_is_valid(origin_winid)
+            and vim.api.nvim_win_get_cursor(origin_winid)
+        or nil
 
     FloatingMessage.show({
         body = build_body(bufnr),
         title = opts.title or " Agentic Keymaps ",
         width_ratio = opts.width_ratio or 0.45,
         filetype = "markdown",
+        close_on_buf_leave = false,
+        on_close = function()
+            if not vim.api.nvim_win_is_valid(origin_winid) then
+                return
+            end
+
+            if vim.api.nvim_get_current_win() ~= origin_winid then
+                vim.api.nvim_set_current_win(origin_winid)
+            end
+
+            if origin_cursor then
+                pcall(vim.api.nvim_win_set_cursor, origin_winid, origin_cursor)
+            end
+        end,
     })
 end
 

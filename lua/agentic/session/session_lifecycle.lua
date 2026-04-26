@@ -151,12 +151,14 @@ end
 --- @param announced_options agentic.acp.ConfigOption[]|nil
 --- @return {id: string, value: string}[] changes
 --- @return boolean restores_mode
+--- @return boolean restores_model
+--- @return table<string, boolean> restored_config_ids
 local function get_config_changes(desired_options, announced_options)
     if
         type(desired_options) ~= "table"
         or type(announced_options) ~= "table"
     then
-        return {}, false
+        return {}, false, false, {}
     end
 
     local announced_by_id = {}
@@ -165,6 +167,8 @@ local function get_config_changes(desired_options, announced_options)
     end
 
     local restores_mode = false
+    local restores_model = false
+    local restored_config_ids = {}
     local changes = {}
 
     for _, desired_option in ipairs(desired_options) do
@@ -174,27 +178,34 @@ local function get_config_changes(desired_options, announced_options)
         if
             announced_option
             and desired_value ~= nil
-            and desired_value ~= announced_option.currentValue
             and config_option_supports_value(announced_option, desired_value)
         then
-            changes[#changes + 1] = {
-                id = announced_option.id,
-                value = desired_value,
-            }
+            restored_config_ids[announced_option.id] = true
 
             if announced_option.category == "mode" then
                 restores_mode = true
+            elseif announced_option.category == "model" then
+                restores_model = true
+            end
+
+            if desired_value ~= announced_option.currentValue then
+                changes[#changes + 1] = {
+                    id = announced_option.id,
+                    value = desired_value,
+                }
             end
         end
     end
 
-    return changes, restores_mode
+    return changes, restores_mode, restores_model, restored_config_ids
 end
 
 --- @param session agentic.SessionManager
 --- @param announced_options agentic.acp.ConfigOption[]|nil
 --- @return {id: string, value: string}[] changes
 --- @return boolean restores_mode
+--- @return boolean restores_model
+--- @return table<string, boolean> restored_config_ids
 local function get_restorable_config_changes(session, announced_options)
     local persisted_session = session.session_state
             and session.session_state.get_persisted_session_data
@@ -445,20 +456,39 @@ function SessionLifecycle.start(session, opts)
             end
 
             local function finish_session_setup()
-                if
-                    session.config_options
-                    and session.config_options.set_initial_mode
-                then
-                    local changes, restores_mode =
+                if session.config_options then
+                    local changes, restores_mode, restores_model, restored_ids =
                         get_restorable_config_changes(
                             session,
                             response.configOptions
                         )
+                    local provider_config = session.agent.provider_config
 
-                    local apply_initial_mode = function()
-                        if not restores_mode then
+                    local apply_initial_config = function()
+                        if
+                            not restores_mode
+                            and session.config_options.set_initial_mode
+                        then
                             session.config_options:set_initial_mode(
-                                session.agent.provider_config.default_mode
+                                provider_config.default_mode
+                            )
+                        end
+
+                        if
+                            not restores_model
+                            and session.config_options.set_initial_model
+                        then
+                            session.config_options:set_initial_model(
+                                provider_config.default_model
+                            )
+                        end
+
+                        if
+                            session.config_options.set_initial_config_options
+                        then
+                            session.config_options:set_initial_config_options(
+                                provider_config.default_config_options,
+                                restored_ids
                             )
                         end
                     end
@@ -469,7 +499,7 @@ function SessionLifecycle.start(session, opts)
                             session.session_id,
                             changes,
                             function()
-                                apply_initial_mode()
+                                apply_initial_config()
 
                                 if not restore_mode then
                                     session._is_first_message = true
@@ -485,7 +515,7 @@ function SessionLifecycle.start(session, opts)
                         return
                     end
 
-                    apply_initial_mode()
+                    apply_initial_config()
                 end
 
                 if not restore_mode then

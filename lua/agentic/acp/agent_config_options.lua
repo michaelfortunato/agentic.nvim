@@ -148,6 +148,69 @@ local function append_summary_part(parts, label, value)
     end
 end
 
+--- @param option agentic.acp.ConfigOption|nil
+--- @param target_value string|nil
+--- @param config_name string
+--- @param set_config_option_callback fun(config_id: string, value: string)
+local function set_initial_select_option(
+    option,
+    target_value,
+    config_name,
+    set_config_option_callback
+)
+    if not target_value or target_value == "" then
+        Logger.debug("not setting initial " .. config_name, target_value)
+        return
+    end
+
+    local selected = get_option_value(option, target_value)
+    if selected and option then
+        if target_value ~= option.currentValue then
+            set_config_option_callback(option.id, target_value)
+        end
+        return
+    end
+
+    local current = option and option.currentValue or "unknown"
+    Logger.notify(
+        string.format(
+            "Configured %s ‘%s’ not available. Using provider’s default ‘%s’",
+            config_name,
+            target_value,
+            current
+        ),
+        vim.log.levels.WARN,
+        { title = "Agentic" }
+    )
+end
+
+--- @param keymaps agentic.UserConfig.KeymapValue|nil
+--- @return boolean configured
+local function has_configured_keymap(keymaps)
+    if type(keymaps) == "string" then
+        return keymaps ~= ""
+    end
+
+    return type(keymaps) == "table" and #keymaps > 0
+end
+
+--- @param keymaps agentic.UserConfig.KeymapValue|nil
+--- @param bufnr integer
+--- @param callback fun():any
+--- @param opts vim.keymap.set.Opts
+local function bind_config_keymap(keymaps, bufnr, callback, opts)
+    if not has_configured_keymap(keymaps) then
+        return
+    end
+
+    BufHelpers.multi_keymap_set(
+        keymaps --[[@as agentic.UserConfig.KeymapValue]],
+        bufnr,
+        callback,
+        opts
+    )
+end
+
 --- @param buffers agentic.ui.ChatWidget.BufNrs
 --- @param set_config_option_callback? fun(config_id: string, value: string)
 --- @return agentic.acp.AgentConfigOptions
@@ -165,25 +228,15 @@ function AgentConfigOptions:new(buffers, set_config_option_callback)
     }, self)
 
     for _, bufnr in pairs(buffers) do
-        BufHelpers.multi_keymap_set(
-            Config.keymaps.widget.change_mode,
-            bufnr,
-            function()
-                self:show_config_selector()
-            end,
-            { desc = "Agentic: Session Config" }
-        )
+        bind_config_keymap(Config.keymaps.widget.change_mode, bufnr, function()
+            self:show_config_selector()
+        end, { desc = "Agentic: Session Config" })
 
-        BufHelpers.multi_keymap_set(
-            Config.keymaps.widget.switch_model,
-            bufnr,
-            function()
-                self:show_model_selector()
-            end,
-            { desc = "Agentic: Select Model" }
-        )
+        bind_config_keymap(Config.keymaps.widget.switch_model, bufnr, function()
+            self:show_model_selector()
+        end, { desc = "Agentic: Select Model" })
 
-        BufHelpers.multi_keymap_set(
+        bind_config_keymap(
             Config.keymaps.widget.switch_thought_level,
             bufnr,
             function()
@@ -192,7 +245,7 @@ function AgentConfigOptions:new(buffers, set_config_option_callback)
             { desc = "Agentic: Select Reasoning Effort" }
         )
 
-        BufHelpers.multi_keymap_set(
+        bind_config_keymap(
             Config.keymaps.widget.switch_approval_preset,
             bufnr,
             function()
@@ -245,30 +298,44 @@ end
 
 --- @param target_mode string|nil
 function AgentConfigOptions:set_initial_mode(target_mode)
-    if not target_mode or target_mode == "" then
-        Logger.debug("not setting initial mode", target_mode)
-        return
-    end
-
-    local mode_option = self:get_mode_option()
-    local mode = get_option_value(mode_option, target_mode)
-    if mode and mode_option then
-        if target_mode ~= mode_option.currentValue then
-            self._set_config_option_callback(mode_option.id, target_mode)
-        end
-        return
-    end
-
-    local current = mode_option and mode_option.currentValue or "unknown"
-    Logger.notify(
-        string.format(
-            "Configured default_mode ‘%s’ not available. Using provider’s default ‘%s’",
-            target_mode,
-            current
-        ),
-        vim.log.levels.WARN,
-        { title = "Agentic" }
+    set_initial_select_option(
+        self:get_mode_option(),
+        target_mode,
+        "default_mode",
+        self._set_config_option_callback
     )
+end
+
+--- @param target_model string|nil
+function AgentConfigOptions:set_initial_model(target_model)
+    set_initial_select_option(
+        self:get_model_option(),
+        target_model,
+        "default_model",
+        self._set_config_option_callback
+    )
+end
+
+--- @param default_config_options table<string, string>|nil
+--- @param skip_config_ids table<string, boolean>|nil
+function AgentConfigOptions:set_initial_config_options(
+    default_config_options,
+    skip_config_ids
+)
+    if type(default_config_options) ~= "table" then
+        return
+    end
+
+    for config_id, target_value in pairs(default_config_options) do
+        if not (skip_config_ids and skip_config_ids[config_id]) then
+            set_initial_select_option(
+                self:get_config_option(config_id),
+                target_value,
+                "default_config_options." .. config_id,
+                self._set_config_option_callback
+            )
+        end
+    end
 end
 
 --- @param config_id string

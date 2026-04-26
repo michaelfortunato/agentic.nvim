@@ -522,7 +522,7 @@ function SkillPicker:_show_completion_if_needed(line, cursor_col)
         return
     end
 
-    local blink = self:_get_blink()
+    local blink = self:_ensure_blink_registered()
     if not blink then
         return
     end

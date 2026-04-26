@@ -147,6 +147,47 @@ describe("agentic.ui.ChatWidget", function()
             end)
 
             it(
+                "accepts a visible blink completion instead of submitting",
+                function()
+                    local original_blink = package.loaded["blink.cmp"]
+                    local original_accept = Config.completion.accept
+                    local accept_spy = spy.new(function()
+                        return true
+                    end)
+                    package.loaded["blink.cmp"] = {
+                        is_visible = function()
+                            return true
+                        end,
+                        select_and_accept = accept_spy,
+                    }
+                    Config.completion.accept = "select_and_accept"
+
+                    local ok, err = pcall(function()
+                        local on_submit_spy = spy.new(function() end)
+                        widget.on_submit_input = on_submit_spy --[[@as function]]
+
+                        widget:show({ focus_prompt = true })
+                        fill_buffer(widget, "input", { "/pl" })
+
+                        vim.api.nvim_set_current_win(widget.win_nrs.input)
+                        vim.cmd("startinsert")
+
+                        local mapping = vim.fn.maparg("<CR>", "i", false, true)
+                        mapping.callback()
+
+                        assert.spy(accept_spy).was.called(1)
+                        assert.spy(on_submit_spy).was.called(0)
+                    end)
+
+                    package.loaded["blink.cmp"] = original_blink
+                    Config.completion.accept = original_accept
+                    if not ok then
+                        error(err)
+                    end
+                end
+            )
+
+            it(
                 "does not attach treesitter highlighters to side buffers",
                 function()
                     for _, name in ipairs({
